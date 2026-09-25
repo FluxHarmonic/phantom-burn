@@ -143,7 +143,7 @@
       (when (and (member "--play" args) info (file-exists? (path "play.sexp")))
         (play-mode-start! (game-collision) info (read-file-string (path "play.sexp"))
                           (not (arg-value args "--view" #f)))
-        (game-set-play! (vector play-hold? play-after-tick! play-frame! play-hud! play-press!))
+        (game-set-play! (vector play-hold? play-after-tick! play-frame! play-hud! play-press! play-held!))
         (play-mode-set-dev! (and (member "--dev" args) #t))
         (unless (member "--hud" args) (game-set-hud! 0))))
 

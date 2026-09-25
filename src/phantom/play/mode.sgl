@@ -32,12 +32,15 @@
           (phantom guard sense)
           (phantom guard hearing)
           (phantom guard guard)
-          (phantom guard body))
+          (phantom guard body)
+          (phantom play devices)
+          (phantom deck hud))
 
   (export play-mode-start! play-mode-active? play-mode-core
           play-mode-reset! play-mode-set-on-win!
           play-press! play-mode-set-dev! play-mode-sound-feed
-          play-hold? play-after-tick! play-frame! play-hud!)
+          play-hold? play-after-tick! play-frame! play-hud!
+          play-held! play-mode-devices play-mode-deck)
 
   (begin
 
@@ -116,6 +119,36 @@
 
     (define (say! line) (set! *message* line) (set! *message-t* 2.5))
 
+    ;; --- the deck (P3, the device API §3) -----------------------------------------
+
+    ;; The game's 6th hook, once a frame before the ticks: whether the deck
+    ;; is held (the right mouse button, T, the phone's DECK button).
+    (define *deck-held* #f)
+    (define (play-held! held?) (set! *deck-held* (and *core* (held? 'deck) #t)))
+
+    ;; For the shell: the devices' states and the deck's prompt (§2).
+    (define (play-mode-devices)
+      (if *core* (devices-list (play-devices-state *core*)) '()))
+    (define (play-mode-deck)
+      (if *core*
+          (deck-list (play-deck *core*) (play-devices-state *core*) (play-tier *core*))
+          (list 'staff #f #f 0.0 'ready)))
+
+    (define (command-line cmd)
+      (case cmd
+        ((ring) "THE PHONE IS RINGING") ((print) "THE PRINTER IS RUNNING")
+        ((vent-on) "THE VENT IS ON") ((vent-off) "THE VENT IS OFF")
+        ((blinds-open) "BLINDS OPEN") ((blinds-close) "BLINDS CLOSED")
+        (else #f)))
+
+    ;; Apply what the deck did this tick.
+    (define (apply-deck! r)
+      (when (pair? r)
+        (case (car r)
+          ((run) (let ((line (command-line (caddr r)))) (when line (say! line))))
+          ((deny) (say! "YOUR TIER CANNOT COMMAND THAT"))
+          (else #f))))
+
     ;; Apply what a use did: the panel switches its circuit in the renderer.
     (define (apply-use! r)
       (cond ((null? r) (say! "NOTHING HERE TO USE"))
@@ -135,26 +168,50 @@
     ;;   steps   ((surface gait foot) ...) your steps since the last call,
     ;;           timed by the game ((phantom sound logic)), for sound-step!
     ;;   events  ((kind x y atten muffled?) ...) for sound-event!: badge,
-    ;;           panel-on, panel-off, reader-ok, reader-deny, door-open, caught
+    ;;           panel-on, panel-off, reader-ok, reader-deny, door-open, caught;
+    ;;           P3's deck-hold, deck-confirm, deck-deny, print-done,
+    ;;           blinds-open, blinds-close
+    ;;   sounding (P3) ((id kind x y atten muffled? path-m) ...) every device
+    ;;           sounding this frame (a ringing phone, a running printer, the
+    ;;           vent on): playback loops each while it is listed
     ;; The steps and events are taken: a second call the same frame has none.
     (define *feed-gx* #f) (define *feed-gy* #f)
     (define (play-mode-sound-feed w)
       (if (not *core*)
-          (list (list 0.0 0.0 0.0) '() '() '())
+          (list (list 0.0 0.0 0.0) '() '() '() '())
           (let* ((g (play-guard *core*))
                  (h (play-hearing *core*))
                  (gx (guard-x g)) (gy (guard-y g))
                  (moved (if *feed-gx* (sqrt (+ (* (- gx *feed-gx*) (- gx *feed-gx*)) (* (- gy *feed-gy*) (- gy *feed-gy*)))) 0.0)))
             (set! *feed-gx* gx) (set! *feed-gy* gy)
             (play-guard-path! *core*)
-            (let ((atten (hear-gain h)) (muffled (hear-muffled? h)) (path-m (hear-path-m h)))
+            (let* ((atten (hear-gain h)) (muffled (hear-muffled? h)) (path-m (hear-path-m h))
+                   (guards (list (list gx gy moved (guard-state g) atten muffled path-m))))
               (list (list (walker-x w) (walker-y w) (walker-yaw w))
-                    (list (list gx gy moved (guard-state g) atten muffled path-m))
+                    guards
                     (play-take-steps! *core*)
                     (map (lambda (e)
                            ;; placed events pass through the rooms to you like the guard
                            (list (car e) (cadr e) (caddr e) 1.0 #f))
-                         (play-take-events! *core*)))))))
+                         (play-take-events! *core*))
+                    (sounding w))))))
+
+    ;; The devices sounding now, each with the path from it to you.
+    (define (sounding w)
+      (let* ((data (play-data *core*)) (dv (play-devices-state *core*)) (h (play-hearing *core*))
+             (ds (play-devices data)) (you (play-runner-room *core*)))
+        (let loop ((i (- (vector-length ds) 1)) (acc '()))
+          (if (< i 0)
+              acc
+              (let ((d (vector-ref ds i)) (s (devices-state dv i)))
+                (if (memq s '(ringing running on))
+                    (begin
+                      (hear-path! h (device-room d) (device-x d) (device-y d) you (walker-x w) (walker-y w))
+                      (loop (- i 1)
+                            (cons (list (device-id d) (device-kind d) (device-x d) (device-y d)
+                                        (hear-gain h) (hear-muffled? h) (hear-path-m h))
+                                  acc)))
+                    (loop (- i 1) acc)))))))
 
     ;; The site's title-to-play flow: a thunk called once when the win card
     ;; has been shown (the shell goes back to the title), or #f to start a
@@ -206,6 +263,7 @@
            (set! *use* #f)
            (apply-use! (play-use! *core* w render-circuit-on?)))
          (set! *message-t* (max 0.0 (- *message-t* TICK)))
+         (apply-deck! (play-deck! *core* w *deck-held*))
          (let ((o (if (eq? (play-outcome *core*) 'won)
                       'won
                       (play-tick! *core* w render-circuit-on? (render-night) (render-pools)))))
@@ -233,6 +291,8 @@
 
     (define (play-frame! alpha cam)
       (set! *cam* cam)
+      ;; the devices' LEDs, alarm and blinds, on changes only (the shell's)
+      (when *core* (device-parts-update! (play-mode-devices)))
       (when *core*
         (let* ((g (play-guard *core*))
                (fx (lerp (guard-prev-fx g) (guard-fx g) alpha))
@@ -297,6 +357,8 @@
           (draw-eye! w h ts)
           (draw-guard-caption! w h k ts)
           (draw-objective! w h ts)
+          ;; the deck's prompt, bottom left (the shell's draw)
+          (unless (play-hold?) (deck-hud-draw! w h k (play-mode-deck)))
           (draw-fades! w h ts))))
 
     ;; The eye (design §3): one glyph that opens in five steps with how
