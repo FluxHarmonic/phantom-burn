@@ -1,0 +1,21 @@
+;; props/textures/steel.cells - 16x16 cells per half metre (design section 7), palette colours only.
+;; The same cells as the look test's (export-floor14.py TEX["steel"]).
+(texture steel
+  legend: (("s" "#7380A6") ("." "#8A8FA0") (":" "#6B7085"))
+  cells:
+  ("ssssssssssssssss"
+   "ss.sssssss:sssss"
+   "ssssssssssssssss"
+   "sssss:ssssssss.s"
+   "ssssssssssssssss"
+   "s.ssssssssss:sss"
+   "ssssssssssssssss"
+   "ssssssss.sssssss"
+   "ssssssssssssssss"
+   "sss:sssssssss.ss"
+   "ssssssssssssssss"
+   "ssssss.sssss:sss"
+   "ssssssssssssssss"
+   "s:ssssssss.sssss"
+   "ssssssssssssssss"
+   "sssss.sssssss:ss"))

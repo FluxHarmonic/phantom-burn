@@ -1,0 +1,60 @@
+;; props/materials.legend - the words floor and prop files may use for what
+;; things are made of, and the colours they may be.
+;;
+;; palette:    every colour a texture cell or a solid material may use: Crash's
+;;             palette with its dark and warm ramps (51 colours, D27; the
+;;             attachment look-palette-ramped-embers.png). The post pass
+;;             dithers to the same set.
+;; surfaces:   what a room's floor is (surface: in a floor file). noise: is how
+;;             loud footsteps are on it (design section 3); material: is how it
+;;             looks.
+;; materials:  how a surface or a prop part looks. texture: names a text-cell
+;;             texture in props/textures/; colour: is a solid colour; glass: is
+;;             its opacity (drawn blended, sight passes); emits: #t shows the
+;;             colour at full strength whatever the light.
+;; walls: ceilings: trim: skirting: frames: rails: panels:
+;;             the materials the compiler's detail rules use.
+(legend
+  palette: ("#0D0A1A" "#17122E" "#1A3840" "#1A73D9" "#1A8C4D" "#1F3A4D" "#21173D" "#241104"
+            "#261804" "#2A2D3A" "#2A7270" "#2E1C4D" "#2E1D48" "#333648" "#3AACA0" "#3B1F1A"
+            "#3D1A40" "#3D1D07" "#3D281A" "#3D4052" "#402807" "#4A5A2B" "#4DF2D9" "#583681"
+            "#5C4D8C" "#636D81" "#6B7085" "#7380A6" "#74391A" "#7A2E70" "#7A4D1A" "#814EBA"
+            "#8A8FA0" "#8C40B3" "#93A4BA" "#9E5761" "#AD541A" "#B36BFF" "#B641A0" "#B6721A"
+            "#B89E5C" "#CC3340" "#CCE6FF" "#DBE0E6" "#F0F0F0" "#F2731A" "#FAFCFF" "#FF5959"
+            "#FF59D9" "#FF9F1A" "#FFCC33")
+  surfaces:
+  ((carpet  material: carpet    noise: quiet)
+   (tile    material: tile      noise: moderate)
+   (marble  material: marble    noise: loud)
+   (grate   material: grate     noise: ringing)
+   (raised  material: steel     noise: hollow)
+   (duct    material: duct      noise: duct  walls: duct  ceiling: duct))
+  materials:
+  ((carpet   texture: carpet)
+   (tile     texture: tile)
+   (marble   texture: marble)
+   (ceiling  texture: ceiling)
+   (wall     texture: wall)
+   (grate    texture: grate)
+   (laminate texture: laminate)
+   (steel    texture: steel)
+   (duct     texture: steel)
+   (dark     colour: "#0D0A1A")
+   (plastic  colour: "#2A2D3A")
+   (chair    colour: "#21173D")
+   (skirting colour: "#17122E")
+   (pane     colour: "#CCE6FF"  glass: 0.3)
+   (rail     colour: "#DBE0E6"  glass: 0.3)
+   (panel    colour: "#CCE6FF"  emits: #t)
+   (screen   colour: "#4DF2D9"  emits: #t)
+   (led      colour: "#4DF2D9"  emits: #t)
+   (amber    colour: "#FF9F1A"  emits: #t)
+   (lamp     colour: "#F2731A"  emits: #t)
+   (badge    colour: "#4DF2D9"  emits: #t))
+  walls: wall
+  ceilings: ceiling
+  trim: steel
+  skirting: skirting
+  frames: steel
+  rails: rail
+  panels: panel)

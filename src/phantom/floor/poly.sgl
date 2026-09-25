@@ -1,0 +1,296 @@
+;;; (phantom floor poly) - 2D geometry for room outlines: signed area,
+;;; orientation, point in polygon, segment intersection, the simple-polygon
+;;; test (gate 2), ear clipping (with holes, bridged), and clipping a convex
+;;; polygon to a rectangle (for splitting surfaces at half a metre).
+;;;
+;;; A point is a pair (x . y) of flonums; a polygon is a list of points,
+;;; not closed (the last corner joins the first).
+;;;
+;;; Pure: no platform. No syntax-rules (native codegen allocates per call in
+;;; macro-introduced globals: t-46c80f).
+
+(define-library (phantom floor poly)
+  (import (sigil core)
+          (sigil list)
+          (sigil math))
+
+  (export EPS pt px py pt+ pt- pt* pt-dot pt-cross pt-len pt-dist pt-norm pt=?
+          poly-area poly-ccw poly-centroid poly-bbox
+          point-in-poly? point-seg-dist seg-param seg-point-on?
+          seg-cross seg-overlap?
+          poly-simple-problem
+          ear-clip ear-clip-holes
+          clip-convex-rect
+          orient)
+
+  (begin
+    (define EPS 1e-6)
+
+    (define (pt x y) (cons (inexact x) (inexact y)))
+    (define (px p) (car p))
+    (define (py p) (cdr p))
+    (define (pt+ a b) (cons (+ (car a) (car b)) (+ (cdr a) (cdr b))))
+    (define (pt- a b) (cons (- (car a) (car b)) (- (cdr a) (cdr b))))
+    (define (pt* a k) (cons (* (car a) k) (* (cdr a) k)))
+    (define (pt-dot a b) (+ (* (car a) (car b)) (* (cdr a) (cdr b))))
+    (define (pt-cross a b) (- (* (car a) (cdr b)) (* (cdr a) (car b))))
+    (define (pt-len a) (sqrt (pt-dot a a)))
+    (define (pt-dist a b) (pt-len (pt- a b)))
+    (define (pt-norm a) (let ((l (pt-len a))) (if (> l 0.0) (pt* a (/ 1.0 l)) a)))
+    (define (pt=? a b) (< (pt-dist a b) 1e-6))
+
+    ;; Twice... no: the signed area itself, positive for counter-clockwise.
+    (define (poly-area ps)
+      (if (null? ps) 0.0
+          (let loop ((a ps) (acc 0.0))
+            (if (null? a)
+                (* 0.5 acc)
+                (let ((p (car a))
+                      (q (if (null? (cdr a)) (car ps) (cadr a))))
+                  (loop (cdr a) (+ acc (pt-cross p q))))))))
+
+    (define (poly-ccw ps) (if (< (poly-area ps) 0.0) (reverse ps) ps))
+
+    ;; (a b c) orientation: >0 counter-clockwise.
+    (define (orient a b c) (pt-cross (pt- b a) (pt- c a)))
+
+    (define (poly-centroid ps)
+      (let ((n (length ps)))
+        (pt* (fold-left pt+ (cons 0.0 0.0) ps) (/ 1.0 n))))
+
+    ;; (xmin ymin xmax ymax)
+    (define (poly-bbox ps)
+      (let loop ((ps ps) (x0 1e30) (y0 1e30) (x1 -1e30) (y1 -1e30))
+        (if (null? ps) (list x0 y0 x1 y1)
+            (let ((p (car ps)))
+              (loop (cdr ps) (min x0 (px p)) (min y0 (py p)) (max x1 (px p)) (max y1 (py p)))))))
+
+    ;; Even-odd point in polygon. A point on the boundary may go either way:
+    ;; callers that care test with points off the boundary.
+    (define (point-in-poly? p ps)
+      (let ((x (px p)) (y (py p)))
+        (let loop ((a ps) (inside #f))
+          (if (null? a)
+              inside
+              (let* ((u (car a))
+                     (v (if (null? (cdr a)) (car ps) (cadr a)))
+                     (crosses (and (not (eq? (> (py u) y) (> (py v) y)))
+                                   (< x (+ (px u) (/ (* (- (px v) (px u)) (- y (py u)))
+                                                     (- (py v) (py u))))))))
+                (loop (cdr a) (if crosses (not inside) inside)))))))
+
+    ;; The parameter of p's projection on segment a-b (0 at a, 1 at b).
+    (define (seg-param p a b)
+      (let* ((d (pt- b a)) (dd (pt-dot d d)))
+        (if (= dd 0.0) 0.0 (/ (pt-dot (pt- p a) d) dd))))
+
+    (define (point-seg-dist p a b)
+      (let ((t (max 0.0 (min 1.0 (seg-param p a b)))))
+        (pt-dist p (pt+ a (pt* (pt- b a) t)))))
+
+    ;; Is p on segment a-b (within tol)?
+    (define (seg-point-on? p a b tol) (<= (point-seg-dist p a b) tol))
+
+    ;; Proper or touching intersection of segments a-b and c-d that is a single
+    ;; point: returns the point, or #f (parallel segments return #f; see
+    ;; seg-overlap?).
+    (define (seg-cross a b c d)
+      (let* ((r (pt- b a)) (s (pt- d c)) (den (pt-cross r s)))
+        (if (< (abs den) 1e-12)
+            #f
+            (let* ((ca (pt- c a))
+                   (t (/ (pt-cross ca s) den))
+                   (u (/ (pt-cross ca r) den)))
+              (and (>= t -1e-9) (<= t (+ 1.0 1e-9)) (>= u -1e-9) (<= u (+ 1.0 1e-9))
+                   (pt+ a (pt* r t)))))))
+
+    ;; Do collinear segments a-b and c-d overlap along a stretch of positive
+    ;; length?
+    (define (seg-overlap? a b c d)
+      (and (< (abs (orient a b c)) 1e-9) (< (abs (orient a b d)) 1e-9)
+           (let* ((len (pt-dist a b))
+                  (t0 (seg-param c a b)) (t1 (seg-param d a b))
+                  (lo (max 0.0 (min t0 t1))) (hi (min 1.0 (max t0 t1))))
+              (> (* (- hi lo) len) 1e-6))))
+
+    ;; Why a polygon is not simple, as a string, or #f when it is: fewer than
+    ;; three corners, a repeated corner, zero area, or two edges that cross or
+    ;; overlap (an outline that crosses itself).
+    (define (poly-simple-problem ps)
+      (let* ((v (list->vector ps))
+             (n (vector-length v)))
+        (define (edge i) (cons (vector-ref v i) (vector-ref v (modulo (+ i 1) n))))
+        (define (fmt p) (string-append "(" (number->string (px p)) " " (number->string (py p)) ")"))
+        (cond ((< n 3) "has fewer than three corners")
+              ((let dup ((i 0))
+                 (and (< i n)
+                      (or (let inner ((j (+ i 1)))
+                            (and (< j n)
+                                 (or (and (pt=? (vector-ref v i) (vector-ref v j)) (cons i j))
+                                     (inner (+ j 1)))))
+                          (dup (+ i 1)))))
+               => (lambda (ij) (string-append "has the corner " (fmt (vector-ref v (car ij))) " twice")))
+              ((< (abs (poly-area ps)) 1e-6) "has no area")
+              (else
+               (let outer ((i 0))
+                 (if (>= i n) #f
+                     (let inner ((j (+ i 1)))
+                       (if (>= j n) (outer (+ i 1))
+                           (let* ((e (edge i)) (f (edge j))
+                                  (adjacent (or (= j (+ i 1)) (and (= i 0) (= j (- n 1))))))
+                             (cond ((seg-overlap? (car e) (cdr e) (car f) (cdr f))
+                                    (string-append "folds back on itself along " (fmt (car e)) "-" (fmt (cdr e))))
+                                   ((and (not adjacent) (seg-cross (car e) (cdr e) (car f) (cdr f)))
+                                    => (lambda (x) (string-append "crosses itself near " (fmt (cons (round-mm (px x)) (round-mm (py x)))))))
+                                   (else (inner (+ j 1)))))))))))))
+
+    (define (round-mm x) (/ (round (* x 1000.0)) 1000.0))
+
+    ;; --- ear clipping ---------------------------------------------------------
+    ;;
+    ;; (ear-clip ps) -> list of triangles (a b c), each counter-clockwise, for a
+    ;; simple polygon (either orientation). Collinear and repeated corners are
+    ;; dropped first; a corner on an ear's edge does not block it.
+
+    (define (drop-degenerate ps)
+      ;; remove repeated corners and collinear corners until none are left
+      (let loop ((ps ps) (changed #t))
+        (if (or (not changed) (< (length ps) 3))
+            ps
+            (let* ((v (list->vector ps)) (n (vector-length v)))
+              (let scan ((i 0) (acc '()) (changed #f))
+                (if (>= i n)
+                    (loop (reverse acc) changed)
+                    (let ((a (vector-ref v (modulo (- i 1) n)))
+                          (b (vector-ref v i))
+                          (c (vector-ref v (modulo (+ i 1) n))))
+                      (if (or (pt=? a b)
+                              (and (< (abs (orient a b c)) 1e-12)
+                                   (> (pt-dot (pt- b a) (pt- c b)) 0.0)))
+                          ;; drop b; skip the rest of this pass so neighbours are re-read
+                          (loop (append (reverse acc) (vector->list v (+ i 1) n)) #t)
+                          (scan (+ i 1) (cons b acc) changed)))))))))
+
+    (define (in-triangle-strict? p a b c)
+      ;; strictly inside a ccw triangle (on an edge or corner does not count)
+      (and (> (orient a b p) 1e-12) (> (orient b c p) 1e-12) (> (orient c a p) 1e-12)))
+
+    (define (ear-clip ps0)
+      (let* ((ps (drop-degenerate (poly-ccw ps0))))
+        (let loop ((ps ps) (acc '()) (guard 0))
+          (let ((n (length ps)))
+            (cond ((< n 3) (reverse acc))
+                  ((= n 3) (reverse (cons ps acc)))
+                  ((> guard (* 4 n))
+                   ;; no ear found: the outline is not simple; give up rather than loop
+                   (reverse acc))
+                  (else
+                   (let* ((v (list->vector ps)))
+                     (let find ((i 0))
+                       (if (>= i n)
+                           ;; no ear anywhere: the outline is not simple (gate 2
+                           ;; says so); stop rather than loop
+                           (reverse acc)
+                           (let* ((a (vector-ref v (modulo (- i 1) n)))
+                                  (b (vector-ref v i))
+                                  (c (vector-ref v (modulo (+ i 1) n))))
+                             (if (and (> (orient a b c) 1e-12)
+                                      (let clear ((k 0))
+                                        (cond ((>= k n) #t)
+                                              ((or (= k i) (= k (modulo (- i 1) n)) (= k (modulo (+ i 1) n))) (clear (+ k 1)))
+                                              ((in-triangle-strict? (vector-ref v k) a b c) #f)
+                                              (else (clear (+ k 1))))))
+                                 (loop (drop-degenerate (append (vector->list v 0 i) (vector->list v (+ i 1) n)))
+                                       (cons (list a b c) acc)
+                                       0)
+                                 (find (+ i 1)))))))))))))
+
+    ;; A polygon with holes: each hole is joined to the outline by a bridge (a
+    ;; zero-width slit from the hole's rightmost corner to a visible outline
+    ;; corner), then clipped as one polygon. outer counter-clockwise, holes
+    ;; clockwise (both are re-oriented here).
+    (define (ear-clip-holes outer holes)
+      (let loop ((poly (poly-ccw outer))
+                 (holes (list-sort (lambda (h1 h2) (> (hole-max-x h1) (hole-max-x h2)))
+                                   (map (lambda (h) (reverse (poly-ccw h))) holes))))
+        (if (null? holes)
+            (ear-clip poly)
+            (loop (bridge poly (car holes)) (cdr holes)))))
+
+    (define (hole-max-x h) (fold-left max -1e30 (map px h)))
+
+    ;; Join hole h (clockwise) into poly (counter-clockwise) by a bridge from
+    ;; h's rightmost corner to the nearest outline corner the bridge can see.
+    (define (bridge poly h)
+      (let* ((hv (list->vector h))
+             (hn (vector-length hv))
+             (hi (let pick ((i 1) (best 0))
+                   (cond ((>= i hn) best)
+                         ((> (px (vector-ref hv i)) (px (vector-ref hv best))) (pick (+ i 1) i))
+                         (else (pick (+ i 1) best)))))
+             (m (vector-ref hv hi))
+             (pv (list->vector poly))
+             (pn (vector-length pv))
+             (edges (append (ring-edges poly) (ring-edges h)))
+             (visible? (lambda (q)
+                         (not (any (lambda (e)
+                                     (let ((a (car e)) (b (cdr e)))
+                                       (and (not (pt=? a q)) (not (pt=? b q)) (not (pt=? a m)) (not (pt=? b m))
+                                            (seg-cross m q a b))))
+                                   edges))))
+             (candidates (list-sort (lambda (i j) (< (pt-dist m (vector-ref pv i)) (pt-dist m (vector-ref pv j))))
+                                    (iota pn)))
+             (pj (or (find (lambda (j) (visible? (vector-ref pv j))) candidates) (car candidates)))
+             (hole-ring (append (vector->list hv hi hn) (vector->list hv 0 hi)))
+             (q (vector-ref pv pj)))
+        ;; poly[..pj], q, hole from m round to m, m, q, poly[pj+1..]
+        (append (vector->list pv 0 (+ pj 1))
+                hole-ring
+                (list m q)
+                (vector->list pv (+ pj 1) pn))))
+
+    (define (ring-edges ps)
+      (let loop ((a ps) (acc '()))
+        (if (null? a) (reverse acc)
+            (loop (cdr a) (cons (cons (car a) (if (null? (cdr a)) (car ps) (cadr a))) acc)))))
+
+    ;; --- clipping ---------------------------------------------------------------
+    ;;
+    ;; A convex polygon clipped to the rectangle x0..x1, y0..y1 (Sutherland-
+    ;; Hodgman), counter-clockwise in, counter-clockwise out. A crossing point is
+    ;; computed from the edge's endpoints in a fixed order (lower x, then lower
+    ;; y, first), so two triangles sharing an edge put their split points in
+    ;; exactly the same place and the surface has no cracks.
+
+    (define (clip-convex-rect ps x0 y0 x1 y1)
+      (let* ((ps (clip-side ps (lambda (p) (>= (px p) x0)) (lambda (a b) (cross-x a b x0))))
+             (ps (clip-side ps (lambda (p) (<= (px p) x1)) (lambda (a b) (cross-x a b x1))))
+             (ps (clip-side ps (lambda (p) (>= (py p) y0)) (lambda (a b) (cross-y a b y0))))
+             (ps (clip-side ps (lambda (p) (<= (py p) y1)) (lambda (a b) (cross-y a b y1)))))
+        ps))
+
+    (define (canon a b) (if (or (< (px a) (px b)) (and (= (px a) (px b)) (< (py a) (py b)))) (cons a b) (cons b a)))
+
+    (define (cross-x a b x)
+      (let* ((c (canon a b)) (a (car c)) (b (cdr c))
+             (t (/ (- x (px a)) (- (px b) (px a)))))
+        (cons x (+ (py a) (* t (- (py b) (py a)))))))
+
+    (define (cross-y a b y)
+      (let* ((c (canon a b)) (a (car c)) (b (cdr c))
+             (t (/ (- y (py a)) (- (py b) (py a)))))
+        (cons (+ (px a) (* t (- (px b) (px a)))) y)))
+
+    (define (clip-side ps in? cross)
+      (if (null? ps) '()
+          (let loop ((a ps) (acc '()))
+            (if (null? a)
+                (reverse acc)
+                (let* ((p (car a))
+                       (q (if (null? (cdr a)) (car ps) (cadr a)))
+                       (pi (in? p)) (qi (in? q)))
+                  (loop (cdr a)
+                        (cond ((and pi qi) (cons q acc))
+                              ((and pi (not qi)) (cons (cross p q) acc))
+                              ((and (not pi) qi) (cons q (cons (cross p q) acc)))
+                              (else acc))))))))))

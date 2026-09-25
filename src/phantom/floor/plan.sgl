@@ -1,0 +1,270 @@
+;;; (phantom floor plan) - The floor plan as one planar map: every room
+;;; outline (and every hatch's square) overlaid, split where outlines cross
+;;; or touch, so that
+;;;
+;;;   a FACE is a region of the plan that the same set of outlines covers
+;;;     (its COVER, a list of owner ids), with its outline, its holes and a
+;;;     point inside it;
+;;;   an EDGE is a stretch of outline between two corners, with the face on
+;;;     each side (LEFT of its direction u->v, and RIGHT), or -1 for the void
+;;;     outside every outline.
+;;;
+;;; The compiler builds floors and ceilings per face and walls per edge side,
+;;; so where one room sits over another, or two rooms share a wall, falls out
+;;; of the covers rather than special cases.
+;;;
+;;; Corners closer than SNAP (0.1 mm) are one corner. Owner ids are whatever
+;;; the caller gives; the plan only overlays outlines.
+;;;
+;;; Pure: no platform.
+
+(define-library (phantom floor plan)
+  (import (sigil core)
+          (sigil struct)
+          (sigil list)
+          (sigil math)
+          (phantom floor poly))
+
+  (export build-plan
+          plan? plan-points plan-edges plan-faces
+          edge? edge-u edge-v edge-left edge-right edge-a edge-b edge-len edge-dir
+          face? face-index face-ring face-holes face-cover face-sample face-area face-triangles
+          plan-face-at plan-edges-on-segment)
+
+  (begin
+    (define SNAP 1e-4)
+
+    (define-struct plan
+      (points default: #()) (edges default: #()) (faces default: #()))
+
+    ;; u v: point indices. a b: the points. left right: face index or -1.
+    (define-struct edge
+      (u default: 0) (v default: 0) (a default: #f) (b default: #f)
+      (left default: -1) (right default: -1) (len default: 0.0) (dir default: #f))
+
+    (define-struct face
+      (index default: 0) (ring default: '()) (holes default: '())
+      (cover default: '()) (sample default: #f) (area default: 0.0)
+      (triangles default: '()))
+
+    ;; --- the point table ---------------------------------------------------------
+
+    ;; A growable table: #(count vector).
+    (define (make-table) (vector 0 (make-vector 64 #f)))
+
+    (define (table-count t) (vector-ref t 0))
+    (define (table-ref t i) (vector-ref (vector-ref t 1) i))
+
+    (define (table-index! t p)
+      (let ((n (table-count t)) (v (vector-ref t 1)))
+        (let loop ((i 0))
+          (cond ((>= i n)
+                 (when (>= n (vector-length v))
+                   (let ((w (make-vector (* 2 n) #f)))
+                     (vector-copy! w 0 v)
+                     (vector-set! t 1 w)))
+                 (vector-set! (vector-ref t 1) n p)
+                 (vector-set! t 0 (+ n 1))
+                 n)
+                ((< (pt-dist (vector-ref v i) p) SNAP) i)
+                (else (loop (+ i 1)))))))
+
+    ;; --- building it ---------------------------------------------------------------
+
+    ;; polys: list of (owner . polygon). Returns a plan.
+    (define (build-plan polys)
+      (let* ((table (make-table))
+             ;; every outline edge as a pair of point indices
+             (segs (apply append
+                          (map (lambda (op)
+                                 (let* ((ps (poly-ccw (cdr op)))
+                                        (ix (map (lambda (p) (table-index! table p)) ps)))
+                                   (let loop ((a ix) (acc '()))
+                                     (if (null? a) (reverse acc)
+                                         (let ((u (car a)) (v (if (null? (cdr a)) (car ix) (cadr a))))
+                                           (loop (cdr a) (if (= u v) acc (cons (cons u v) acc))))))))
+                               polys)))
+             (segv (list->vector segs))
+             (ns (vector-length segv)))
+        ;; crossings between segments become corners
+        (let outer ((i 0))
+          (when (< i ns)
+            (let inner ((j (+ i 1)))
+              (when (< j ns)
+                (let* ((s (vector-ref segv i)) (r (vector-ref segv j))
+                       (a (table-ref table (car s))) (b (table-ref table (cdr s)))
+                       (c (table-ref table (car r))) (d (table-ref table (cdr r)))
+                       (x (seg-cross a b c d)))
+                  (when x (table-index! table x)))
+                (inner (+ j 1))))
+            (outer (+ i 1))))
+        ;; split every segment at the corners that lie on it, and merge repeats
+        (let* ((np (table-count table))
+               (pts (let ((v (make-vector np #f)))
+                      (let loop ((i 0)) (when (< i np) (vector-set! v i (table-ref table i)) (loop (+ i 1))))
+                      v))
+               (pieces (apply append
+                              (map (lambda (s)
+                                     (let* ((a (vector-ref pts (car s))) (b (vector-ref pts (cdr s)))
+                                            (on (filter (lambda (k)
+                                                          (and (not (= k (car s))) (not (= k (cdr s)))
+                                                               (let ((t (seg-param (vector-ref pts k) a b)))
+                                                                 (and (> t 0.0) (< t 1.0)))
+                                                               (< (point-seg-dist (vector-ref pts k) a b) (* 10 SNAP))))
+                                                        (iota np)))
+                                            (sorted (list-sort (lambda (k l) (< (seg-param (vector-ref pts k) a b)
+                                                                                (seg-param (vector-ref pts l) a b)))
+                                                               on))
+                                            (chain (append (list (car s)) sorted (list (cdr s)))))
+                                       (let loop ((c chain) (acc '()))
+                                         (if (null? (cdr c)) (reverse acc)
+                                             (loop (cdr c) (cons (cons (car c) (cadr c)) acc))))))
+                                   segs)))
+               (unique (let loop ((ps pieces) (acc '()))
+                         (cond ((null? ps) (reverse acc))
+                               ((= (caar ps) (cdar ps)) (loop (cdr ps) acc))
+                               ((any (lambda (q) (or (and (= (car q) (caar ps)) (= (cdr q) (cdar ps)))
+                                                     (and (= (car q) (cdar ps)) (= (cdr q) (caar ps)))))
+                                     acc)
+                                (loop (cdr ps) acc))
+                               (else (loop (cdr ps) (cons (car ps) acc))))))
+               (ev (list->vector unique))
+               (ne (vector-length ev)))
+          (trace-faces pts ev ne polys))))
+
+    ;; Half-edge h: 2e is u->v, 2e+1 is v->u.
+    (define (trace-faces pts ev ne polys)
+      (let* ((nh (* 2 ne))
+             (origin (lambda (h) (let ((e (vector-ref ev (quotient h 2)))) (if (even? h) (car e) (cdr e)))))
+             (dest (lambda (h) (let ((e (vector-ref ev (quotient h 2)))) (if (even? h) (cdr e) (car e)))))
+             (np (vector-length pts))
+             (out (make-vector np '())))
+        ;; outgoing half-edges per corner, by angle
+        (let loop ((h 0))
+          (when (< h nh)
+            (vector-set! out (origin h) (cons h (vector-ref out (origin h))))
+            (loop (+ h 1))))
+        (let loop ((i 0))
+          (when (< i np)
+            (vector-set! out i
+                         (list->vector
+                           (list-sort (lambda (h k) (< (angle-of pts origin dest h) (angle-of pts origin dest k)))
+                                      (vector-ref out i))))
+            (loop (+ i 1))))
+        (let* ((next (lambda (h)
+                       (let* ((v (dest h))
+                              (os (vector-ref out v))
+                              (n (vector-length os))
+                              (tw (if (even? h) (+ h 1) (- h 1)))
+                              (k (let find ((k 0)) (if (= (vector-ref os k) tw) k (find (+ k 1))))))
+                         (vector-ref os (modulo (- k 1) n)))))
+               (cycle-of (make-vector nh -1))
+               (cycles
+                 (let loop ((h 0) (acc '()))
+                   (cond ((>= h nh) (reverse acc))
+                         ((>= (vector-ref cycle-of h) 0) (loop (+ h 1) acc))
+                         (else
+                          (let ((id (length acc)))
+                            (let walk ((g h) (hs '()))
+                              (if (and (>= (vector-ref cycle-of g) 0) (pair? hs))
+                                  (loop (+ h 1) (cons (reverse hs) acc))
+                                  (begin (vector-set! cycle-of g id)
+                                         (walk (next g) (cons g hs))))))))))
+               (rings (map (lambda (hs) (map (lambda (h) (vector-ref pts (origin h))) hs)) cycles))
+               (areas (map poly-area rings))
+               (cyclev (list->vector cycles))
+               (ringv (list->vector rings))
+               (areav (list->vector areas))
+               (nc (vector-length cyclev))
+               ;; bounded faces: positive cycles
+               (pos (filter (lambda (c) (> (vector-ref areav c) 1e-9)) (iota nc)))
+               ;; each negative cycle is the outline of a component: a hole in the
+               ;; smallest positive cycle containing it, or the void
+               (host (lambda (c)
+                       (let* ((ring (vector-ref ringv c))
+                              (probe (car ring))
+                              (hosts (filter (lambda (f)
+                                               (and (point-in-poly? (inside-nudge ring) (vector-ref ringv f))
+                                                    (> (vector-ref areav f) (abs (vector-ref areav c)))))
+                                             pos)))
+                         (if (null? hosts) -1
+                             (fold-left (lambda (best f) (if (< (vector-ref areav f) (vector-ref areav best)) f best))
+                                        (car hosts) hosts)))))
+               (neg-host (map (lambda (c) (cons c (host c)))
+                              (filter (lambda (c) (<= (vector-ref areav c) 1e-9)) (iota nc))))
+               (face-of-cycle (make-vector nc -1)))
+          (let loop ((fs pos) (i 0))
+            (when (pair? fs) (vector-set! face-of-cycle (car fs) i) (loop (cdr fs) (+ i 1))))
+          (for-each (lambda (ch)
+                      (when (>= (cdr ch) 0)
+                        (vector-set! face-of-cycle (car ch) (vector-ref face-of-cycle (cdr ch)))))
+                    neg-host)
+          (let* ((faces (map (lambda (c i)
+                               (let* ((ring (vector-ref ringv c))
+                                      (holes (filter-map (lambda (ch) (and (= (cdr ch) c) (vector-ref ringv (car ch))))
+                                                         neg-host))
+                                      (tris (ear-clip-holes ring holes))
+                                      (big (if (null? tris) #f
+                                               (fold-left (lambda (b t) (if (> (abs (poly-area t)) (abs (poly-area b))) t b))
+                                                          (car tris) tris)))
+                                      (sample (and big (poly-centroid big))))
+                                 (face index: i ring: ring holes: holes
+                                       area: (- (vector-ref areav c) (fold-left + 0.0 (map (lambda (h) (abs (poly-area h))) holes)))
+                                       sample: sample
+                                       triangles: tris
+                                       cover: (if sample
+                                                  (filter-map (lambda (op) (and (point-in-poly? sample (cdr op)) (car op)))
+                                                              polys)
+                                                  '()))))
+                             pos (iota (length pos))))
+                 (edges (map (lambda (e)
+                               (let* ((ev* (vector-ref ev e))
+                                      (a (vector-ref pts (car ev*))) (b (vector-ref pts (cdr ev*))))
+                                 (edge u: (car ev*) v: (cdr ev*) a: a b: b
+                                       left: (vector-ref face-of-cycle (vector-ref cycle-of (* 2 e)))
+                                       right: (vector-ref face-of-cycle (vector-ref cycle-of (+ (* 2 e) 1)))
+                                       len: (pt-dist a b)
+                                       dir: (pt-norm (pt- b a)))))
+                             (iota ne))))
+            (plan points: pts edges: (list->vector edges) faces: (list->vector faces))))))
+
+    ;; A point just inside a negative (clockwise) ring, beside its first edge:
+    ;; for a clockwise ring the inside of the component is on the right.
+    (define (inside-nudge ring)
+      (let* ((a (car ring)) (b (cadr ring))
+             (m (pt* (pt+ a b) 0.5))
+             (d (pt-norm (pt- b a))))
+        ;; the component's inside is to the right of a clockwise ring: (dy, -dx)
+        (pt+ m (pt* (cons (py d) (- (px d))) 1e-3))))
+
+    (define (angle-of pts origin dest h)
+      (let ((a (vector-ref pts (origin h))) (b (vector-ref pts (dest h))))
+        (atan (- (py b) (py a)) (- (px b) (px a)))))
+
+    ;; --- queries -----------------------------------------------------------------------
+
+    ;; The face containing point p, or -1.
+    (define (plan-face-at pl p)
+      (let ((fs (plan-faces pl)))
+        (let loop ((i 0))
+          (cond ((>= i (vector-length fs)) -1)
+                ((let ((f (vector-ref fs i)))
+                   (and (point-in-poly? p (face-ring f))
+                        (not (any (lambda (h) (point-in-poly? p h)) (face-holes f)))))
+                 i)
+                (else (loop (+ i 1)))))))
+
+    ;; The edges lying along segment p-q: on its line (within tol) and
+    ;; overlapping it by more than tol (an edge may be longer than the
+    ;; segment, or shorter), as a list of edge indices.
+    (define (plan-edges-on-segment pl p q tol)
+      (let* ((es (plan-edges pl))
+             (d (pt-norm (pt- q p)))
+             (off (lambda (x) (abs (pt-cross d (pt- x p))))))
+        (filter (lambda (i)
+                  (let* ((e (vector-ref es i)) (a (edge-a e)) (b (edge-b e)))
+                    (and (<= (off a) tol) (<= (off b) tol)
+                         (let* ((ta (seg-param a p q)) (tb (seg-param b p q))
+                                (lo (max 0.0 (min ta tb))) (hi (min 1.0 (max ta tb))))
+                           (> (* (- hi lo) (pt-dist p q)) tol)))))
+                (iota (vector-length es)))))))

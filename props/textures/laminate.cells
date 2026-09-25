@@ -1,0 +1,21 @@
+;; props/textures/laminate.cells - 16x16 cells per half metre (design section 7), palette colours only.
+;; The same cells as the look test's (export-floor14.py TEX["laminate"]).
+(texture laminate
+  legend: (("o" "#B89E5C") ("-" "#9E5761"))
+  cells:
+  ("oooooooooooooooo"
+   "ooo-------oooooo"
+   "oooooooooooooooo"
+   "oooooo--------oo"
+   "oooooooooooooooo"
+   "o-------oooooooo"
+   "oooooooooooooooo"
+   "ooooooooo------o"
+   "oooooooooooooooo"
+   "oo--------oooooo"
+   "oooooooooooooooo"
+   "ooooooo--------o"
+   "oooooooooooooooo"
+   "o------ooooooooo"
+   "oooooooooooooooo"
+   "oooooooo-------o"))

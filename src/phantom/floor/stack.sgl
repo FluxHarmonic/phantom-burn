@@ -1,0 +1,164 @@
+;;; (phantom floor stack) - Heights over the plan: which air each face has,
+;;; and which rooms share air.
+;;;
+;;; OWNERS are what the plan overlays: every room (ids 0..R-1, the room's
+;;; index), then every hatch (R and up), whose square is a short shaft of air
+;;; from the lower room's ceiling to the upper room's floor.
+;;;
+;;; Two ways a room can be over: another (design section 7):
+;;;   OPEN     it declares edge: (a mezzanine). It sits inside the lower
+;;;            room's height, shares its air, and its edges that face the
+;;;            lower room's air are open (with rails). Under it, the lower
+;;;            room's ceiling drops to SLAB below its floor.
+;;;   CLOSED   no edge: (a duct). Its floor is at or above the lower room's
+;;;            ceiling (gate 6); the space between is solid.
+;;;
+;;; LINKED owners share air: a room with itself, rooms joined by open over:
+;;; (one volume, a GROUP), and a hatch with the rooms it joins. Where linked
+;;; owners' air meets across an edge there is no wall; where their intervals
+;;; touch in one face they make one COLUMN of air.
+;;;
+;;; An interval is (owner lo hi).
+;;;
+;;; Pure: no platform.
+
+(define-library (phantom floor stack)
+  (import (sigil core)
+          (sigil struct)
+          (sigil list)
+          (sigil math)
+          (phantom floor format)
+          (phantom floor poly))
+
+  (export SLAB HATCH-SIZE hatch-square hatch-axes
+          owner owner? owner-id owner-kind owner-room owner-poly owner-lower owner-upper owner-opening owner-name
+          make-owners owners-rooms open-over? room-groups linked?
+          face-intervals face-columns iv-owner iv-lo iv-hi)
+
+  (begin
+    (define SLAB 0.25)          ; an open room's floor slab (the mezzanine's: 2.75 to 3.0)
+    (define HATCH-SIZE 0.5)     ; a hatch's square side, when the floor gives no size:
+                                ; the largest that fits the slice's office-and-duct overlap
+                                ; (a 45-degree duct 0.71 m across, over a wall 0.4 m away)
+
+    ;; kind: room | hatch. room: the room record (a room), or #f. lower upper:
+    ;; room indices (a hatch). poly: counter-clockwise.
+    (define-struct owner
+      (id default: 0) (kind default: 'room) (room default: #f) (poly default: '())
+      (lower default: #f) (upper default: #f) (opening default: #f) (name default: #f))
+
+    (define (iv-owner iv) (car iv))
+    (define (iv-lo iv) (cadr iv))
+    (define (iv-hi iv) (caddr iv))
+
+    ;; rooms: the floor's rooms. hatches: ((opening lower-index upper-index) ...).
+    ;; Returns a vector of owners.
+    (define (make-owners rooms hatches)
+      (let* ((rs (map (lambda (r)
+                        (owner id: (room-index r) kind: 'room room: r name: (room-name r)
+                               poly: (poly-ccw (room-corners r))))
+                      rooms))
+             (n (length rooms))
+             (rv (list->vector rooms))
+             (hs (map (lambda (h i)
+                        (let ((o (car h)))
+                          (owner id: (+ n i) kind: 'hatch lower: (cadr h) upper: (caddr h) opening: o
+                                 name: 'hatch
+                                 poly: (hatch-square o (vector-ref rv (caddr h))))))
+                      hatches (iota (length hatches)))))
+        (list->vector (append rs hs))))
+
+    ;; A hatch's axes: unit 2D vectors along and across the upper room's wall
+    ;; nearest the hatch, so a hatch in a diagonal duct lies square to it.
+    (define (hatch-axes o upper)
+      (let* ((c (opening-at o))
+             (ps (room-corners upper))
+             (edges (map (lambda (a i) (cons a (list-ref ps (modulo (+ i 1) (length ps))))) ps (iota (length ps))))
+             (near (fold-left (lambda (best e)
+                                (if (< (point-seg-dist c (car e) (cdr e)) (point-seg-dist c (car best) (cdr best))) e best))
+                              (car edges) edges))
+             (ax (pt-norm (pt- (cdr near) (car near)))))
+        (cons ax (cons (- (py ax)) (px ax)))))
+
+    ;; The hatch's square (counter-clockwise), side (size: or HATCH-SIZE).
+    (define (hatch-square o upper)
+      (let* ((c (opening-at o))
+             (s (* 0.5 (or (opening-size o) HATCH-SIZE)))
+             (axes (hatch-axes o upper))
+             (u (pt* (car axes) s)) (v (pt* (cdr axes) s)))
+        (poly-ccw (list (pt- (pt- c u) v) (pt- (pt+ c u) v) (pt+ (pt+ c u) v) (pt+ (pt- c u) v)))))
+
+    (define (owners-rooms owners)
+      (filter-map (lambda (o) (and (eq? (owner-kind o) 'room) (owner-room o))) (vector->list owners)))
+
+    ;; Is room u open over room l?
+    (define (open-over? u l)
+      (and (room-edge u) (memq (room-name l) (room-over u)) #t))
+
+    ;; A vector: each room's group id (the smallest room index in its group).
+    (define (room-groups rooms)
+      (let* ((n (length rooms))
+             (rv (list->vector rooms))
+             (g (list->vector (iota n))))
+        (define (find i) (if (= (vector-ref g i) i) i (find (vector-ref g i))))
+        (define (union! i j)
+          (let ((a (find i)) (b (find j)))
+            (unless (= a b) (vector-set! g (max a b) (min a b)))))
+        (let loop ((i 0))
+          (when (< i n)
+            (let loop2 ((j 0))
+              (when (< j n)
+                (when (open-over? (vector-ref rv i) (vector-ref rv j)) (union! i j))
+                (loop2 (+ j 1))))
+            (loop (+ i 1))))
+        (list->vector (map find (iota n)))))
+
+    ;; Do owners i and j share air?
+    (define (linked? owners groups i j)
+      (or (= i j)
+          (let ((a (vector-ref owners i)) (b (vector-ref owners j)))
+            (cond ((and (eq? (owner-kind a) 'room) (eq? (owner-kind b) 'room))
+                   (= (vector-ref groups i) (vector-ref groups j)))
+                  ((eq? (owner-kind a) 'hatch)
+                   (or (eqv? (owner-lower a) j) (eqv? (owner-upper a) j)))
+                  ((eq? (owner-kind b) 'hatch)
+                   (or (eqv? (owner-lower b) i) (eqv? (owner-upper b) i)))
+                  (else #f)))))
+
+    ;; The intervals of the owners covering a face, lowest first.
+    (define (face-intervals owners cover)
+      (let ((ivs (map (lambda (id)
+                        (let ((o (vector-ref owners id)))
+                          (if (eq? (owner-kind o) 'hatch)
+                              (list id
+                                    (room-ceiling (owner-room (vector-ref owners (owner-lower o))))
+                                    (room-floor (owner-room (vector-ref owners (owner-upper o)))))
+                              (let* ((r (owner-room o))
+                                     ;; an open room over this one, here, lowers its ceiling
+                                     (tops (filter-map (lambda (jd)
+                                                         (let ((u (vector-ref owners jd)))
+                                                           (and (eq? (owner-kind u) 'room)
+                                                                (open-over? (owner-room u) r)
+                                                                (- (room-floor (owner-room u)) SLAB))))
+                                                       cover)))
+                                (list id (room-floor r) (fold-left min (room-ceiling r) tops))))))
+                      cover)))
+        (list-sort (lambda (a b) (< (iv-lo a) (iv-lo b))) ivs)))
+
+    ;; Columns: runs of intervals, lowest first, where each touches the next and
+    ;; they are linked. Each column is (lo hi bottom-owner top-owner members).
+    (define (face-columns owners groups ivs)
+      (let loop ((ivs ivs) (acc '()))
+        (if (null? ivs)
+            (reverse acc)
+            (let grow ((col (list (car ivs))) (rest (cdr ivs)))
+              (let ((top (car col)))
+                (if (and (pair? rest)
+                         (< (abs (- (iv-lo (car rest)) (iv-hi top))) 1e-6)
+                         (linked? owners groups (iv-owner top) (iv-owner (car rest))))
+                    (grow (cons (car rest) col) (cdr rest))
+                    (let ((members (reverse col)))
+                      (loop rest
+                            (cons (list (iv-lo (car members)) (iv-hi (car col))
+                                        (iv-owner (car members)) (iv-owner (car col)) members)
+                                  acc)))))))))))

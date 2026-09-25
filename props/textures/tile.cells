@@ -1,0 +1,21 @@
+;; props/textures/tile.cells - 16x16 cells per half metre (design section 7), palette colours only.
+;; The same cells as the look test's (export-floor14.py TEX["tile"]).
+(texture tile
+  legend: (("+" "#2A2D3A") ("t" "#3D4052") ("u" "#6B7085"))
+  cells:
+  ("++++++++++++++++"
+   "+ttttttt+ttttttt"
+   "+ttutttt+tttttut"
+   "+ttttttt+ttttttt"
+   "+tttttut+ttutttt"
+   "+ttttttt+ttttttt"
+   "+tuttttt+ttttttt"
+   "+ttttttt+tttttut"
+   "++++++++++++++++"
+   "+ttttttt+ttttttt"
+   "+tttttut+tuttttt"
+   "+ttttttt+ttttttt"
+   "+ttutttt+ttttttt"
+   "+ttttttt+ttttutt"
+   "+ttttttt+ttttttt"
+   "+tttttut+ttttttt"))
