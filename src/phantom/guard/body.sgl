@@ -1,7 +1,9 @@
-;;; (phantom guard body) - How the guard is drawn (t-9e245c): the smooth body
-;;; from models/guard/guard.py, its walk baked as eight whole-body poses and
-;;; blended in the vertex shader ((phantom render)'s render-draw-guard!), no
-;;; skinning (G1 stays held, D33).
+;;; (phantom guard body) - How the guard is drawn (t-9e245c): the robot (D37,
+;;; Gibson's own security unit) from models/guard/guard.py, its walk baked as
+;;; sixteen whole-body poses and blended in the vertex shader ((phantom
+;;; render)'s render-draw-guard!), no skinning (G1 stays held, D33). Standing,
+;;; he scans: the head turns to one side, holds, turns to the other (the
+;;; mesh's last part, look left and look right, each blended from rest).
 ;;;
 ;;; The guard's AI and position are P1's ((phantom play mode)); this module
 ;;; only draws. Its one entry, called inside the render's extra draw:
@@ -11,7 +13,8 @@
 ;;;            (x right, y forward, z up, feet at the origin), as play mode's
 ;;;            pose! makes it
 ;;;     phase  metres walked (guard-phase): one walk cycle, two steps, per
-;;;            CYCLE m. When it stops changing the body eases to standing.
+;;;            CYCLE m. When it stops changing the body eases to standing,
+;;;            and after SCAN-AFTER s standing the head starts its scan.
 ;;;     state  0 calm, 1 suspicious, 2 searching, 3 hunting: the visor's colour
 ;;;     r g b  the light where the guard stands
 ;;;
@@ -29,13 +32,18 @@
           (phantom render))
 
   (export guard-body-draw! guard-pose guard-preview-set! guard-preview-draw!
-          CYCLE POSES VISOR-COLORS)
+          CYCLE POSES SCAN-PART VISOR-COLORS)
 
   (begin
 
     (define CYCLE 1.5)       ; m walked per cycle: play mode's stand-in swung its legs on this period
-    (define POSES 8)
+    (define POSES 16)        ; walk poses: the mesh's parts 0 to 15; part 16 is the head's scan
+    (define SCAN-PART 16)
     (define EASE 0.3)        ; s from walking to standing, and back
+    (define SCAN-AFTER 0.6)  ; s standing before the head scans
+    (define SCAN-IN 0.5)     ; s for the scan to reach its full turn
+    (define SCAN-OUT 0.2)    ; s for the head to come back when he walks off
+    (define SCAN-PERIOD 6.0) ; s for left, hold, right, hold
     (define STILL 0.12)      ; s with the phase unchanged before the guard counts as standing
                              ; (the phase moves on the 60 Hz tick, frames can come faster)
 
@@ -49,6 +57,8 @@
     (define *changed-at* 0.0)
     (define *drawn-at* #f)
     (define *rest* 1.0)      ; 0 walking, 1 standing
+    (define *stood* 0.0)     ; s fully standing
+    (define *scan* 0.0)      ; 0 to 1: how far the scan turns the head
 
     (define (now) (/ (* 1.0 (current-jiffy)) (jiffies-per-second)))
     (define (smooth x) (* x x (- 3.0 (* 2.0 x))))
@@ -66,14 +76,33 @@
         (unless (= phase *last-phase*)
           (set! *last-phase* phase)
           (set! *changed-at* t))
-        (set! *rest* (if (> (- t *changed-at*) STILL)
-                         (min 1.0 (+ *rest* (/ dt EASE)))
-                         (max 0.0 (- *rest* (/ dt EASE)))))
-        (let* ((f (guard-pose phase))
-               (k (min (- POSES 1) (max 0 (exact (floor f)))))
-               (v (vector-ref VISOR-COLORS (max 0 (min 3 state)))))
-          (render-draw-guard! model k (- f k) (smooth *rest*) r g b
-                              (vector-ref v 0) (vector-ref v 1) (vector-ref v 2)))))
+        (if (> (- t *changed-at*) STILL)
+            ;; standing: settle, then scan
+            (begin
+              (set! *rest* (min 1.0 (+ *rest* (/ dt EASE))))
+              (if (< *rest* 1.0)
+                  (set! *stood* 0.0)
+                  (set! *stood* (+ *stood* dt)))
+              (when (> *stood* SCAN-AFTER)
+                (set! *scan* (min 1.0 (+ *scan* (/ dt SCAN-IN))))))
+            ;; walking: the head comes back first, then the legs move
+            (begin
+              (set! *stood* 0.0)
+              (if (> *scan* 0.0)
+                  (set! *scan* (max 0.0 (- *scan* (/ dt SCAN-OUT))))
+                  (set! *rest* (max 0.0 (- *rest* (/ dt EASE)))))))
+        (let ((v (vector-ref VISOR-COLORS (max 0 (min 3 state)))))
+          (if (and (> *scan* 0.0) (> (render-guard-parts) SCAN-PART))
+              ;; the scan part: look left (a) or right (b), each from rest;
+              ;; the turn holds at each side (clamped), a machine's stops
+              (let* ((u (max -1.0 (min 1.0 (* 1.6 (sin (/ (* 6.283185307179586 (max 0.0 (- *stood* SCAN-AFTER))) SCAN-PERIOD))))))
+                     (amount (* (smooth *scan*) (smooth (abs u)))))
+                (render-draw-guard! model SCAN-PART (if (< u 0.0) 1.0 0.0) (- 1.0 amount) r g b
+                                    (vector-ref v 0) (vector-ref v 1) (vector-ref v 2)))
+              (let* ((f (guard-pose phase))
+                     (k (min (- POSES 1) (max 0 (exact (floor f))))))
+                (render-draw-guard! model k (- f k) (smooth *rest*) r g b
+                                    (vector-ref v 0) (vector-ref v 1) (vector-ref v 2)))))))
 
     ;; --- the --guard preview ---------------------------------------------------
 
