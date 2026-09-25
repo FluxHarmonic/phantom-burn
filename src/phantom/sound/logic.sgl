@@ -1,0 +1,124 @@
+;;; (phantom sound logic) - What should sound, decided without sound: pure
+;;;
+;;; S1 (tasks/phantom-burn-s1-sound). The parts of (phantom sound) that make
+;;; decisions, with no motif and no audio, so a test can hold them exactly:
+;;;
+;;;   STEPS    a walker's distance becomes footsteps. The cadences are S0's
+;;;            (sketchbook compose): a step every 0.84 s sneaking, 0.52 s
+;;;            walking, 0.32 s running, at the walker's 1.1, 2.4 and 4.4 m/s,
+;;;            so a stride is 0.92, 1.25 and 1.41 m. Each heel is followed by
+;;;            its toe after S0's gap (140, 80, 40 ms), feet alternating.
+;;;   SPACE    a sound at (x, y) heard from a listener at (lx, ly) facing yaw:
+;;;            gain 2/d (full within 2 m), pan 0.6 of the sideways share (at
+;;;            most 60% either way, Harkfell's D10), equal-power per side.
+;;;   MUSIC    the track's section from the guards: TENSE while any guard is
+;;;            SEARCHING or HUNTING (the brief: "tense while a guard is
+;;;            SEARCHING or THERE"), back to CALM once none has been for
+;;;            CALM-AFTER-S seconds ("when he loses you").
+;;;   STINGS   a guard's state rising: CALM -> SUSPICIOUS or above gives '?,
+;;;            reaching HUNTING gives 'there.
+;;;
+;;; Guard states are the integers of (phantom guard guard): 0 CALM,
+;;; 1 SUSPICIOUS, 2 SEARCHING, 3 HUNTING.
+
+(define-library (phantom sound logic)
+  (import (sigil core)
+          (sigil math))
+  (export make-steps steps-advance! gait-for GAITS gait-stride gait-toe-gap gait-heel gait-toe
+          sound-space pan-gains
+          make-music-rule music-rule-want! music-rule-section CALM-AFTER-S
+          stings-for)
+  (begin
+    ;; --- steps ------------------------------------------------------------------------
+    ;; (gait stride-m toe-gap-s heel-gain toe-gain): the gains are S0's volume
+    ;; factors (heel 1.0 and toe 0.45 walking; sneak 0.35/0.5; run 1.4/2.0) over 2
+    (define GAITS
+      '((sneak 0.924 0.14 0.175 0.25)
+        (walk 1.248 0.08 0.5 0.225)
+        (run 1.408 0.04 0.7 1.0)))
+    (define (gait-entry g) (or (assq g GAITS) (error "gait: sneak, walk or run" g)))
+    (define (gait-stride g) (list-ref (gait-entry g) 1))
+    (define (gait-toe-gap g) (list-ref (gait-entry g) 2))
+    (define (gait-heel g) (list-ref (gait-entry g) 3))
+    (define (gait-toe g) (list-ref (gait-entry g) 4))
+
+    ;; the gait from the walker's speed (m/s) and crouch: halfway between the
+    ;; walker's gait speeds (1.1, 2.4, 4.4); crouched is always a sneak
+    (define (gait-for speed crouched?)
+      (cond (crouched? 'sneak)
+            ((< speed 1.75) 'sneak)
+            ((> speed 3.4) 'run)
+            (else 'walk)))
+
+    ;; state: #(distance-since-step side pending-toes moving?)
+    ;; pending-toes: ((seconds-left surface gait side) ...)
+    (define (make-steps) (vector 0.0 'left '() #f))
+
+    ;; Advance by `dist` metres over `dt` seconds on `surface` at `gait`.
+    ;; Returns the events due in this interval, in order:
+    ;;   (heel surface gait side) (toe surface gait side)
+    ;; Starting to move from rest, the first step comes after 40% of a stride
+    ;; (a step does not wait a whole stride to be heard).
+    (define (steps-advance! st dist dt surface gait)
+      (let* ((moving? (> dist 0.0))
+             (d0 (if (and moving? (not (vector-ref st 3)))
+                     (* 0.6 (gait-stride gait))
+                     (vector-ref st 0)))
+             (stride (gait-stride gait))
+             (toes (map (lambda (t) (cons (- (car t) dt) (cdr t))) (vector-ref st 2)))
+             (due-toes (filter (lambda (t) (<= (car t) 0.0)) toes))
+             (left-toes (filter (lambda (t) (> (car t) 0.0)) toes)))
+        (vector-set! st 3 moving?)
+        (let loop ((d (+ d0 dist)) (side (vector-ref st 1)) (events (map (lambda (t) (cons 'toe (cdr t))) due-toes)) (toes left-toes))
+          (if (< d stride)
+              (begin
+                (vector-set! st 0 (if moving? d 0.0))
+                (vector-set! st 1 side)
+                (vector-set! st 2 toes)
+                (reverse events))
+              (loop (- d stride)
+                    (if (eq? side 'left) 'right 'left)
+                    (cons (list 'heel surface gait side) events)
+                    (append toes (list (list (gait-toe-gap gait) surface gait side))))))))
+
+    ;; --- space ------------------------------------------------------------------------------
+    ;; (gain . pan) for a sound at (x, y) from a listener at (lx, ly) facing
+    ;; yaw (radians, 0 = +x, counter-clockwise; right is (sin yaw, -cos yaw))
+    (define (sound-space x y lx ly yaw)
+      (let* ((dx (- x lx)) (dy (- y ly))
+             (d (sqrt (+ (* dx dx) (* dy dy))))
+             (gain (if (<= d 2.0) 1.0 (/ 2.0 d)))
+             (side (if (> d 0.001) (/ (+ (* dx (sin yaw)) (* dy (- (cos yaw)))) d) 0.0)))
+        (cons gain (* 0.6 (max -1.0 (min 1.0 side))))))
+
+    ;; (left . right) gains for a pan in -1..1: equal power, 1 each at centre
+    (define (pan-gains pan)
+      (let ((a (* (+ 1.0 (max -1.0 (min 1.0 pan))) (/ 3.141592653589793 4.0))))
+        (cons (* (cos a) (sqrt 2.0)) (* (sin a) (sqrt 2.0)))))
+
+    ;; --- the music's section ------------------------------------------------------------------
+    (define CALM-AFTER-S 4.0)
+
+    ;; state: #(section seconds-since-a-guard-searched)
+    (define (make-music-rule) (vector 'calm 0.0))
+    (define (music-rule-section r) (vector-ref r 0))
+
+    ;; states: the guards' state integers this frame. Returns the section wanted.
+    (define (music-rule-want! r states dt)
+      (let ((alert? (let any ((ss states)) (and (pair? ss) (or (>= (car ss) 2) (any (cdr ss)))))))
+        (cond (alert?
+               (vector-set! r 0 'tense)
+               (vector-set! r 1 0.0))
+              ((eq? (vector-ref r 0) 'tense)
+               (vector-set! r 1 (+ (vector-ref r 1) dt))
+               (when (>= (vector-ref r 1) CALM-AFTER-S)
+                 (vector-set! r 0 'calm)))
+              (else #f))
+        (vector-ref r 0)))
+
+    ;; --- stings ---------------------------------------------------------------------------------
+    ;; a guard's previous state and this frame's: the sting it earns, or #f
+    (define (stings-for prev now)
+      (cond ((and (< prev 3) (>= now 3)) 'there)
+            ((and (= prev 0) (>= now 1)) '?)
+            (else #f)))))
