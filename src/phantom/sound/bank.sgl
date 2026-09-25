@@ -190,11 +190,18 @@
     (define BED-WARM-S 4.0)
     (define BED-LOOP-S 10.0)
     (define BED-XFADE-S 1.0)
+    ;; David, on the first build with sound (2026-09-25): "the buzz noise in the
+    ;; room is way too loud and distracting, it should be a lot more low level, a
+    ;; drone in the air but not something in your face". So: the buzz's upper
+    ;; harmonics gone (bright 24 -> 4, a low-pass near 490 Hz on B-2: the low body
+    ;; kept), no exciter (its edge), the air darker (lp 5000 -> 2500), and both 18 dB
+    ;; down, the gain folded in here (2 x the old BED-GAIN 0.8 = 1.6 -> 0.2). The
+    ;; sketchbook's bed-game is this text, and bed-game-v1 the old, for his ear.
     (define BED-TUNE-TEXT
       "(tune version: 1 name: \"phantom bed\" tempo: 150 speed: 3 channels: 2
   (instruments
-    (instrument id: 1 name: \"tube buzz\" patch: (drone-saw attack: 1 breath-lo: 0.8 breath-rate: 0.2 bright: 24 cents: -49.4 detune: 2 excite: 1 excite-drive: 4 excite-freq: 800 level: 0.3 release: 2 seed: 41) volume: 20 gain: 2)
-    (instrument id: 2 name: \"room air\" patch: (noise-bed attack: 3 centre: 1200 color: pink hp: 320 level: 1 lp: 5000 rate: 0.02 release: 4 seed: 31 wander: 0.1 width: 1.7) volume: 8 gain: 2))
+    (instrument id: 1 name: \"tube buzz\" patch: (drone-saw attack: 1 breath-lo: 0.8 breath-rate: 0.2 bright: 4 cents: -49.4 detune: 2 level: 0.3 release: 2 seed: 41) volume: 20 gain: 0.2)
+    (instrument id: 2 name: \"room air\" patch: (noise-bed attack: 3 centre: 1200 color: pink hp: 320 level: 1 lp: 2500 rate: 0.02 release: 4 seed: 31 wander: 0.1 width: 1.7) volume: 8 gain: 0.2))
   (patterns
     (pattern id: 0 rows: 16
       (row 0 (1 \"B-2\" 1 20 \"000\") (2 \"C-4\" 2 8 \"000\")))

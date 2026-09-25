@@ -246,6 +246,16 @@
     (let* ((l (bank-bed-loop BANK-A)) (n (quotient (bytevector-length l) 4)))
       (assert-equal (exact (round (* BED-LOOP-S RATE))) n)
       (assert-true (> (rms l) 0.001))))
+  (test "sits well under your steps (David: \"a drone in the air\"): its RMS 30 dB under a tile heel's peak"
+    ;; the first build's hum peaked within ~1 dB of a step (about 15 dB RMS to
+    ;; peak), and David heard it "in your face"
+    (let* ((heel (bank-sample BANK-A '(step tile heel 0)))
+           (peak (let loop ((i 0) (m 0.0))
+                   (if (>= i (quotient (bytevector-length heel) 4)) m (loop (+ i 1) (max m (abs (f32 heel i)))))))
+           (db (lambda (x) (* 20.0 (/ (log x) (log 10.0)))))
+           (gap (- (db peak) (db (rms (bank-bed-loop BANK-A))))))
+      (unless (> gap 30.0) (display "the hum is only ") (display gap) (display " dB under a step\n"))
+      (assert-true (> gap 30.0))))
   (test "wraps seamlessly: on a ramp, the loop's last-to-first step is the ramp's own step"
     ;; exact, not statistical: a percentile test on the real bed passed with the
     ;; crossfade removed (the saw's own jumps are that large), so the
