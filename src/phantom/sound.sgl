@@ -26,8 +26,9 @@
 ;;;   - a guard through a wall plays the muffled sample (S0's finding: a per-step
 ;;;     choice is enough for footsteps). Released motif (0.7.0) cannot move a
 ;;;     sounding voice's cutoff; this needs nothing from it;
-;;;   - motif players only for the music (Low Embers, its sections from the guards
-;;;     by (phantom sound logic)) and a two-voice hum bed, no reverb.
+;;;   - ONE motif player, for the music (Low Embers, its sections from the guards
+;;;     by (phantom sound logic)); the hum and the room air are a seamless 10 s loop
+;;;     rendered into the bank and played by the mixer (1.86 ms a frame as a player).
 ;;; Floor 14's duct has no S0 sound: it plays the grate's metal at half gain
 ;;; (the leader's approval, 2026-09-25; David's call later).
 
@@ -43,11 +44,11 @@
           (phantom sound mix)
           (phantom sound sections))
   (export make-sound sound-start! sound-frame! sound-stop! sound-render! sound-trace
-          sound-started? sound-bank sound-mixer sound-last-events sound-section
-          BED-TUNE-TEXT MUSIC-TUNE SURFACE-MAP)
+          sound-started? sound-bank sound-mixer sound-bed-mixer sound-last-events sound-section
+          MUSIC-TUNE SURFACE-MAP)
   (begin
     (define MUSIC-TUNE "track-low-embers")
-    (define BANK-FRAMES-PER-FRAME 4096)   ; the bank renders over ~a second at 60 fps
+    (define BANK-MS 3)                    ; the bank renders ~3 ms a frame until complete
     (define SFX-DEPTH-S 0.1)              ; the steps' sink stays shallow: heard ~0.1 s late
     (define MUSIC-DEPTH-S 0.35)
     (define BUFFER 32768)
@@ -65,29 +66,21 @@
     (define (surface-for name)
       (let ((e (assq name SURFACE-MAP))) (if e (cdr e) (cons 'tile 1.0))))
 
-    ;; the in-game bed: the tube buzz and the room air of the sketchbook's floor, no reverb
-    (define BED-TUNE-TEXT
-      "(tune version: 1 name: \"phantom bed\" tempo: 150 speed: 3 channels: 2
-  (instruments
-    (instrument id: 1 name: \"tube buzz\" patch: (drone-saw attack: 1 breath-lo: 0.8 breath-rate: 0.2 bright: 24 cents: -49.4 detune: 2 excite: 1 excite-drive: 4 excite-freq: 800 level: 0.3 release: 2 seed: 41) volume: 20 gain: 2)
-    (instrument id: 2 name: \"room air\" patch: (noise-bed attack: 3 centre: 1200 color: pink hp: 320 level: 1 lp: 5000 rate: 0.02 release: 4 seed: 31 wander: 0.1 width: 1.7) volume: 8 gain: 2))
-  (patterns
-    (pattern id: 0 rows: 16
-      (row 0 (1 \"B-2\" 1 20 \"000\") (2 \"C-4\" 2 8 \"000\")))
-    (pattern id: 1 rows: 256
-      (row 255 (2 \"...\" 0 0 \"B01\"))))
-  (order 0 1))")
-
     ;; --- state ------------------------------------------------------------------------
     ;; #(rate loader headless? bank mixer you-steps guards music-rule seed
-    ;;   ctx sfx-stream music-stream bed-stream music-player bed-player sections
+    ;;   ctx sfx-stream music-stream bed-started? music-player bed-mixer sections
     ;;   last-events costs started?)
+    ;; The bed (the hum and the room air) is a loop in bed-mixer, from the bank
+    ;; (bank-bed-loop), started once the bank is ready: no player of its own.
+    ;; It shares the steps' stream.
     ;; guards: a vector per guard index: #(steps prev-state)
     (define (make-sound rate loader . opt)
       (vector rate loader (and (pair? opt) (car opt)) (make-bank rate) (make-mixer) (make-steps)
               '() (make-music-rule) 20260925
-              #f #f #f #f #f #f #f
+              #f #f #f #f #f (make-mixer) #f
               '() (list (cons 'bank 0.0) (cons 'sfx 0.0) (cons 'music 0.0) (cons 'bed 0.0) (cons 'frames 0)) #f))
+
+    (define (sound-bed-mixer s) (vector-ref s 14))
 
     (define (s-rate s) (vector-ref s 0))
     (define (sound-bank s) (vector-ref s 3))
@@ -111,8 +104,7 @@
         (when text
           (let ((p (open-tune-player (read-tune-string text) (s-rate s) loop: #t)))
             (vector-set! s 13 p)
-            (vector-set! s 15 (make-sections p)))))
-      (vector-set! s 14 (open-tune-player (read-tune-string BED-TUNE-TEXT) (s-rate s) loop: #t)))
+            (vector-set! s 15 (make-sections p))))))
 
     (define (sound-start! s)
       (unless (sound-started? s)
@@ -123,16 +115,16 @@
             (when ctx (guard (e (#t #f)) (audio-context-resume ctx)))
             (let ((open (lambda () (guard (e (#t #f)) (open-audio-stream channels: 2 buffer-frames: BUFFER)))))
               (vector-set! s 10 (open))
-              (vector-set! s 11 (open))
-              (vector-set! s 12 (open)))
-            (when (vector-ref s 11) (set-audio-stream-volume! (vector-ref s 11) MUSIC-GAIN))
-            (when (vector-ref s 12) (set-audio-stream-volume! (vector-ref s 12) BED-GAIN))))
+              (vector-set! s 11 (open)))
+            (when (vector-ref s 11) (set-audio-stream-volume! (vector-ref s 11) MUSIC-GAIN))))
         (vector-set! s 18 #t)))
 
     (define (sound-stop! s)
       (for-each (lambda (i) (let ((st (vector-ref s i))) (when st (guard (e (#t #f)) (set-audio-stream-volume! st 0.0)) (guard (e (#t #f)) (close-audio-stream! st))) (vector-set! s i #f)))
-                '(10 11 12))
-      (for-each (lambda (i) (let ((p (vector-ref s i))) (when p (player-close! p)) (vector-set! s i #f))) '(13 14))
+                '(10 11))
+      (let ((p (vector-ref s 13))) (when p (player-close! p)) (vector-set! s 13 #f))
+      (vector-set! s 12 #f)
+      (vector-set! s 14 (make-mixer))
       (vector-set! s 15 #f)
       (vector-set! s 18 #f))
 
@@ -151,11 +143,15 @@
 
     (define (sound-frame! s dt you guards)
       (vector-set! s 16 '())
-      ;; the bank renders a slice a frame until it is complete
+      ;; the bank renders ~BANK-MS a frame until it is complete (the title's
+      ;; frames can do it before play); then the bed's loop starts, once
       (unless (bank-ready? (sound-bank s))
         (let ((t0 (current-milliseconds)))
-          (bank-render! (sound-bank s) BANK-FRAMES-PER-FRAME)
+          (bank-render-for! (sound-bank s) BANK-MS)
           (cost! s 'bank (- (current-milliseconds) t0))))
+      (when (and (sound-started? s) (bank-ready? (sound-bank s)) (not (vector-ref s 12)))
+        (mixer-loop! (sound-bed-mixer s) (bank-bed-loop (sound-bank s)) BED-GAIN)
+        (vector-set! s 12 #t))
       (let* ((lx (list-ref you 0)) (ly (list-ref you 1)) (yaw (list-ref you 2))
              (moved (list-ref you 3)) (surface (surface-for (list-ref you 4)))
              (gait (gait-for (list-ref you 5) (list-ref you 6))))
@@ -207,28 +203,39 @@
                 (when (eq? part (quote sfx)) (cost! s (quote frames) n)))
               (loop))))))
 
-    (define (pump! s)
-      (pump-stream! s (vector-ref s 10) SFX-DEPTH-S (lambda (b n) (mixer-render! (sound-mixer s) b n)) 'sfx)
-      (let ((mp (vector-ref s 13)) (bp (vector-ref s 14)))
-        (when mp (pump-stream! s (vector-ref s 11) MUSIC-DEPTH-S (lambda (b n) (player-pull! mp b 0 n)) 'music))
-        (when bp (pump-stream! s (vector-ref s 12) MUSIC-DEPTH-S (lambda (b n) (player-pull! bp b 0 n)) 'bed))))
+    ;; tmp += g x src, n stereo frames
+    (define (add-into! out src n g)
+      (let add ((i 0))
+        (when (< i (* 2 n))
+          (bytevector-ieee-single-set! out (* 4 i)
+                                       (+ (bytevector-ieee-single-ref out (* 4 i) 'little)
+                                          (* g (bytevector-ieee-single-ref src (* 4 i) 'little)))
+                                       'little)
+          (add (+ i 1)))))
 
-    ;; headless: n frames of the three parts mixed (the stream gains applied)
+    (define *bed-buf* (make-bytevector (* 8 PUSH) 0))
+
+    ;; the steps' stream: the one-shots and the bed loop together
+    (define (render-sfx! s b n)
+      (mixer-render! (sound-mixer s) b n)
+      (mixer-render! (sound-bed-mixer s) *bed-buf* n)
+      (add-into! b *bed-buf* n 1.0))
+
+    (define (pump! s)
+      (pump-stream! s (vector-ref s 10) SFX-DEPTH-S (lambda (b n) (render-sfx! s b n)) 'sfx)
+      (let ((mp (vector-ref s 13)))
+        (when mp (pump-stream! s (vector-ref s 11) MUSIC-DEPTH-S (lambda (b n) (player-pull! mp b 0 n)) 'music))))
+
+    ;; headless: n frames of everything mixed (the music at its stream gain)
     (define (sound-render! s out n)
       (let ((tmp (make-bytevector (* 8 n) 0)))
         (mixer-render! (sound-mixer s) out n)
-        (for-each
-          (lambda (p g)
-            (when p
-              (player-pull! p tmp 0 n)
-              (let add ((i 0))
-                (when (< i (* 2 n))
-                  (bytevector-ieee-single-set! out (* 4 i)
-                                               (+ (bytevector-ieee-single-ref out (* 4 i) 'little)
-                                                  (* g (bytevector-ieee-single-ref tmp (* 4 i) 'little)))
-                                               'little)
-                  (add (+ i 1))))))
-          (list (vector-ref s 13) (vector-ref s 14)) (list MUSIC-GAIN BED-GAIN))))
+        (mixer-render! (sound-bed-mixer s) tmp n)
+        (add-into! out tmp n 1.0)
+        (let ((p (vector-ref s 13)))
+          (when p
+            (player-pull! p tmp 0 n)
+            (add-into! out tmp n MUSIC-GAIN)))))
 
     ;; since the last call: (part . ms-spent) for each part, and (frames . n), the
     ;; frames given to the steps' sink: ms per second of audio is ms / (n / rate)

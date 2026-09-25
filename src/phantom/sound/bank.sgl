@@ -22,6 +22,8 @@
 ;;;   (make-bank rate)       a bank being rendered; (bank-render! b frames) renders up
 ;;;                          to that many frames and answers #t when complete
 ;;;   (bank-sample b key)    the key's mono f32 bytevector, or #f until rendered
+;;;   (bank-render-for! b ms) the same, for about ms milliseconds of work (the frame budget)
+;;;   (bank-bed-loop b)      the hum and room air as a seamless mono loop (BED-LOOP-S s), once ready
 ;;;   (bank-ready? b)
 
 (define-library (phantom sound bank)
@@ -29,9 +31,11 @@
           (only (sigil list) list-sort)
           (sigil math)
           (sigil string)
+          (sigil time)
           (motif tune)
           (motif tune player))
-  (export bank-tune-text bank-slots make-bank bank-render! bank-sample bank-ready? bank-rate
+  (export bank-tune-text bank-slots make-bank bank-render! bank-render-for! bank-sample bank-ready? bank-rate
+          bank-bed-loop BED-TUNE-TEXT BED-LOOP-S
           SLOT-S BANK-SURFACES)
   (begin
     (define SLOT-S 0.6)
@@ -163,41 +167,117 @@
           "  (order" (apply string-append (map (lambda (p) (string-append " " (num p))) (iota npat))) ")\n"
           "  (history (\"claude\" \"2026-09-25\" \"S1: the game's sample bank (phantom sound bank)\")))\n")))
 
+    ;; --- the bed, as a loop -----------------------------------------------------------------
+    ;; The hum and the room air (the sketchbook's floor: the tube buzz and the room
+    ;; air, no reverb) play as ONE LOOPED SAMPLE in the mixer, not on a player of
+    ;; their own: David's phone paid 1.86 ms a frame for them as a player (S1
+    ;; bench, 2026-09-25). BED-WARM-S skips the voices' fade-in; the loop is
+    ;; BED-LOOP-S long, and its first BED-XFADE-S is crossfaded (equal power) with
+    ;; the audio that follows its end, so the wrap is seamless.
+    (define BED-WARM-S 4.0)
+    (define BED-LOOP-S 10.0)
+    (define BED-XFADE-S 1.0)
+    (define BED-TUNE-TEXT
+      "(tune version: 1 name: \"phantom bed\" tempo: 150 speed: 3 channels: 2
+  (instruments
+    (instrument id: 1 name: \"tube buzz\" patch: (drone-saw attack: 1 breath-lo: 0.8 breath-rate: 0.2 bright: 24 cents: -49.4 detune: 2 excite: 1 excite-drive: 4 excite-freq: 800 level: 0.3 release: 2 seed: 41) volume: 20 gain: 2)
+    (instrument id: 2 name: \"room air\" patch: (noise-bed attack: 3 centre: 1200 color: pink hp: 320 level: 1 lp: 5000 rate: 0.02 release: 4 seed: 31 wander: 0.1 width: 1.7) volume: 8 gain: 2))
+  (patterns
+    (pattern id: 0 rows: 16
+      (row 0 (1 \"B-2\" 1 20 \"000\") (2 \"C-4\" 2 8 \"000\")))
+    (pattern id: 1 rows: 256
+      (row 255 (2 \"...\" 0 0 \"B01\"))))
+  (order 0 1))")
+
     ;; --- rendering -------------------------------------------------------------------------------
-    ;; #(player rate mono-bytevector frames-done total-frames samples-alist)
+    ;; Two stages, each one player opened once: the slots, then the bed.
+    ;; #(player rate mono done total samples slot-frames stage bed-loop)
+    ;;   stage: 'slots | 'bed | 'ready; during 'bed, mono/done/total are the bed's
     (define (make-bank rate)
       (let* ((t (read-tune-string (bank-tune-text)))
              (slots (length (plan)))
              (slot-frames (exact (round (* SLOT-S rate))))
              (total (* slots slot-frames)))
-        (vector (open-tune-player t rate) rate (make-bytevector (* 4 total) 0) 0 total '() slot-frames)))
+        (vector (open-tune-player t rate) rate (make-bytevector (* 4 total) 0) 0 total '() slot-frames 'slots #f #f)))
 
     (define (bank-rate b) (vector-ref b 1))
-    (define (bank-ready? b) (>= (vector-ref b 3) (vector-ref b 4)))
+    (define (bank-ready? b) (eq? (vector-ref b 7) 'ready))
+    (define (bank-bed-loop b) (vector-ref b 8))
 
     (define BLOCK 1024)
     (define *buf* (make-bytevector (* 8 BLOCK) 0))
 
-    ;; render up to `frames` more frames (in 1024-frame pulls); #t once complete
+    ;; one pull of the current stage into its mono buffer
+    (define (pull-block! b)
+      (let* ((p (vector-ref b 0)) (mono (vector-ref b 2)) (done (vector-ref b 3))
+             (n (min BLOCK (- (vector-ref b 4) done))))
+        (player-pull! p *buf* 0 n)
+        (let fill ((i 0))
+          (when (< i n)
+            (bytevector-ieee-single-set! mono (* 4 (+ done i))
+                                         (* 0.5 (+ (bytevector-ieee-single-ref *buf* (* 8 i) 'little)
+                                                   (bytevector-ieee-single-ref *buf* (+ 4 (* 8 i)) 'little)))
+                                         'little)
+            (fill (+ i 1))))
+        (vector-set! b 3 (+ done n))))
+
+    (define (f32 bv i) (bytevector-ieee-single-ref bv (* 4 i) 'little))
+
+    ;; the stage's buffer is full: move on
+    (define (next-stage! b)
+      (player-close! (vector-ref b 0))
+      (case (vector-ref b 7)
+        ((slots)
+         (let* ((rate (vector-ref b 1))
+                (total (exact (round (* (+ BED-WARM-S BED-LOOP-S BED-XFADE-S) rate)))))
+           (vector-set! b 5 (list (cons 'slots (vector-ref b 2))))   ; keep the slots' buffer
+           (vector-set! b 0 (open-tune-player (read-tune-string BED-TUNE-TEXT) rate loop: #t))
+           (vector-set! b 2 (make-bytevector (* 4 total) 0))
+           (vector-set! b 3 0)
+           (vector-set! b 4 total)
+           (vector-set! b 7 'bed)))
+        ((bed)
+         (let* ((rate (vector-ref b 1)) (src (vector-ref b 2))
+                (w (exact (round (* BED-WARM-S rate))))
+                (l (exact (round (* BED-LOOP-S rate))))
+                (x (exact (round (* BED-XFADE-S rate))))
+                (loop-bv (make-bytevector (* 4 l) 0)))
+           (let fill ((i 0))
+             (when (< i l)
+               (let ((v (if (< i x)
+                            (let ((a (* (/ i (* 1.0 x)) 1.5707963267948966)))
+                              (+ (* (f32 src (+ w i)) (sin a)) (* (f32 src (+ w l i)) (cos a))))
+                            (f32 src (+ w i)))))
+                 (bytevector-ieee-single-set! loop-bv (* 4 i) v 'little))
+               (fill (+ i 1))))
+           (vector-set! b 0 #f)
+           (vector-set! b 2 (cdr (assq 'slots (vector-ref b 5))))
+           (vector-set! b 5 '())
+           (vector-set! b 8 loop-bv)
+           (vector-set! b 7 'ready)))))
+
+    ;; render up to `frames` more frames of the current stage(s); #t once complete
     (define (bank-render! b frames)
-      (let ((p (vector-ref b 0)) (mono (vector-ref b 2)) (total (vector-ref b 4)))
-        (let loop ((left frames))
-          (let ((done (vector-ref b 3)))
-            (when (and (> left 0) (< done total))
-              (let ((n (min BLOCK (- total done))))
-                (player-pull! p *buf* 0 n)
-                (let fill ((i 0))
-                  (when (< i n)
-                    (bytevector-ieee-single-set! mono (* 4 (+ done i))
-                                                 (* 0.5 (+ (bytevector-ieee-single-ref *buf* (* 8 i) 'little)
-                                                           (bytevector-ieee-single-ref *buf* (+ 4 (* 8 i)) 'little)))
-                                                 'little)
-                    (fill (+ i 1))))
-                (vector-set! b 3 (+ done n))
-                (loop (- left n))))))
-        (when (and (bank-ready? b) (vector-ref b 0))
-          (player-close! (vector-ref b 0))
-          (vector-set! b 0 #f))
+      (let loop ((left frames))
+        (when (and (> left 0) (not (bank-ready? b)))
+          (if (>= (vector-ref b 3) (vector-ref b 4))
+              (begin (next-stage! b) (loop left))
+              (let ((before (vector-ref b 3)))
+                (pull-block! b)
+                (loop (- left (- (vector-ref b 3) before)))))))
+        (when (and (not (bank-ready? b)) (>= (vector-ref b 3) (vector-ref b 4)))
+          (next-stage! b))
+        (bank-ready? b))
+
+    ;; render for about `ms` milliseconds (at least one block); #t once complete.
+    ;; The frame budget: a fixed 4096 frames a frame would be ~50 ms on David's
+    ;; phone, a hitch; this stays near the budget whatever the device.
+    (define (bank-render-for! b ms)
+      (let ((t0 (current-milliseconds)))
+        (let loop ()
+          (unless (bank-ready? b)
+            (bank-render! b BLOCK)
+            (when (< (- (current-milliseconds) t0) ms) (loop))))
         (bank-ready? b)))
 
     ;; the key's samples, cut from the rendered bank on first use

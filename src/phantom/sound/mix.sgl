@@ -2,50 +2,69 @@
 ;;;
 ;;; S1. Each voice is a bank sample (a mono f32 bytevector) playing from its
 ;;; start at a left and a right gain; mixer-render! sums every voice into
-;;; n stereo f32 frames and drops the voices that have ended. At most
-;;; MAX-VOICES sound at once; a new voice past that replaces the oldest.
+;;; n stereo f32 frames and drops the voices that have ended. A LOOP voice
+;;; (the bed) wraps and never ends. At most MAX-VOICES one-shot voices sound at
+;;; once; a new one past that replaces the oldest (loops do not count).
 ;;; Plain arithmetic: the same voices give the same bytes, every time.
 ;;;
 ;;;   (make-mixer)
 ;;;   (mixer-play! m sample gain pan)   pan -1..1, equal power (sound logic's pan-gains)
+;;;   (mixer-loop! m sample gain)       a centred loop from the sample's start
 ;;;   (mixer-render! m out n)           n stereo f32 frames into out (overwritten)
-;;;   (mixer-voices m)                  how many are sounding
+;;;   (mixer-voices m)                  how many one-shot voices are sounding
 
 (define-library (phantom sound mix)
   (import (sigil core)
           (sigil math)
           (phantom sound logic))
-  (export make-mixer mixer-play! mixer-render! mixer-voices MAX-VOICES)
+  (export make-mixer mixer-play! mixer-loop! mixer-render! mixer-voices MAX-VOICES)
   (begin
     (define MAX-VOICES 16)
 
-    ;; #(voices) where a voice is #(sample frames pos gl gr), oldest first
-    (define (make-mixer) (vector '()))
+    ;; #(voices loops) where a voice is #(sample frames pos gl gr), oldest first
+    (define (make-mixer) (vector '() '()))
     (define (mixer-voices m) (length (vector-ref m 0)))
+
+    (define (voice sample gain pan)
+      (let ((g (pan-gains pan)))
+        (vector sample (quotient (bytevector-length sample) 4) 0 (* gain (car g)) (* gain (cdr g)))))
 
     (define (mixer-play! m sample gain pan)
       (when sample
-        (let* ((g (pan-gains pan))
-               (v (vector sample (quotient (bytevector-length sample) 4) 0 (* gain (car g)) (* gain (cdr g))))
-               (vs (append (vector-ref m 0) (list v))))
+        (let ((vs (append (vector-ref m 0) (list (voice sample gain pan)))))
           (vector-set! m 0 (if (> (length vs) MAX-VOICES) (cdr vs) vs)))))
+
+    (define (mixer-loop! m sample gain)
+      (when sample
+        (vector-set! m 1 (append (vector-ref m 1) (list (voice sample gain 0.0))))))
 
     (define (f32 bv i) (bytevector-ieee-single-ref bv (* 4 i) 'little))
     (define (f32! bv i x) (bytevector-ieee-single-set! bv (* 4 i) x 'little))
 
+    ;; add k frames of voice v from its position into out, starting at frame at
+    (define (add! out v at k)
+      (let ((s (vector-ref v 0)) (pos (vector-ref v 2)) (gl (vector-ref v 3)) (gr (vector-ref v 4)))
+        (let add ((i 0))
+          (when (< i k)
+            (let ((x (f32 s (+ pos i))) (o (* 2 (+ at i))))
+              (f32! out o (+ (f32 out o) (* gl x)))
+              (f32! out (+ 1 o) (+ (f32 out (+ 1 o)) (* gr x))))
+            (add (+ i 1))))
+        (vector-set! v 2 (+ pos k))))
+
     (define (mixer-render! m out n)
       (let zero ((i 0)) (when (< i (* 2 n)) (f32! out i 0.0) (zero (+ i 1))))
+      ;; loops first, wrapping as often as the block needs
       (for-each
         (lambda (v)
-          (let* ((s (vector-ref v 0)) (len (vector-ref v 1)) (pos (vector-ref v 2))
-                 (gl (vector-ref v 3)) (gr (vector-ref v 4))
-                 (k (min n (- len pos))))
-            (let add ((i 0))
-              (when (< i k)
-                (let ((x (f32 s (+ pos i))))
-                  (f32! out (* 2 i) (+ (f32 out (* 2 i)) (* gl x)))
-                  (f32! out (+ 1 (* 2 i)) (+ (f32 out (+ 1 (* 2 i))) (* gr x))))
-                (add (+ i 1))))
-            (vector-set! v 2 (+ pos k))))
+          (let wrap ((at 0))
+            (when (< at n)
+              (when (>= (vector-ref v 2) (vector-ref v 1)) (vector-set! v 2 0))
+              (let ((k (min (- n at) (- (vector-ref v 1) (vector-ref v 2)))))
+                (add! out v at k)
+                (wrap (+ at k))))))
+        (vector-ref m 1))
+      (for-each
+        (lambda (v) (add! out v 0 (min n (- (vector-ref v 1) (vector-ref v 2)))))
         (vector-ref m 0))
       (vector-set! m 0 (filter (lambda (v) (< (vector-ref v 2) (vector-ref v 1))) (vector-ref m 0))))))

@@ -9,6 +9,7 @@
 (import (sigil test)
         (sigil math)
         (sigil fs)
+        (only (sigil list) list-sort)
         (phantom sound logic)
         (phantom sound bank)
         (phantom sound mix)
@@ -212,3 +213,40 @@
            (a (run)) (b (run)))
       (assert-true (> (rms a) 0.001))
       (assert-true (equal? a b)))))
+
+;; --- the bed as a loop (David's second bench: the bed as a player cost 1.86 ms) ---
+
+(test-group "the bed loop"
+  (test "is BED-LOOP-S long, sounds, and its wrap is an ordinary step (at or under the 99th percentile of its own)"
+    ;; with the crossfade, the last sample and the first are neighbours in the
+    ;; rendered audio; without it they are two unrelated points, a jump far above
+    ;; the loop's own steps for audio carried by a 120 Hz hum
+    (let* ((l (bank-bed-loop BANK-A)) (n (quotient (bytevector-length l) 4))
+           (steps (let loop ((i 7) (acc (quote ()))) (if (>= i n) acc (loop (+ i 7) (cons (abs (- (f32 l i) (f32 l (- i 1)))) acc)))))
+           (sorted (list->vector (list-sort < steps)))
+           (p99 (vector-ref sorted (exact (floor (* 0.99 (- (vector-length sorted) 1))))))
+           (wrap (abs (- (f32 l 0) (f32 l (- n 1))))))
+      (assert-equal (exact (round (* BED-LOOP-S RATE))) n)
+      (assert-true (> (rms l) 0.001))
+      (unless (<= wrap p99) (display "wrap step ") (display wrap) (display " over the 99th percentile ") (display p99) (newline))
+      (assert-true (<= wrap p99))))
+  (test "renders byte-identically twice"
+    (assert-true (equal? (bank-bed-loop BANK-A) (bank-bed-loop (rendered-bank)))))
+  (test "a mixer loop wraps: three lengths of a 4-frame loop repeat it"
+    (let ((m (make-mixer)) (s (make-bytevector 16 0)) (out (make-bytevector (* 8 12) 0)))
+      (for-each (lambda (i x) (f32! s i x)) '(0 1 2 3) '(0.1 0.2 0.3 0.4))
+      (mixer-loop! m s 1.0)
+      (mixer-render! m out 12)
+      (assert-true (near? (f32 out 0) (f32 out 8) 1e-9))
+      (assert-true (near? (f32 out 16) (f32 out 0) 1e-9))
+      (assert-true (near? (f32 out 6) 0.4 1e-6))
+      (assert-equal 0 (mixer-voices m))))
+  (test "the sound starts the bed once the bank is ready, on the steps' mixer's partner"
+    (let* ((s (make-sound RATE loader #t)))
+      (sound-start! s)
+      (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0 0.0 'tile 0.0 #f) '())
+      (let ((out (make-bytevector (* 8 533) 0)))
+        (let loop () (unless (bank-ready? (sound-bank s)) (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0 0.0 'tile 0.0 #f) '()) (loop)))
+        (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0 0.0 'tile 0.0 #f) '())
+        (mixer-render! (sound-bed-mixer s) out 533)
+        (assert-true (> (rms out) 0.001))))))
