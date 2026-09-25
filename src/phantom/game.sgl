@@ -45,7 +45,7 @@
 
   (export game-init! game-frame! game-reload!
           game-set-view! game-set-shot! game-set-hud! game-set-on! game-set-trace! game-set-auto! game-status
-          game-set-play! game-collision game-walker
+          game-set-play! game-collision game-walker game-place!
           make-controls FOV)
 
   (begin
@@ -255,6 +255,16 @@
       (set! *walker* (walker-at-view k))
       (set! *prev* *walker*)
       (set! *acc* 0.0))
+
+    ;; The walker at (x y) on the floor under it, looking at (tx ty tz) from
+    ;; its eyes (the native --look, for shots of a device from where you'd aim).
+    (define (game-place! x y ez tx ty tz)
+      (let* ((floor (and *coll* (collide-floor *coll* x y (- ez 3.0) ez)))
+             (dx (- tx x)) (dy (- ty y)) (dz (- tz ez)))
+        (set! *walker* (make-walker x y (or floor (- ez (- STAND EYE-DROP))) (atan (- dx) dy)))
+        (set! *prev* *walker*)
+        (set! *acc* 0.0)
+        (set! *pending-pitch* (atan dz (sqrt (+ (* dx dx) (* dy dy)))))))
 
     (define (game-set-shot! k)
       (set! *shot* k)
