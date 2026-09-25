@@ -87,12 +87,12 @@
                         "needs from: (END M)"))))
 
 (test-group "one name table"
-  (test "a view named like a room is reported"
+  (test "a circuit named like a room is reported"
     (let* ((text (reader "floors/14-slice.floor"))
            (cf (compile-floor "floors/14-slice.floor"
-                              (with-text "floors/14-slice.floor" (replace text "(into-office " "(office "))))
+                              (with-text "floors/14-slice.floor" (replace text "(c3 level: 0.3)" "(lobby level: 0.3)"))))
            (ms (messages cf)))
-      (assert-true (any (lambda (m) (string-contains? m "office names a view and a room")) ms))))
+      (assert-true (any (lambda (m) (string-contains? m "lobby names a circuit and a room")) ms))))
   (test "a circuit named like a reserved one is reported"
     (let* ((text (reader "floors/14-slice.floor"))
            (cf (compile-floor "floors/14-slice.floor"

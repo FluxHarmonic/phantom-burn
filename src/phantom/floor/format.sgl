@@ -686,13 +686,14 @@
     ;; props that exist. textures: ((name . texture) ...).
 
     ;; Everything a floor names, in one table: ((name kind line) ...), kind
-    ;; room, circuit or view (the reserved circuits included, line #f). Named
-    ;; points and things will join it (the format's growth plan).
+    ;; room or circuit (the reserved circuits included, line #f). Named
+    ;; points, openings and things will join it (the format's growth plan).
+    ;; Views are camera names for the tools and the shell, a namespace of
+    ;; their own (the slice's view office looks into the room office).
     (define (name-table fl)
       (append (map (lambda (n) (list n 'circuit #f)) RESERVED-CIRCUITS)
               (map (lambda (r) (list (room-name r) 'room (room-line r))) (floor-rooms fl))
-              (map (lambda (c) (list (circuit-name c) 'circuit (circuit-line c))) (floor-circuits fl))
-              (map (lambda (v) (list (view-name v) 'view (view-line v))) (floor-views fl))))
+              (map (lambda (c) (list (circuit-name c) 'circuit (circuit-line c))) (floor-circuits fl))))
 
     (define (check-references fl lg props textures)
       (let* ((path (floor-path fl))
