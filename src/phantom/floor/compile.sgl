@@ -1,0 +1,511 @@
+;;; (phantom floor compile) - A floor file in, what the game draws and
+;;; collides with out. This is the contract with the game shell (written up
+;;; in src/phantom/floor/README.md and the P0 task's Session Log).
+;;;
+;;;   (compile-floor "floors/14-slice.floor" read-text) -> a compiled floor
+;;;
+;;; read-text: (lambda (path) text-or-#f). Never raises on bad content: a
+;;; floor with problems comes back with them listed, and whatever geometry
+;;; could be built.
+;;;
+;;; Render: one vertex buffer and one index buffer, drawn per PART (an index
+;;; range): each textured material's part, then one untextured opaque part
+;;; (colour per vertex), then one glass part (blended, cull none). The layout
+;;; (stride 60):
+;;;
+;;;   position float3 | uv float2 | normal float3 | color ubyte4n |
+;;;   emission ubyte4n | light float4 | circuit ubyte4
+;;;
+;;; Coordinates are the floor file's: metres, x east, y north, z up.
+;;;
+;;; Pure: no platform.
+
+(define-library (phantom floor compile)
+  (import (sigil core)
+          (sigil struct)
+          (sigil list)
+          (sigil math)
+          (sigil string)
+          (sigil time)
+          (phantom floor problem)
+          (phantom floor format)
+          (phantom floor sources)
+          (phantom floor poly)
+          (phantom floor plan)
+          (phantom floor stack)
+          (phantom floor mesh)
+          (phantom floor shapes)
+          (phantom floor build)
+          (phantom floor dress)
+          (phantom floor light)
+          (phantom floor gates))
+
+  (export compile-floor LAYOUT-SPEC STRIDE
+          compiled-floor? compiled-floor-name compiled-floor-path compiled-floor-problems
+          compiled-floor-vertices compiled-floor-indices compiled-floor-index-type
+          compiled-floor-vertex-count compiled-floor-index-count
+          compiled-floor-parts compiled-floor-layout-spec compiled-floor-textures
+          compiled-floor-collision compiled-floor-circuits compiled-floor-surfaces
+          compiled-floor-rooms compiled-floor-edges compiled-floor-views compiled-floor-start
+          compiled-floor-things compiled-floor-emitters compiled-floor-paths compiled-floor-stats
+          compiled-floor-ctx
+          part-name part-first part-count part-texture part-pass
+          collision-tris collision-surface collision-room collision-count
+          compiled-floor->sgm1 compiled-floor->collide compiled-floor->json
+          problems-by-gate AMBIENT)
+
+  (begin
+    (define LAYOUT-SPEC '((position float3) (uv float2) (normal float3) (color ubyte4n)
+                          (emission ubyte4n) (light float4) (circuit ubyte4)))
+    (define STRIDE 60)
+    ;; The light every surface gets with every circuit off (G0's demo value:
+    ;; the export's world ambient #21173D at 0.6, lifted so a dark room reads).
+    (define AMBIENT '(0.2 0.14 0.34))
+
+    (define-struct compiled-floor
+      (name default: "") (path default: "") (problems default: '())
+      (vertices default: #f) (indices default: #f) (index-type default: 'u16)
+      (vertex-count default: 0) (index-count default: 0)
+      (parts default: '()) (layout-spec default: LAYOUT-SPEC)
+      (textures default: '())      ; ((name width height rgba) ...)
+      (collision default: #f)      ; #(tris surface room count)
+      (circuits default: '()) (surfaces default: '())
+      (rooms default: '()) (edges default: '()) (views default: '())
+      (start default: #f) (things default: '()) (emitters default: '())
+      (paths default: '()) (stats default: '()) (ctx default: #f))
+
+    ;; A part: #(name first count texture pass)
+    (define (part-name p) (vector-ref p 0))
+    (define (part-first p) (vector-ref p 1))
+    (define (part-count p) (vector-ref p 2))
+    (define (part-texture p) (vector-ref p 3))
+    (define (part-pass p) (vector-ref p 4))
+
+    (define (collision-tris c) (vector-ref c 0))
+    (define (collision-surface c) (vector-ref c 1))
+    (define (collision-room c) (vector-ref c 2))
+    (define (collision-count c) (vector-ref c 3))
+
+    (define (growable->list g) (vector->list (growable-data g) 0 (growable-count g)))
+
+    (define (base-name path)
+      (let* ((file (let loop ((i (- (string-length path) 1)))
+                     (cond ((< i 0) path)
+                           ((char=? (string-ref path i) #\/) (substring path (+ i 1) (string-length path)))
+                           (else (loop (- i 1))))))
+             (dot (let loop ((i (- (string-length file) 1)))
+                    (cond ((< i 0) #f) ((char=? (string-ref file i) #\.) i) (else (loop (- i 1)))))))
+        (if dot (substring file 0 dot) file)))
+
+    (define (ms a b) (/ (round (/ (* 1000.0 (- b a)) (jiffies-per-second))) 1.0))
+
+    ;; A stage marker, printed only when debugging (raise? set).
+    (define (checkpoint opt what)
+      (when (and (pair? opt) (car opt)) (display "floor compile: ") (display what) (newline)))
+
+    (define (problems-by-gate ps)
+      (list-sort (lambda (a b) (< (problem-gate a) (problem-gate b))) ps))
+
+    ;; --- compiling ------------------------------------------------------------------------
+
+    ;; raise? (optional, #f): let an internal error through instead of
+    ;; reporting it as a problem, for debugging the compiler.
+    (define (compile-floor floor-path read-text . opt)
+      (floor-debug! (and (pair? opt) (car opt) #t))
+      (let* ((src (load-sources floor-path read-text))
+             (fl (sources-floor src))
+             (lg (sources-legend src))
+             (base (compiled-floor name: (base-name floor-path) path: floor-path
+                                   problems: (sources-problems src) paths: (sources-paths src))))
+        (if (or (not fl) (not lg) (any (lambda (p) (= (problem-gate p) 0)) (sources-problems src)))
+            base
+            (guard (e ((not (and (pair? opt) (car opt)))
+                       (compiled-floor base
+                                          problems: (append (sources-problems src)
+                                                            (list (problem path: floor-path line: #f gate: 0
+                                                                           message: (string-append "the compiler failed: "
+                                                                                                   (if (error-object? e) (error-object-message e) "an error"))))))))
+              (let* ((t0 (current-jiffy))
+                     (c (build-architecture! (make-ctx fl lg (sources-props src))))
+                     (t1 (current-jiffy))
+                     (_1 (checkpoint opt "architecture done"))
+                     (c (dress! c))
+                     (t2 (current-jiffy))
+                     (_2 (checkpoint opt "dress done"))
+                     (c (check-gates! c))
+                     (t3 (current-jiffy))
+                     (_3 (checkpoint opt "gates done"))
+                     (circuits (circuit-table c))
+                     (emitters (map (lambda (e)
+                                      (let ((ci (assq (vector-ref e 5) circuits)))
+                                        (vector (vector-ref e 0) (vector-ref e 1) (vector-ref e 2) (vector-ref e 3) (vector-ref e 4)
+                                                (if ci (cadr ci) 0) (vector-ref e 6) (vector-ref e 7) (vector-ref e 8) (vector-ref e 9)
+                                                (room-at c (vector-ref e 0) (vector-ref e 1) (vector-ref e 2)))))
+                                    (growable->list (ctx-emitters c))))
+                     (lamp-ps (filter-map (lambda (e) (and (not (assq (vector-ref e 5) circuits))
+                                                           (problem path: floor-path line: #f gate: 1
+                                                                    message: (string-append "a lamp names circuit "
+                                                                                            (symbol->string (vector-ref e 5))
+                                                                                            ", which is not in lights:"))))
+                                          (growable->list (ctx-emitters c))))
+                     (asm (assemble c (list->vector emitters)))
+                     (t4 (current-jiffy))
+                     (fixture-ps (check-fixtures floor-path (vector-ref asm 0) (vector-ref asm 3) emitters circuits))
+                     (problems (append (sources-problems src) (growable->list (ctx-problems c)) lamp-ps fixture-ps)))
+                (compiled-floor base
+                                problems: problems
+                                vertices: (vector-ref asm 0) indices: (vector-ref asm 1) index-type: (vector-ref asm 2)
+                                vertex-count: (vector-ref asm 3) index-count: (vector-ref asm 4)
+                                parts: (vector-ref asm 5)
+                                textures: (map (lambda (nt) (texture-rgba (cdr nt))) (sources-textures src))
+                                collision: (collision-of c)
+                                circuits: circuits
+                                surfaces: (ctx-tags c)
+                                rooms: (rooms-info c)
+                                edges: (growable->list (ctx-gedges c))
+                                views: (floor-views fl)
+                                start: (list (floor-start fl) (floor-facing fl))
+                                things: (floor-things fl)
+                                emitters: emitters
+                                stats: (list (cons (quote occluder-tests) (car (vector-ref asm 6))) (cons (quote rays) (cdr (vector-ref asm 6))) (cons (quote ms-bake) (vector-ref asm 7)) (cons (quote ms-write) (vector-ref asm 8))
+                                             (cons (quote ms-architecture) (ms t0 t1)) (cons (quote ms-dress) (ms t1 t2))
+                                             (cons (quote ms-gates) (ms t2 t3)) (cons (quote ms-light-and-buffers) (ms t3 t4))
+                                             (cons 'collision-triangles (soup-count (ctx-soup c))))
+                                ctx: c))))))
+
+    ;; --- assembling the buffers ---------------------------------------------------------
+    ;;
+    ;; -> #(vertex-bytes index-bytes index-type vertex-count index-count parts tests)
+
+    (define (assemble c emitters)
+      (let* ((batches (vector-ref (ctx-batches c) 0))
+             (mats (ctx-mats c))
+             (mi-of (lambda (b) (let ((p (assq (car b) mats))) (and p (cdr p)))))
+             (textured (filter (lambda (b) (let ((mi (mi-of b))) (and mi (matinfo-texture mi)))) batches))
+             (tex-names (let loop ((bs textured) (acc '()))
+                          (cond ((null? bs) (reverse acc))
+                                ((memq (matinfo-texture (mi-of (car bs))) acc) (loop (cdr bs) acc))
+                                (else (loop (cdr bs) (cons (matinfo-texture (mi-of (car bs))) acc))))))
+             (groups (append
+                       (map (lambda (tn) (list (symbol->string tn) tn 'opaque
+                                               (filter (lambda (b) (eq? (matinfo-texture (mi-of b)) tn)) textured)))
+                            tex-names)
+                       (list (list "solid" #f 'opaque
+                                   (filter (lambda (b) (let ((mi (mi-of b))) (and mi (not (matinfo-texture mi)) (not (matinfo-glass? mi)))))
+                                           batches))
+                             (list "glass" #f 'glass
+                                   (filter (lambda (b) (let ((mi (mi-of b))) (and mi (matinfo-glass? mi)))) batches)))))
+             (groups (filter (lambda (g) (pair? (cadddr g))) groups))
+             (nv (fold-left + 0 (map (lambda (b) (batch-vertex-count (cdr b))) batches)))
+             (ni (fold-left + 0 (map (lambda (b) (batch-index-count (cdr b))) batches)))
+             (isize (if (< nv 65535) 2 4))
+             (vb (make-bytevector (* STRIDE (max nv 1)) 0))
+             (ib (make-bytevector (* isize (max ni 1)) 0))
+             (occ (make-occluders (ctx-soup c) (let ((glass (tag-of c 'glass))) (lambda (t) (not (= t glass))))))
+             (sees (room-sight c))
+             (prof (vector 0 0))
+             (voff 0) (ioff 0) (parts '()))
+        (for-each
+          (lambda (g)
+            (let ((first ioff))
+              (for-each
+                (lambda (nb)
+                  (let* ((b (cdr nb)) (base voff)
+                         (vs (batch-vertices b)) (n (batch-vertex-count b))
+                         (is (batch-indices b)) (m (batch-index-count b)))
+                    (let loop ((i 0))
+                      (when (< i n)
+                        (let* ((j0 (current-jiffy))
+                               (slots (bake-vertex occ emitters (vector-ref vs i) sees))
+                               (j1 (current-jiffy)))
+                          (write-vertex! vb (* STRIDE (+ base i)) (vector-ref vs i) slots)
+                          (vector-set! prof 0 (+ (vector-ref prof 0) (- j1 j0)))
+                          (vector-set! prof 1 (+ (vector-ref prof 1) (- (current-jiffy) j1))))
+                        (loop (+ i 1))))
+                    (let loop ((i 0))
+                      (when (< i m)
+                        (write-index! ib (* isize (+ ioff i)) (+ base (vector-ref is i)) isize)
+                        (loop (+ i 1))))
+                    (set! voff (+ voff n))
+                    (set! ioff (+ ioff m))))
+                (cadddr g))
+              (set! parts (cons (vector (car g) first (- ioff first) (cadr g) (caddr g)) parts))))
+          groups)
+        (vector vb ib (if (= isize 2) 'u16 'u32) nv ni (reverse parts) (bake-stats occ)
+                (ms 0 (vector-ref prof 0)) (ms 0 (vector-ref prof 1)))))
+
+    ;; The fixtures check (gate 1, on the output; the shell's contract ask):
+    ;; every vertex's emission tag is 0 (not emissive), EMIT-ALWAYS, or 128 + a
+    ;; real circuit; and every ceiling panel of a switchable circuit has
+    ;; emissive vertices, all tagged with that circuit, so the panel goes dark
+    ;; when its circuit is switched off.
+    (define (check-fixtures path vb nv emitters circuits)
+      (let* ((nc (length circuits))
+             (bad (lambda (msg) (problem path: path line: #f gate: 1 message: (string-append "fixtures: " msg))))
+             (tag (lambda (v) (bytevector-u8-ref vb (+ (* STRIDE v) 39))))
+             (pos (lambda (v k) (bytevector-ieee-single-ref vb (+ (* STRIDE v) (* 4 k)))))
+             (stray (let loop ((v 0) (n 0) (first #f))
+                      (if (>= v nv) (cons n first)
+                          (let ((a (tag v)))
+                            (if (or (= a 0) (= a EMIT-ALWAYS) (and (>= a 128) (< a (+ 128 nc))))
+                                (loop (+ v 1) n first)
+                                (loop (+ v 1) (+ n 1) (or first v)))))))
+             (panels (filter (lambda (e) (and (vector-ref e 9)
+                                              (let ((ci (find (lambda (ci) (= (cadr ci) (vector-ref e 5))) circuits)))
+                                                (and ci (not (memq (car ci) RESERVED-CIRCUITS))))))
+                             emitters)))
+        (append
+          (if (> (car stray) 0)
+              (list (bad (string-append (number->string (car stray)) " vertices have an emission tag that names no circuit (the first is vertex "
+                                        (number->string (cdr stray)) ")")))
+              (quote ()))
+          (filter-map
+            (lambda (e)
+              (let* ((ex (vector-ref e 0)) (ey (vector-ref e 1)) (ez (+ (vector-ref e 2) 0.035)) (k (vector-ref e 5))
+                     (near (let loop ((v 0) (acc (quote ())))
+                             (if (>= v nv) acc
+                                 (loop (+ v 1)
+                                       (if (and (> (tag v) 0)
+                                                (<= (abs (- (pos v 0) ex)) 0.65) (<= (abs (- (pos v 1) ey)) 0.65)
+                                                (<= (abs (- (pos v 2) ez)) 0.05))
+                                           (cons v acc) acc)))))
+                     (wrong (filter (lambda (v) (not (= (tag v) (+ 128 k)))) near)))
+                (cond ((null? near)
+                       (bad (string-append "the panel at (" (number->string ex) " " (number->string ey) ") has no emissive vertices")))
+                      ((pair? wrong)
+                       (bad (string-append "the panel at (" (number->string ex) " " (number->string ey) ") on circuit "
+                                           (number->string k) " has " (number->string (length wrong)) " of "
+                                           (number->string (length near)) " emissive vertices not tagged with it")))
+                      (else #f))))
+            panels))))
+
+    ;; The room holding point (x y z) in its air, or -1.
+    (define (room-at c x y z)
+      (let ((r (find (lambda (r) (and (point-in-poly? (cons x y) (room-corners r))
+                                      (>= z (room-floor r)) (<= z (room-ceiling r))))
+                     (floor-rooms (ctx-floor c)))))
+        (if r (room-index r) -1)))
+
+    ;; Which rooms can light each other: a room itself, rooms of one volume,
+    ;; and rooms an opening joins (the sector graph's edges). A vector of
+    ;; vectors of booleans.
+    (define (room-sight c)
+      (let* ((rooms (floor-rooms (ctx-floor c)))
+             (n (length rooms))
+             (groups (ctx-groups c))
+             (m (list->vector (map (lambda (i) (make-vector n #f)) (iota n))))
+             (idx (lambda (name) (let ((r (find (lambda (r) (eq? (room-name r) name)) rooms))) (and r (room-index r)))))
+             (set2! (lambda (a b) (when (and a b) (vector-set! (vector-ref m a) b #t) (vector-set! (vector-ref m b) a #t)))))
+        (for-each (lambda (a) (for-each (lambda (b) (when (or (= a b) (= (vector-ref groups a) (vector-ref groups b))) (set2! a b)))
+                                        (iota n)))
+                  (iota n))
+        (for-each (lambda (e) (set2! (idx (vector-ref e 1)) (idx (vector-ref e 2))))
+                  (growable->list (ctx-gedges c)))
+        m))
+
+    (define (clamp255 x) (max 0 (min 255 (exact (round x)))))
+
+    (define (write-vertex! bv o v slots)
+      (define (f32 k x) (bytevector-ieee-single-set! bv (+ o k) (inexact x)))
+      (define (u8 k x) (bytevector-u8-set! bv (+ o k) (clamp255 x)))
+      (f32 0 (vref v 0)) (f32 4 (vref v 1)) (f32 8 (vref v 2))
+      (f32 12 (vref v 3)) (f32 16 (vref v 4))
+      (f32 20 (vref v 5)) (f32 24 (vref v 6)) (f32 28 (vref v 7))
+      (u8 32 (vref v 8)) (u8 33 (vref v 9)) (u8 34 (vref v 10)) (u8 35 (vref v 11))
+      (u8 36 (vref v 12)) (u8 37 (vref v 13)) (u8 38 (vref v 14)) (u8 39 (vref v 15))
+      (f32 40 (vector-ref slots 0)) (f32 44 (vector-ref slots 1)) (f32 48 (vector-ref slots 2)) (f32 52 (vector-ref slots 3))
+      (u8 56 (vector-ref slots 4)) (u8 57 (vector-ref slots 5)) (u8 58 (vector-ref slots 6)) (u8 59 (vector-ref slots 7)))
+
+    (define (write-index! bv o x size)
+      (bytevector-u8-set! bv o (bitwise-and x 255))
+      (bytevector-u8-set! bv (+ o 1) (bitwise-and (arithmetic-shift x -8) 255))
+      (when (= size 4)
+        (bytevector-u8-set! bv (+ o 2) (bitwise-and (arithmetic-shift x -16) 255))
+        (bytevector-u8-set! bv (+ o 3) (bitwise-and (arithmetic-shift x -24) 255))))
+
+    (define (put-u32! bv o x) (write-index! bv o x 4))
+
+    ;; --- collision ---------------------------------------------------------------------------
+
+    (define (collision-of c)
+      (let* ((so (ctx-soup c)) (n (soup-count so))
+             (tr (growable-data (soup-tris so)))
+             (tris (make-bytevector (* 36 (max n 1)) 0))
+             (surf (make-bytevector (max n 1) 0))
+             (room (make-bytevector (max n 1) 255)))
+        (let loop ((i 0))
+          (when (< i (* 9 n))
+            (bytevector-ieee-single-set! tris (* 4 i) (inexact (vector-ref tr i)))
+            (loop (+ i 1))))
+        (let loop ((i 0))
+          (when (< i n)
+            (bytevector-u8-set! surf i (growable-ref (soup-surfaces so) i))
+            (bytevector-u8-set! room i (growable-ref (soup-rooms so) i))
+            (loop (+ i 1))))
+        (vector tris surf room n)))
+
+    ;; --- rooms for the sector graph ---------------------------------------------------------
+
+    (define (rooms-info c)
+      (let ((groups (ctx-groups c)))
+        (map (lambda (r)
+               (let ((cen (poly-centroid (room-corners r))))
+                 (list (room-index r) (room-name r) (room-floor r) (room-ceiling r) (room-surface r)
+                       (room-light r) (room-crouch-only r) (room-over r)
+                       (vector-ref groups (room-index r)) cen)))
+             (floor-rooms (ctx-floor c)))))
+
+    ;; --- textures -------------------------------------------------------------------------------
+
+    ;; (name width height rgba): row 0 of the cells is the image's top row.
+    (define (texture-rgba t)
+      (let* ((rows (texture-cells t))
+             (h (length rows)) (w (if (null? rows) 0 (string-length (car rows))))
+             (bv (make-bytevector (* 4 (max 1 (* w h))) 255)))
+        (let rl ((rs rows) (y 0))
+          (when (pair? rs)
+            (let cl ((x 0))
+              (when (< x (min w (string-length (car rs))))
+                (let* ((e (assv (string-ref (car rs) x) (texture-legend t)))
+                       (rgb (if e (hex->rgb (cdr e)) (list 255 0 255)))
+                       (o (* 4 (+ x (* y w)))))
+                  (bytevector-u8-set! bv o (car rgb))
+                  (bytevector-u8-set! bv (+ o 1) (cadr rgb))
+                  (bytevector-u8-set! bv (+ o 2) (caddr rgb))
+                  (bytevector-u8-set! bv (+ o 3) 255))
+                (cl (+ x 1))))
+            (rl (cdr rs) (+ y 1))))
+        (list (symbol->string (texture-name t)) w h bv)))
+
+    ;; --- files ------------------------------------------------------------------------------------
+
+    ;; SGM1, as sigil-graphics' load-mesh reads it.
+    (define (compiled-floor->sgm1 cf)
+      (let* ((parts (compiled-floor-parts cf))
+             (np (length parts))
+             (nv (compiled-floor-vertex-count cf)) (ni (compiled-floor-index-count cf))
+             (isize (if (eq? (compiled-floor-index-type cf) 'u16) 2 4))
+             (head (make-bytevector (+ 24 (* 8 np)) 0)))
+        (bytevector-u8-set! head 0 83) (bytevector-u8-set! head 1 71) (bytevector-u8-set! head 2 77) (bytevector-u8-set! head 3 49)
+        (put-u32! head 4 STRIDE) (put-u32! head 8 nv) (put-u32! head 12 ni) (put-u32! head 16 isize) (put-u32! head 20 np)
+        (let loop ((ps parts) (i 0))
+          (when (pair? ps)
+            (put-u32! head (+ 24 (* 8 i)) (part-first (car ps)))
+            (put-u32! head (+ 28 (* 8 i)) (part-count (car ps)))
+            (loop (cdr ps) (+ i 1))))
+        (bytevector-append head
+                           (bytevector-copy (compiled-floor-vertices cf) 0 (* STRIDE nv))
+                           (bytevector-copy (compiled-floor-indices cf) 0 (* isize ni)))))
+
+    ;; "PBC1", u32 count, count x 9 float32, count x u8 surface, count x u8 room.
+    (define (compiled-floor->collide cf)
+      (let* ((col (compiled-floor-collision cf)) (n (collision-count col))
+             (head (make-bytevector 8 0)))
+        (bytevector-u8-set! head 0 80) (bytevector-u8-set! head 1 66) (bytevector-u8-set! head 2 67) (bytevector-u8-set! head 3 49)
+        (put-u32! head 4 n)
+        (bytevector-append head
+                           (bytevector-copy (collision-tris col) 0 (* 36 n))
+                           (bytevector-copy (collision-surface col) 0 n)
+                           (bytevector-copy (collision-room col) 0 n))))
+
+    ;; --- JSON --------------------------------------------------------------------------------------
+
+    (define (js-str s)
+      (string-append "\""
+                     (apply string-append
+                            (map (lambda (ch)
+                                   (cond ((char=? ch #\") "\\\"") ((char=? ch #\\) "\\\\")
+                                         ((char=? ch #\newline) "\\n") (else (string ch))))
+                                 (string->list s)))
+                     "\""))
+    (define (js-num x)
+      (let ((r (/ (round (* (inexact x) 10000.0)) 10000.0)))
+        (if (= r (round r)) (number->string (exact (round r))) (number->string r))))
+    (define (js-sym s) (if s (js-str (symbol->string s)) "null"))
+    (define (js-list xs f) (string-append "[" (string-join (map f xs) ",") "]"))
+    (define (js-obj kvs) (string-append "{" (string-join (map (lambda (kv) (string-append (js-str (car kv)) ":" (cdr kv))) kvs) ",") "}"))
+    (define (js-pt p) (js-list (list (px p) (py p)) js-num))
+    (define (js-bool b) (if b "true" "false"))
+
+    (define (compiled-floor->json cf)
+      (js-obj
+        (list
+          (cons "floor" (js-str (compiled-floor-name cf)))
+          (cons "source" (js-str (compiled-floor-path cf)))
+          (cons "coords" (js-str "metres; x east, y north, z up"))
+          (cons "layout" (js-list LAYOUT-SPEC (lambda (a) (js-list (list (symbol->string (car a)) (symbol->string (cadr a))) js-str))))
+          (cons "stride" (js-num STRIDE))
+          (cons "vertices" (js-num (compiled-floor-vertex-count cf)))
+          (cons "indices" (js-num (compiled-floor-index-count cf)))
+          (cons "index_type" (js-str (symbol->string (compiled-floor-index-type cf))))
+          (cons "parts" (js-list (compiled-floor-parts cf)
+                                 (lambda (p) (js-obj (list (cons "name" (js-str (part-name p)))
+                                                           (cons "first" (js-num (part-first p)))
+                                                           (cons "count" (js-num (part-count p)))
+                                                           (cons "texture" (if (part-texture p) (js-str (symbol->string (part-texture p))) "null"))
+                                                           (cons "pass" (js-str (symbol->string (part-pass p)))))))))
+          (cons "textures" (js-obj (map (lambda (t) (cons (car t) (js-obj (list (cons "width" (js-num (cadr t)))
+                                                                                (cons "height" (js-num (caddr t)))
+                                                                                (cons "file" (js-str (string-append "tex-" (car t) ".png")))))))
+                                        (compiled-floor-textures cf))))
+          (cons "ambient" (js-list AMBIENT js-num))
+          (cons "circuits" (js-list (compiled-floor-circuits cf)
+                                    (lambda (ci) (js-obj (list (cons "name" (js-sym (list-ref ci 0)))
+                                                               (cons "index" (js-num (list-ref ci 1)))
+                                                               (cons "level" (js-num (list-ref ci 2)))
+                                                               (cons "rgb" (js-list (list (list-ref ci 3) (list-ref ci 4) (list-ref ci 5)) js-num))
+                                                               (cons "panel" (if (list-ref ci 6) (js-pt (list-ref ci 6)) "null"))
+                                                               (cons "needs" (js-sym (list-ref ci 7)))
+                                                               (cons "switchable" (js-bool (not (memq (list-ref ci 0) RESERVED-CIRCUITS)))))))))
+          (cons "lights" (js-list (compiled-floor-emitters cf)
+                                  (lambda (e) (js-obj (list (cons "at" (js-list (list (vector-ref e 0) (vector-ref e 1) (vector-ref e 2)) js-num))
+                                                            (cons "radius" (js-num (vector-ref e 3)))
+                                                            (cons "strength" (js-num (vector-ref e 4)))
+                                                            (cons "circuit" (js-num (vector-ref e 5)))
+                                                            (cons "rgb" (js-list (list (vector-ref e 6) (vector-ref e 7) (vector-ref e 8)) js-num))
+                                                            (cons "down" (js-bool (vector-ref e 9)))
+                                                            (cons "room" (js-num (vector-ref e 10))))))))
+          (cons "surfaces" (js-list (compiled-floor-surfaces cf)
+                                    (lambda (s) (js-obj (list (cons "name" (js-sym (car s)))
+                                                              (cons "noise" (js-sym (cadr s)))
+                                                              (cons "sight" (js-sym (caddr s))))))))
+          (cons "rooms" (js-list (compiled-floor-rooms cf)
+                                 (lambda (r) (js-obj (list (cons "index" (js-num (list-ref r 0)))
+                                                           (cons "name" (js-sym (list-ref r 1)))
+                                                           (cons "floor" (js-num (list-ref r 2)))
+                                                           (cons "ceiling" (js-num (list-ref r 3)))
+                                                           (cons "surface" (js-sym (list-ref r 4)))
+                                                           (cons "circuit" (js-sym (list-ref r 5)))
+                                                           (cons "crouch_only" (js-bool (list-ref r 6)))
+                                                           (cons "over" (js-list (list-ref r 7) js-sym))
+                                                           (cons "group" (js-num (list-ref r 8)))
+                                                           (cons "centroid" (js-pt (list-ref r 9))))))))
+          (cons "edges" (js-list (compiled-floor-edges cf)
+                                 (lambda (e) (js-obj (list (cons "kind" (js-sym (vector-ref e 0)))
+                                                           (cons "a" (js-sym (vector-ref e 1)))
+                                                           (cons "b" (js-sym (vector-ref e 2)))
+                                                           (cons "at" (js-pt (vector-ref e 3)))
+                                                           (cons "width" (js-num (vector-ref e 4)))
+                                                           (cons "zlo" (js-num (vector-ref e 5)))
+                                                           (cons "zhi" (js-num (vector-ref e 6)))
+                                                           (cons "walk" (js-num (vector-ref e 7)))
+                                                           (cons "sight" (js-num (vector-ref e 8)))
+                                                           (cons "sound" (js-num (vector-ref e 9)))
+                                                           (cons "needs" (js-sym (vector-ref e 10))))))))
+          (cons "views" (js-list (compiled-floor-views cf)
+                                 (lambda (v) (js-obj (list (cons "name" (js-sym (view-name v)))
+                                                           (cons "eye" (js-list (view-at v) js-num))
+                                                           (cons "at" (js-list (view-look v) js-num))
+                                                           (cons "lens_mm" (if (view-lens v) (js-num (view-lens v)) "null")))))))
+          (cons "start" (js-obj (list (cons "at" (js-pt (car (compiled-floor-start cf))))
+                                      (cons "facing" (js-num (cadr (compiled-floor-start cf)))))))
+          (cons "exit" (let ((o (find (lambda (o) (eq? (opening-kind o) 'exit))
+                                      (let ((c (compiled-floor-ctx cf))) (if c (floor-openings (ctx-floor c)) '())))))
+                         (if o (js-obj (list (cons "at" (js-pt (opening-at o))) (cons "room" (js-sym (opening-a o)))
+                                             (cons "reader" (js-sym (opening-reader o)))))
+                             "null")))
+          (cons "guards" (js-list (filter (lambda (t) (eq? (thing-kind t) 'guard)) (compiled-floor-things cf))
+                                  (lambda (t) (js-obj (list (cons "kind" (js-sym (thing-field t 'kind)))
+                                                            (cons "route" (js-list (thing-field t 'route) js-pt))
+                                                            (cons "waits" (js-list (or (thing-field t 'waits) '()) js-num)))))))
+          (cons "problems" (js-list (compiled-floor-problems cf) (lambda (p) (js-str (problem->string p))))))))))

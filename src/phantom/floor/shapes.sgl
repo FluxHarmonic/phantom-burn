@@ -25,7 +25,7 @@
 
   (export UV-SCALE
           matinfo matinfo? matinfo-name matinfo-texture matinfo-colour matinfo-emission matinfo-glass?
-          make-matinfo
+          make-matinfo matinfo-on-circuit EMIT-ALWAYS
           v3 v3x v3y v3z v3+ v3- v3* v3dot v3cross v3len v3norm
           uv-of emit-poly! emit-poly-soup! emit-box! emit-box-soup! emit-part!
           xform xform? xform-origin xform-ax xform-ay floor-xform wall-xform xform-point xform-dir)
@@ -54,6 +54,18 @@
                                (vector (car rgb) (cadr rgb) (caddr rgb) 255)
                                (vector 0 0 0 0))
                  glass?: (and glass #t))))
+
+    ;; Emission alpha: 0 not emissive; 128 + k emissive, lit while circuit k is
+    ;; on (the fixture switches with it); EMIT-ALWAYS emissive on no circuit.
+    (define EMIT-ALWAYS 255)
+
+    ;; The same material, its emission tagged with circuit k (an index into the
+    ;; circuit table), when it emits; unchanged when it does not.
+    (define (matinfo-on-circuit mi k)
+      (let ((e (matinfo-emission mi)))
+        (if (and k (> (vector-ref e 3) 0))
+            (matinfo mi emission: (vector (vector-ref e 0) (vector-ref e 1) (vector-ref e 2) (+ 128 k)))
+            mi)))
 
     ;; --- 3-vectors -------------------------------------------------------------------
 
@@ -141,9 +153,15 @@
       (origin default: #f) (ax default: (cons 1.0 0.0)) (ay default: (cons 0.0 1.0)))
 
     ;; On the floor at (x y z), turned facing degrees anticlockwise.
+    ;; Quarter turns are exact (no libm), so a floor made of them compiles to
+    ;; the same bits on every target; other angles go through sin and cos.
     (define (floor-xform x y z facing)
-      (let* ((a (/ (* facing 3.141592653589793) 180.0))
-             (c (cos a)) (s (sin a)))
+      (let* ((q (/ facing 90.0))
+             (quarter? (= q (round q)))
+             (k (if quarter? (modulo (exact (round q)) 4) 0))
+             (a (/ (* facing 3.141592653589793) 180.0))
+             (c (if quarter? (vector-ref (vector 1.0 0.0 -1.0 0.0) k) (cos a)))
+             (s (if quarter? (vector-ref (vector 0.0 1.0 0.0 -1.0) k) (sin a))))
         (xform origin: (v3 x y z) ax: (cons c s) ay: (cons (- s) c))))
 
     ;; On a wall at p (2D) and height z: local x to the viewer's right, local y

@@ -1,0 +1,142 @@
+;;; (phantom floor cli) - The floor tools, in the game binary (native only),
+;;; the way Harkfell's --room-check lives in harkfell's:
+;;;
+;;;   phantom-burn --floor-check FLOOR...     gates 1, 2 and 6; problems as
+;;;                                           FILE:LINE: message [gate N]
+;;;   phantom-burn --floor-compile FLOOR [--out DIR]
+;;;                                           DIR/NAME.sgm, NAME.sgm.json,
+;;;                                           NAME.collide, tex-*.png
+;;;                                           (DIR defaults to build/floors)
+;;;   phantom-burn --floor-sheet FLOOR [OUT.svg]
+;;;                                           the plan from above
+;;;   phantom-burn --floor-time FLOOR [N]     compile N times, print the times
+;;;
+;;; Exit status: 0 clean, 1 problems, 2 a usage or file error.
+
+(define-library (phantom floor cli)
+  (import (sigil core)
+          (sigil list)
+          (sigil math)
+          (sigil string)
+          (sigil fs)
+          (sigil time)
+          (sigil process)
+          (phantom floor problem)
+          (phantom floor sources)
+          (phantom floor compile)
+          (phantom floor sheet)
+          (phantom floor png))
+
+  (export floor-command? floor-main read-text-file)
+
+  (begin
+    (define (args) (cdr (command-line)))
+
+    (define (floor-command?)
+      (let ((a (args)))
+        (and (pair? a) (string? (car a)) (>= (string-length (car a)) 8)
+             (string=? (substring (car a) 0 8) "--floor-"))))
+
+    (define (read-text-file path) (and (file-exists? path) (read-file-string path)))
+
+    (define (say . xs) (for-each display xs) (newline))
+
+    (define (report cf)
+      (let ((ps (problems-by-gate (compiled-floor-problems cf))))
+        (for-each (lambda (p) (say (problem->string p))) ps)
+        (say (compiled-floor-path cf) ": "
+             (if (null? ps) "OK" (string-append (number->string (length ps)) " problem" (if (= (length ps) 1) "" "s")))
+             "  gates 1:" (number->string (length (problems-of-gate ps 1)))
+             " 2:" (number->string (length (problems-of-gate ps 2)))
+             " 6:" (number->string (length (problems-of-gate ps 6)))
+             (if (pair? (problems-of-gate ps 0)) (string-append " unreadable:" (number->string (length (problems-of-gate ps 0)))) ""))
+        (null? ps)))
+
+    (define (arg-after a flag default)
+      (cond ((null? a) default)
+            ((and (string=? (car a) flag) (pair? (cdr a))) (cadr a))
+            (else (arg-after (cdr a) flag default))))
+
+    (define (positional a)
+      (let loop ((a a) (acc '()))
+        (cond ((null? a) (reverse acc))
+              ((and (>= (string-length (car a)) 2) (string=? (substring (car a) 0 2) "--"))
+               (loop (if (and (pair? (cdr a)) (string=? (car a) "--out")) (cddr a) (cdr a)) acc))
+              (else (loop (cdr a) (cons (car a) acc))))))
+
+    (define (ms a b) (/ (round (/ (* 10000.0 (- b a)) (jiffies-per-second))) 10.0))
+
+    (define (check floors)
+      (let ((ok (fold-left (lambda (ok f) (and (report (compile-floor f read-text-file (member "--raise" (args)))) ok)) #t floors)))
+        (if ok 0 1)))
+
+    (define (compile-to floor out)
+      (let* ((t0 (current-jiffy))
+             (cf (compile-floor floor read-text-file))
+             (t1 (current-jiffy))
+             (name (compiled-floor-name cf)))
+        (report cf)
+        (if (not (compiled-floor-vertices cf))
+            2
+            (begin
+              (ensure-directory out)
+              (write-file-bytes (string-append out "/" name ".sgm") (compiled-floor->sgm1 cf))
+              (write-file-bytes (string-append out "/" name ".collide") (compiled-floor->collide cf))
+              (write-file-string (string-append out "/" name ".sgm.json") (compiled-floor->json cf))
+              (for-each (lambda (t)
+                          (write-file-bytes (string-append out "/tex-" (car t) ".png")
+                                            (rgba->png (cadr t) (caddr t) (cadddr t))))
+                        (compiled-floor-textures cf))
+              (say "wrote " out "/" name ".sgm (" (number->string (compiled-floor-vertex-count cf)) " vertices, "
+                   (number->string (quotient (compiled-floor-index-count cf) 3)) " triangles, "
+                   (number->string (length (compiled-floor-parts cf))) " parts), .collide ("
+                   (number->string (collision-count (compiled-floor-collision cf))) " triangles), .sgm.json, "
+                   (number->string (length (compiled-floor-textures cf))) " textures")
+              (say "compiled in " (number->string (ms t0 t1)) " ms  " (stats-line cf))
+              (if (null? (compiled-floor-problems cf)) 0 1)))))
+
+    (define (stats-line cf)
+      (string-join (map (lambda (s) (string-append (symbol->string (car s)) " " (number->string (cdr s))))
+                        (compiled-floor-stats cf))
+                   "  "))
+
+    (define (sheet floor out)
+      (let* ((cf (compile-floor floor read-text-file))
+             (out (or out (string-append "build/floors/" (compiled-floor-name cf) "-sheet.svg"))))
+        (report cf)
+        (ensure-directory (path-dir out))
+        (write-file-string out (floor-sheet-svg cf))
+        (say "wrote " out)
+        (if (null? (compiled-floor-problems cf)) 0 1)))
+
+    (define (timing floor n)
+      (let loop ((i 0) (acc '()))
+        (if (< i n)
+            (let* ((t0 (current-jiffy))
+                   (cf (compile-floor floor read-text-file))
+                   (t1 (current-jiffy)))
+              (say "run " (number->string (+ i 1)) ": " (number->string (ms t0 t1)) " ms  " (stats-line cf))
+              (loop (+ i 1) (cons (ms t0 t1) acc)))
+            (begin
+              (say "min " (number->string (fold-left min 1e30 acc)) " ms over " (number->string n) " runs")
+              0))))
+
+    (define (usage)
+      (say "usage: phantom-burn --floor-check FLOOR... | --floor-compile FLOOR [--out DIR] |")
+      (say "       --floor-sheet FLOOR [OUT.svg] | --floor-time FLOOR [N]")
+      2)
+
+    (define (floor-main)
+      (let* ((a (args))
+             (cmd (car a))
+             (pos (positional (cdr a)))
+             (status
+               (cond ((and (string=? cmd "--floor-check") (pair? pos)) (check pos))
+                     ((and (string=? cmd "--floor-compile") (pair? pos))
+                      (compile-to (car pos) (arg-after (cdr a) "--out" "build/floors")))
+                     ((and (string=? cmd "--floor-sheet") (pair? pos))
+                      (sheet (car pos) (and (pair? (cdr pos)) (cadr pos))))
+                     ((and (string=? cmd "--floor-time") (pair? pos))
+                      (timing (car pos) (or (and (pair? (cdr pos)) (string->number (cadr pos))) 3)))
+                     (else (usage)))))
+        (exit status)))))

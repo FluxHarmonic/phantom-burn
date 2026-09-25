@@ -41,6 +41,7 @@
           ctx-footprints ctx-placed ctx-tags ctx-stair-boxes
           ctx-batches add-problem! batch-for mat tag-of room-by-name room-id
           face-ivs side-normal side-right side-faces iv-of edge-point
+          edges-at-point pair-side owner-room-of fmt-pt num->str
           GRID CLEARANCE)
 
   (begin
@@ -125,7 +126,14 @@
       (let ((o (vector-ref (ctx-owners c) id)))
         (and (eq? (owner-kind o) 'room) (owner-room o))))
 
-    (define (face-ivs c f) (if (< f 0) '() (vector-ref (ctx-ivs c) f)))
+    ;; Not written as (if (< f 0) (quote ()) (vector-ref (ctx-ivs c) f)): sigil 0.22.7's native
+    ;; backend matches any 2-argument function with a tail (vector-ref (field arg0)
+    ;; arg1) as a plain vector-field accessor and drops the other branch, so the
+    ;; guard vanished in release builds (cps-emit-native.c,
+    ;; detect_simple_vector_field_accessor). ivs-at takes the vector itself, which
+    ;; that rule does not match.
+    (define (face-ivs c f) (ivs-at (ctx-ivs c) f))
+    (define (ivs-at v f) (if (< f 0) (quote ()) (vector-ref v f)))
 
     (define (iv-of c f id)
       (find (lambda (iv) (= (iv-owner iv) id)) (face-ivs c f)))
@@ -169,6 +177,7 @@
              (nf (vector-length (plan-faces pl)))
              (ivs (make-vector nf '()))
              (cols (make-vector nf '())))
+        (checkpoint! "arrangement built")
         (let loop ((i 0))
           (when (< i nf)
             (let* ((f (vector-ref (plan-faces pl) i))
@@ -352,7 +361,9 @@
                     (set! zs (cons h zs))
                     (vector-set! (ctx-holes c) i (cons (vector t0 t1 (car h) (cdr h) kind) (vector-ref (ctx-holes c) i)))
                     (when (memq kind '(glass window))
-                      (emit-pane! c e t0 t1 (car h) (cdr h) a)))))))
+                      (emit-pane! c e t0 t1 (car h) (cdr h) a))
+                    (when (eq? kind 'window)
+                      (city-light! c e side t0 t1 (car h) (cdr h))))))))
           runs)
         (when (pair? zs)
           (let ((zlo (fold-left min 1e30 (map car zs)))
@@ -398,6 +409,26 @@
              (m (legend-default (ctx-legend c) 'rails)))
         (emit-poly! (batch-for c 'pane) (mat c 'pane) ps n a)
         (emit-poly-soup! (ctx-soup c) ps n (tag-of c 'glass) a #t)))
+
+    ;; The city through a window (design section 6: "magenta: the city's neon
+    ;; through the windows"): lights on the reserved circuit city, every
+    ;; CITY-STEP along the window, CITY-OUT outside the glass at 60% of its
+    ;; height. The pane is glass, so they reach in.
+    (define CITY-STEP 3.0)
+    (define CITY-OUT 1.5)
+    (define CITY-RGB (list (/ 255 255.0) (/ 89 255.0) (/ 217 255.0)))   ; #FF59D9
+
+    (define (city-light! c e side t0 t1 z0 z1)
+      (let* ((n (side-normal e side))
+             (len (- t1 t0))
+             (k (max 1 (exact (round (/ len CITY-STEP)))))
+             (z (+ z0 (* 0.6 (- z1 z0)))))
+        (for-each (lambda (i)
+                    (let ((p (pt- (edge-point e (+ t0 (* len (/ (+ i 0.5) k)))) (pt* n CITY-OUT))))
+                      (growable-push! (ctx-emitters c)
+                                      (vector (px p) (py p) z 9.0 0.55 'city
+                                              (car CITY-RGB) (cadr CITY-RGB) (caddr CITY-RGB) #f))))
+                  (iota k))))
 
     ;; Along the line: the local frame for trim at s, on the line, facing
     ;; line-side's normal.
@@ -699,7 +730,7 @@
     (define (open-edge-rails! c)
       (let* ((pl (ctx-plan c)) (es (plan-edges pl))
              (owners (ctx-owners c)) (groups (ctx-groups c))
-             (opens (make-vector 0 #f)))
+             (opens (vector (quote ()))))   ; ((u-name b-name longest-edge total-width z top line) ...)
         (let loop ((i 0))
           (when (< i (vector-length es))
             (let ((e (vector-ref es i)))
@@ -723,12 +754,18 @@
                                               (let ((p (edge-point e (car sp))) (q (edge-point e (cdr sp))))
                                                 (emit-rail! c p q z (iv-owner a) #f)))
                                             spans)
-                                  (add-gedge! c 'open (room-name u) (room-name (owner-room-of c (iv-owner b)))
-                                              (pt* (pt+ (edge-a e) (edge-b e)) 0.5) (edge-len e)
+                                  (note-open! opens (room-name u) (room-name (owner-room-of c (iv-owner b))) e
                                               z (min (iv-hi a) (iv-hi b)) #f (room-line u))))))))
                       mine)))
                 '(left right)))
             (loop (+ i 1))))
+        ;; one open edge in the sector graph per pair of rooms, at the middle of
+        ;; the longest stretch, as wide as all of them together
+        (for-each (lambda (o)
+                    (let ((e (list-ref o 2)))
+                      (add-gedge! c (quote open) (list-ref o 0) (list-ref o 1) (pt* (pt+ (edge-a e) (edge-b e)) 0.5)
+                                  (list-ref o 3) (list-ref o 4) (list-ref o 5) (list-ref o 6) (list-ref o 7))))
+                  (reverse (vector-ref opens 0)))
         ;; declared rails
         (for-each (lambda (t)
                     (when (eq? (thing-kind t) 'rail)
@@ -737,6 +774,18 @@
                              (z (if r (room-floor r) (lowest-floor-at c (pt* (pt+ (car seg) (cadr seg)) 0.5)))))
                         (emit-rail! c (car seg) (cadr seg) z (if r (room-index r) -1) (thing-line t)))))
                   (floor-things (ctx-floor c)))))
+
+    ;; Gather an open edge: per (u b), the longest plan edge and the total width.
+    (define (note-open! opens u b e z top needs line)
+      (let ((hit (find (lambda (o) (and (eq? (car o) u) (eq? (cadr o) b))) (vector-ref opens 0))))
+        (vector-set! opens 0
+                     (if hit
+                         (map (lambda (o) (if (eq? o hit)
+                                              (list u b (if (> (edge-len e) (edge-len (list-ref o 2))) e (list-ref o 2))
+                                                    (+ (list-ref o 3) (edge-len e)) (list-ref o 4) (list-ref o 5) needs line)
+                                              o))
+                              (vector-ref opens 0))
+                         (cons (list u b e (edge-len e) z top needs line) (vector-ref opens 0))))))
 
     ;; Remove the stretches of edge e that a stair's landing covers.
     (define (subtract-landings c e spans)
@@ -783,16 +832,21 @@
 
     (define (build-architecture! c0)
       (let ((c (build-plan! c0)))
+        (checkpoint! "plan built")
         (for-each (lambda (o) (unless (eq? (opening-kind o) 'hatch) (resolve-opening! c o)))
                   (floor-openings (ctx-floor c)))
         (for-each (lambda (o) (when (eq? (opening-kind o) 'hatch) (resolve-hatch! c o)))
                   (floor-openings (ctx-floor c)))
+        (checkpoint! "openings cut")
         (let loop ((i 0))
           (when (< i (vector-length (plan-edges (ctx-plan c))))
             (wall-side! c i 'left)
             (wall-side! c i 'right)
             (loop (+ i 1))))
+        (checkpoint! "walls built")
         (floors-and-ceilings! c)
+        (checkpoint! "floors built")
         (for-each (lambda (s) (build-stair! c s)) (floor-stairs (ctx-floor c)))
+        (checkpoint! "stairs built")
         (open-edge-rails! c)
         c))))

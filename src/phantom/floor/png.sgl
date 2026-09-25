@@ -1,0 +1,80 @@
+;;; (phantom floor png) - A PNG writer small enough to trust: 8-bit RGBA, no
+;;; filtering, and the zlib stream made of stored (uncompressed) deflate
+;;; blocks. Big files for their size, but exact, and nothing to link. Used
+;;; for the texture files the floor tool writes beside a compiled floor.
+;;;
+;;; Pure: no platform.
+
+(define-library (phantom floor png)
+  (import (sigil core)
+          (sigil math))
+
+  (export rgba->png)
+
+  (begin
+    (define CRC-TABLE
+      (let ((t (make-vector 256 0)))
+        (let loop ((n 0))
+          (when (< n 256)
+            (let bits ((c n) (k 0))
+              (if (< k 8)
+                  (bits (if (= (bitwise-and c 1) 1)
+                            (bitwise-xor #xEDB88320 (arithmetic-shift c -1))
+                            (arithmetic-shift c -1))
+                        (+ k 1))
+                  (vector-set! t n c)))
+            (loop (+ n 1))))
+        t))
+
+    ;; CRC-32 of bytes lo..hi of bv.
+    (define (crc32 bv lo hi)
+      (let loop ((i lo) (c #xFFFFFFFF))
+        (if (>= i hi)
+            (bitwise-xor c #xFFFFFFFF)
+            (loop (+ i 1)
+                  (bitwise-xor (vector-ref CRC-TABLE (bitwise-and (bitwise-xor c (bytevector-u8-ref bv i)) 255))
+                               (arithmetic-shift c -8))))))
+
+    (define (adler32 bv)
+      (let loop ((i 0) (a 1) (b 0))
+        (if (>= i (bytevector-length bv))
+            (+ (* b 65536) a)
+            (let ((a (modulo (+ a (bytevector-u8-ref bv i)) 65521)))
+              (loop (+ i 1) a (modulo (+ b a) 65521))))))
+
+    (define (u32be x)
+      (bytevector (bitwise-and (arithmetic-shift x -24) 255) (bitwise-and (arithmetic-shift x -16) 255)
+                  (bitwise-and (arithmetic-shift x -8) 255) (bitwise-and x 255)))
+
+    (define (chunk type data)
+      (let* ((td (bytevector-append type data)))
+        (bytevector-append (u32be (bytevector-length data)) td (u32be (crc32 td 0 (bytevector-length td))))))
+
+    ;; raw: the scanlines (a filter byte of 0, then the row) back to back.
+    (define (zlib-stored raw)
+      (let loop ((off 0) (acc (list (bytevector #x78 #x01))))
+        (let* ((n (bytevector-length raw))
+               (len (min 65535 (- n off)))
+               (final? (>= (+ off len) n))
+               (head (bytevector (if final? 1 0)
+                                 (bitwise-and len 255) (arithmetic-shift len -8)
+                                 (bitwise-and (bitwise-xor len #xFFFF) 255)
+                                 (arithmetic-shift (bitwise-xor len #xFFFF) -8)))
+               (acc (cons (bytevector-copy raw off (+ off len)) (cons head acc))))
+          (if final?
+              (apply bytevector-append (reverse (cons (u32be (adler32 raw)) acc)))
+              (loop (+ off len) acc)))))
+
+    ;; A PNG file's bytes for a w x h RGBA image, rows top to bottom.
+    (define (rgba->png w h rgba)
+      (let ((raw (make-bytevector (* h (+ 1 (* 4 w))) 0)))
+        (let loop ((y 0))
+          (when (< y h)
+            (bytevector-copy! raw (+ 1 (* y (+ 1 (* 4 w)))) rgba (* y 4 w) (* (+ y 1) 4 w))
+            (loop (+ y 1))))
+        (bytevector-append
+          (bytevector 137 80 78 71 13 10 26 10)
+          (chunk (bytevector 73 72 68 82)
+                 (bytevector-append (u32be w) (u32be h) (bytevector 8 6 0 0 0)))
+          (chunk (bytevector 73 68 65 84) (zlib-stored raw))
+          (chunk (bytevector 73 69 78 68) (bytevector)))))))

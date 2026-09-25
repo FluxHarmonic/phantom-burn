@@ -1,0 +1,343 @@
+;;; (phantom floor dress) - What goes into the architecture: the props the
+;;; floor's things: name, the badge on its desk, the lifts along their wall,
+;;; the exit door in its hole, each circuit's switch panel, and the ceiling
+;;; light panels (design section 7's detail rule: "light panels on office
+;;; ceilings"). Everything here also makes the LIGHTS the bake uses.
+;;;
+;;; An EMITTER is #(x y z radius strength circuit r g b down?): a ceiling
+;;; panel lights only what is below it (down? #t); a prop's lamp lights all
+;;; round. r g b are 0..1.
+;;;
+;;; Pure: no platform.
+
+(define-library (phantom floor dress)
+  (import (sigil core)
+          (sigil struct)
+          (sigil list)
+          (sigil math)
+          (phantom floor problem)
+          (phantom floor format)
+          (phantom floor poly)
+          (phantom floor plan)
+          (phantom floor stack)
+          (phantom floor mesh)
+          (phantom floor shapes)
+          (phantom floor build))
+
+  (export dress! placed-prop placed-xform placed-top placed-room placed-kind circuit-index
+          PANEL-SPACING circuit-table)
+
+  (begin
+    (define SWITCH-REACH 0.5)     ; a panel: point this near a wall
+    (define PANEL-SPACING 3.5)    ; at least this far apart, and 4 m under tall ceilings
+    (define PANEL-MARGIN 0.9)     ; and this far from the ceiling's edge
+
+    (define (placed-prop p) (vector-ref p 0))
+    (define (placed-xform p) (vector-ref p 1))
+    (define (placed-top p) (vector-ref p 2))
+    (define (placed-room p) (vector-ref p 3))
+    (define (placed-kind p) (vector-ref p 4))
+
+    (define (prop-of c kind)
+      (let ((p (assq kind (ctx-props c)))) (and p (cdr p))))
+
+    ;; The rooms whose outline holds p, lowest floor first.
+    (define (rooms-at c p)
+      (list-sort (lambda (a b) (< (room-floor a) (room-floor b)))
+                 (filter (lambda (r) (point-in-poly? p (room-corners r))) (floor-rooms (ctx-floor c)))))
+
+    ;; --- placing a prop -----------------------------------------------------------------
+
+    (define (part-top pt)
+      (let ((at (part-at pt)))
+        (case (part-shape pt)
+          ((box wedge) (+ (caddr at) (* 0.5 (caddr (part-size pt)))))
+          ((cylinder) (+ (caddr at) (* 0.5 (part-height pt))))
+          ((extrude) (+ (caddr at) (part-height pt)))
+          (else (caddr at)))))
+
+    ;; The prop's footprint in local xy: its parts' bounding box.
+    (define (part-extent pt)
+      (let ((at (part-at pt)))
+        (case (part-shape pt)
+          ((box wedge) (let ((s (part-size pt)))
+                         (list (- (car at) (* 0.5 (car s))) (- (cadr at) (* 0.5 (cadr s)))
+                               (+ (car at) (* 0.5 (car s))) (+ (cadr at) (* 0.5 (cadr s))))))
+          ((cylinder) (let ((r (part-radius pt))) (list (- (car at) r) (- (cadr at) r) (+ (car at) r) (+ (cadr at) r))))
+          ((extrude) (let ((bb (poly-bbox (part-outline pt))))
+                       (list (+ (car at) (car bb)) (+ (cadr at) (cadr bb)) (+ (car at) (caddr bb)) (+ (cadr at) (cadddr bb)))))
+          (else (list 0.0 0.0 0.0 0.0)))))
+
+    ;; Emit a prop at a placement; record it; make its lamps' emitters. solid?
+    ;; puts it in the collision soup.
+    (define (place-prop! c pr xf room kind solid?)
+      (let* ((so (ctx-soup c))
+             (tag (tag-of c 'prop))
+             (parts (prop-parts pr))
+             ;; a prop's emissive parts switch with its first lamp's circuit
+             (k (and (pair? (prop-lamps pr)) (circuit-index c (lamp-circuit (car (prop-lamps pr)))))))
+        (for-each (lambda (pt)
+                    (let ((m (part-material pt)))
+                      (emit-part! (batch-for c m) (matinfo-on-circuit (mat c m) k) so (and solid? tag) xf pt room)))
+                  parts)
+        (let* ((ex (map part-extent parts))
+               (x0 (fold-left min 1e30 (map car ex))) (y0 (fold-left min 1e30 (map cadr ex)))
+               (x1 (fold-left max -1e30 (map caddr ex))) (y1 (fold-left max -1e30 (map cadddr ex)))
+               (corner (lambda (x y) (let ((w (xform-point xf (v3 x y 0)))) (cons (v3x w) (v3y w)))))
+               (top (+ (v3z (xform-origin xf)) (fold-left max 0.0 (map part-top parts))))
+               (fp (list (corner x0 y0) (corner x1 y0) (corner x1 y1) (corner x0 y1))))
+          (when solid?
+            (growable-push! (ctx-footprints c) (list (string-append "the " (symbol->string (prop-name pr))) fp)))
+          (growable-push! (ctx-placed c) (vector pr xf top room kind fp))
+          (for-each (lambda (l)
+                      (let ((w (xform-point xf (list->vector (lamp-at l))))
+                            (rgb (hex->rgb (lamp-colour l))))
+                        (growable-push! (ctx-emitters c)
+                                        (vector (v3x w) (v3y w) (v3z w) (lamp-radius l) (lamp-strength l)
+                                                (lamp-circuit l)
+                                                (/ (car rgb) 255.0) (/ (cadr rgb) 255.0) (/ (caddr rgb) 255.0) #f))))
+                    (prop-lamps pr)))))
+
+    ;; --- walls to mount on ------------------------------------------------------------------
+
+    ;; The side of a plan edge through p (within tol) that faces into room r
+    ;; and has wall there at height z: (edge . side), or #f.
+    (define (wall-side-at c p r z tol)
+      (let* ((pl (ctx-plan c)) (es (plan-edges pl)) (id (room-index r)))
+        (let loop ((is (list-sort (lambda (i j) (< (point-seg-dist p (edge-a (vector-ref es i)) (edge-b (vector-ref es i)))
+                                                   (point-seg-dist p (edge-a (vector-ref es j)) (edge-b (vector-ref es j)))))
+                                  (iota (vector-length es)))))
+          (if (null? is) #f
+              (let* ((e (vector-ref es (car is))))
+                (if (> (point-seg-dist p (edge-a e) (edge-b e)) tol)
+                    #f
+                    (let ((side (find (lambda (side)
+                                        (let ((fs (side-faces e side)))
+                                          (and (iv-of c (car fs) id)
+                                               (not (iv-of c (cdr fs) id)))))
+                                      '(left right))))
+                      (if side (cons e side) (loop (cdr is))))))))))
+
+    (define (project-on-edge p e)
+      (let ((t (max 0.0 (min 1.0 (seg-param p (edge-a e) (edge-b e))))))
+        (pt+ (edge-a e) (pt* (pt- (edge-b e) (edge-a e)) t))))
+
+    ;; --- things ---------------------------------------------------------------------------------
+
+    (define (place-things! c)
+      (let ((fl (ctx-floor c)))
+        ;; floor props first (the badge looks for its desk)
+        (for-each
+          (lambda (t)
+            (when (memq (thing-kind t) '(desk cabinet prop))
+              (let* ((p (thing-field t 'at))
+                     (pr (prop-of c (thing-field t 'kind)))
+                     (rs (rooms-at c p)))
+                (cond ((not pr) #f)          ; reported by gate 1's references
+                      ((null? rs)
+                       (add-problem! c 1 (thing-line t) (string-append "the " (symbol->string (thing-kind t)) " at "
+                                                                       (fmt-pt p) " is in no room")))
+                      (else
+                       (let* ((r (car rs))
+                              (z (or (thing-field t 'z) (room-floor r))))
+                         (place-prop! c pr (floor-xform (px p) (py p) z (or (thing-field t 'facing) 0.0))
+                                      (room-index r) (thing-kind t) #t)))))))
+          (floor-things fl))
+        (for-each
+          (lambda (t)
+            (case (thing-kind t)
+              ((badge)
+               (let* ((p (thing-field t 'on-desk))
+                      (desk (find (lambda (pl) (and (memq (placed-kind pl) '(desk prop cabinet))
+                                                    (point-in-poly? p (vector-ref pl 5))))
+                                  (growable->list (ctx-placed c))))
+                      (pr (prop-of c 'badge)))
+                 (cond ((not desk)
+                        (add-problem! c 1 (thing-line t) (string-append "the badge on-desk: " (fmt-pt p) " is on no desk")))
+                       (pr
+                        (let ((xf (placed-xform desk)))
+                          (place-prop! c pr (xform origin: (v3 (px p) (py p) (placed-top desk))
+                                                   ax: (xform-ax xf) ay: (xform-ay xf))
+                                       (placed-room desk) 'badge #f))))))
+              ((lifts)
+               (let* ((r (room-by-name c (thing-field t 'in)))
+                      (seg (thing-field t 'along))
+                      (n (thing-field t 'count))
+                      (pr (prop-of c (or (thing-field t 'kind) 'lift))))
+                 (when (and r pr)
+                   (for-each (lambda (k)
+                               (let* ((p (pt+ (car seg) (pt* (pt- (cadr seg) (car seg)) (/ (+ k 0.5) n))))
+                                      (ws (wall-side-at c p r (+ (room-floor r) 1.0) 1e-3)))
+                                 (if (not ws)
+                                     (add-problem! c 1 (thing-line t) (string-append "the lifts: " (fmt-pt p) " is not on a wall of "
+                                                                                     (symbol->string (room-name r))))
+                                     (place-prop! c pr (wall-xform p (room-floor r) (side-normal (car ws) (cdr ws)))
+                                                  (room-index r) 'lift #t))))
+                             (iota n)))))
+              (else #f)))
+          (floor-things fl))
+        ;; the exit door, in the hole its opening cut
+        (for-each
+          (lambda (o)
+            (when (eq? (opening-kind o) 'exit)
+              (let* ((r (room-by-name c (opening-a o)))
+                     (pr (prop-of c 'exit-door))
+                     (p (opening-at o)))
+                (when (and r pr p)
+                  (let ((ws (wall-side-at c p r (+ (room-floor r) 1.0) 1e-3)))
+                    (when ws
+                      (place-prop! c pr (wall-xform p (room-floor r) (side-normal (car ws) (cdr ws)))
+                                   (room-index r) 'exit #t)))))))
+          (floor-openings fl))
+        ;; each circuit's switch panel, on the wall nearest its point
+        (for-each
+          (lambda (ci)
+            (let ((p (circuit-panel ci)) (pr (prop-of c 'light-switch)))
+              (when (and p pr)
+                (let ((hit (find (lambda (r) (wall-side-at c p r (+ (room-floor r) 1.35) SWITCH-REACH))
+                                 (list-sort (lambda (a b) (< (room-floor a) (room-floor b))) (floor-rooms fl)))))
+                  (if (not hit)
+                      (add-problem! c 1 (circuit-line ci) (string-append "circuit " (symbol->string (circuit-name ci))
+                                                                         ": its panel " (fmt-pt p) " is not on a wall"))
+                      (let* ((ws (wall-side-at c p hit (+ (room-floor hit) 1.35) SWITCH-REACH))
+                             (q (project-on-edge p (car ws))))
+                        (place-prop! c pr (wall-xform q (room-floor hit) (side-normal (car ws) (cdr ws)))
+                                     (room-index hit) 'switch #f)))))))
+          (floor-circuits fl))))
+
+    (define (growable->list g) (vector->list (growable-data g) 0 (growable-count g)))
+
+    ;; --- ceiling panels ---------------------------------------------------------------------------
+
+    ;; The ceiling regions: ((circuit height room-floor faces) ...), one per
+    ;; circuit and ceiling height, from the tops of the faces' columns.
+    (define (ceiling-regions c)
+      (let* ((faces (plan-faces (ctx-plan c)))
+             (entries (apply append
+                             (map (lambda (i)
+                                    (filter-map (lambda (col)
+                                                  (let ((r (owner-room-of c (cadddr col))))
+                                                    (and r (not (eq? (room-light r) 'none))
+                                                         (list (room-light r) (cadr col) (room-floor r) i))))
+                                                (vector-ref (ctx-cols c) i)))
+                                  (iota (vector-length faces))))))
+        (let loop ((es entries) (acc '()))
+          (if (null? es) (reverse acc)
+              (let* ((e (car es))
+                     (hit (find (lambda (a) (and (eq? (car a) (car e)) (< (abs (- (cadr a) (cadr e))) 1e-6))) acc)))
+                (if hit
+                    (loop (cdr es) (map (lambda (a) (if (eq? a hit) (list (car a) (cadr a) (min (caddr a) (caddr e))
+                                                                          (cons (cadddr e) (cadddr a)))
+                                                        a))
+                                        acc))
+                    (loop (cdr es) (cons (list (car e) (cadr e) (caddr e) (list (cadddr e))) acc))))))))
+
+    (define (in-faces? c fs p)
+      (any (lambda (i)
+             (let ((f (vector-ref (plan-faces (ctx-plan c)) i)))
+               (and (point-in-poly? p (face-ring f))
+                    (not (any (lambda (h) (point-in-poly? p h)) (face-holes f))))))
+           fs))
+
+    ;; The distance from p to the region's edge: the plan edges with the region
+    ;; on one side only.
+    (define (edge-distance c fs p)
+      (let ((es (plan-edges (ctx-plan c))))
+        (let loop ((i 0) (best 1e30))
+          (if (>= i (vector-length es)) best
+              (let* ((e (vector-ref es i))
+                     (l (memv (edge-left e) fs)) (r (memv (edge-right e) fs)))
+                (loop (+ i 1)
+                      (if (eq? (not l) (not r)) best
+                          (min best (point-seg-dist p (edge-a e) (edge-b e))))))))))
+
+    (define (place-panels! c)
+      (let* ((lg (ctx-legend c))
+             (pm (legend-default lg 'panels))
+             (mi (mat c pm))
+             (b (batch-for c pm))
+             (rgb (let ((col (matinfo-colour mi))) (list (/ (vector-ref col 0) 255.0) (/ (vector-ref col 1) 255.0) (/ (vector-ref col 2) 255.0)))))
+        (for-each
+          (lambda (reg)
+            (let* ((circuit (car reg)) (h (cadr reg)) (floor-z (caddr reg)) (fs (cadddr reg))
+                   (room-h (- h floor-z))
+                   (spacing (if (> room-h 4.0) 4.0 PANEL-SPACING))
+                   (bbs (map (lambda (i) (poly-bbox (face-ring (vector-ref (plan-faces (ctx-plan c)) i)))) fs))
+                   (x0 (fold-left min 1e30 (map car bbs))) (y0 (fold-left min 1e30 (map cadr bbs)))
+                   (x1 (fold-left max -1e30 (map caddr bbs))) (y1 (fold-left max -1e30 (map cadddr bbs)))
+                   (cands (let xl ((x (+ (* 0.5 (floor (/ x0 0.5))) 0.25)) (acc '()))
+                            (if (> x x1) acc
+                                (xl (+ x 0.5)
+                                    (let yl ((y (+ (* 0.5 (floor (/ y0 0.5))) 0.25)) (acc acc))
+                                      (if (> y y1) acc
+                                          (yl (+ y 0.5)
+                                              (let ((p (cons x y)))
+                                                (if (in-faces? c fs p)
+                                                    (let ((d (edge-distance c fs p)))
+                                                      (if (>= d PANEL-MARGIN) (cons (cons d p) acc) acc))
+                                                    acc)))))))))
+                   ;; most interior first; ties broken by position so the order is fixed
+                   (sorted (list-sort (lambda (a b)
+                                        (cond ((> (car a) (+ (car b) 1e-9)) #t)
+                                              ((< (car a) (- (car b) 1e-9)) #f)
+                                              ((< (py (cdr a)) (py (cdr b))) #t)
+                                              ((> (py (cdr a)) (py (cdr b))) #f)
+                                              (else (< (px (cdr a)) (px (cdr b))))))
+                                      cands))
+                   (chosen (fold-left (lambda (acc cand)
+                                        (if (any (lambda (q) (< (pt-dist q (cdr cand)) spacing)) acc)
+                                            acc
+                                            (cons (cdr cand) acc)))
+                                      '() sorted)))
+              (for-each
+                (lambda (p)
+                  (let* ((rs (rooms-at c p))
+                         (r (find (lambda (r) (eq? (room-light r) circuit)) rs))
+                         (id (if r (room-index r) -1))
+                         ;; long panels where they fit, square ones in narrow rooms
+                         (long? (every (lambda (q) (in-faces? c fs q))
+                                       (list (cons (- (px p) 0.8) (py p)) (cons (+ (px p) 0.8) (py p)))))
+                         (sz (if long? (v3 1.2 0.6 0.03) (v3 0.6 0.6 0.03))))
+                    (emit-box! b (matinfo-on-circuit mi (circuit-index c circuit)) (floor-xform (px p) (py p) 0.0 0.0) (v3 0 0 (- h 0.015)) sz id)
+                    (growable-push! (ctx-emitters c)
+                                    (vector (px p) (py p) (- h 0.05) (+ 4.0 (* 1.5 room-h)) 1.0 circuit
+                                            (car rgb) (cadr rgb) (caddr rgb) #t))))
+                (reverse chosen))))
+          (ceiling-regions c))))
+
+    ;; --- circuits ---------------------------------------------------------------------------------------
+
+    ;; ((name index level r g b panel needs) ...): the floor's circuits in
+    ;; order, then every reserved circuit (RESERVED-CIRCUITS: emergency,
+    ;; screens, city) in that order, whether anything uses it or not, so a
+    ;; circuit's index is known while the floor is being built (a fixture's
+    ;; emission carries it). A lamp naming any other undeclared circuit is
+    ;; reported by compile-floor.
+    (define RESERVED-RGB
+      (list (list 'emergency 1.0 (/ 159 255.0) (/ 26 255.0))      ; #FF9F1A
+            (list 'screens (/ 77 255.0) (/ 242 255.0) (/ 217 255.0)) ; #4DF2D9
+            (list 'city 1.0 (/ 89 255.0) (/ 217 255.0))))          ; #FF59D9
+
+    (define (circuit-table c)
+      (let* ((fl (ctx-floor c))
+             (pm (mat c (legend-default (ctx-legend c) 'panels)))
+             (pc (matinfo-colour pm))
+             (prgb (list (/ (vector-ref pc 0) 255.0) (/ (vector-ref pc 1) 255.0) (/ (vector-ref pc 2) 255.0)))
+             (declared (map (lambda (ci i) (append (list (circuit-name ci) i (circuit-level ci)) prgb
+                                                   (list (circuit-panel ci) (circuit-needs ci))))
+                            (floor-circuits fl) (iota (length (floor-circuits fl)))))
+             (n (length declared)))
+        (append declared
+                (map (lambda (name i)
+                       (let ((rgb (cdr (assq name RESERVED-RGB))))
+                         (list name (+ n i) 1.0 (car rgb) (cadr rgb) (caddr rgb) #f #f)))
+                     RESERVED-CIRCUITS (iota (length RESERVED-CIRCUITS))))))
+
+    ;; A circuit's index in the table, or #f (an undeclared name).
+    (define (circuit-index c name)
+      (let ((e (assq name (circuit-table c)))) (and e (cadr e))))
+
+    (define (dress! c)
+      (place-things! c)
+      (place-panels! c)
+      c)))

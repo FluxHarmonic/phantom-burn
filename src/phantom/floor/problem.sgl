@@ -9,7 +9,7 @@
           (sigil struct))
 
   (export problem problem? problem-path problem-line problem-message problem-gate
-          problem->string problems-of-gate)
+          problem->string problems-of-gate floor-debug! checkpoint!)
 
   (begin
     (define-struct problem
@@ -26,6 +26,12 @@
                          "")
                      ": " (problem-message p)
                      " [gate " (number->string (problem-gate p)) "]"))
+
+    ;; Debugging: after (floor-debug! #t), checkpoint! prints its stage.
+    (define *debug* (vector #f))
+    (define (floor-debug! on?) (vector-set! *debug* 0 on?))
+    (define (checkpoint! what)
+      (when (vector-ref *debug* 0) (display "floor compile: ") (display what) (newline)))
 
     (define (problems-of-gate ps g)
       (filter (lambda (p) (= (problem-gate p) g)) ps))))

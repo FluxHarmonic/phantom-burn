@@ -10,4 +10,5 @@
           (box  size: (0.6 0.04 0.35)   at: (0 0.14 1.025)    material: plastic)
           (box  size: (0.54 0.02 0.29)  at: (0 0.11 1.025)    material: screen)
           (box  size: (0.08 0.06 0.1)   at: (0 0.17 0.8)      material: plastic))
+  lamps: ((at: (0 -0.12 1.0)  colour: "#4DF2D9"  radius: 2.2  strength: 0.45  circuit: screens))
   hides: crouched)   ; a crouched body behind it is out of sight

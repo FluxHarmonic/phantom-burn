@@ -1,0 +1,241 @@
+;;; (phantom floor light) - Light per circuit, baked into each render vertex
+;;; (design section 7: "Each vertex carries its light from up to four
+;;; circuits, and the shader takes one level per circuit, so killing a zone's
+;;; lights changes one value").
+;;;
+;;; For each vertex and each emitter (a ceiling panel or a prop's lamp) within
+;;; the emitter's radius:
+;;;
+;;;   w = strength x (1 - d/R)^2 x wrap(n.l) x down x visible
+;;;
+;;;   wrap(n.l)   (n.l + 0.3) / 1.3, clamped at 0: a surface turned a little
+;;;               away still catches some light, one turned right away none
+;;;   down        a ceiling panel lights only below it: 0.25 + 0.75 cos
+;;;   visible     1 unless an opaque collision triangle lies between the
+;;;               vertex (lifted 2 cm off its surface) and the emitter; glass
+;;;               and rails let light through. A ray is cast only between
+;;;               rooms that can see each other (the same room, one volume,
+;;;               or joined by an opening); any other pair is dark.
+;;;
+;;; and w is added to the emitter's circuit. Each vertex keeps its four
+;;; strongest circuits: SLOTS, #(w0 w1 w2 w3 c0 c1 c2 c3), with circuit
+;;; indices into the circuit table (unused slots: weight 0, index 0).
+;;;
+;;; The level a circuit is set to, and its colour, are not baked: the shader
+;;; multiplies them in, so switching a circuit is one uniform.
+;;;
+;;; Written for speed: the ray test is top-level procedures over flat
+;;; vectors, with no closures made per ray (the bake casts about a million).
+;;;
+;;; Pure: no platform.
+
+(define-library (phantom floor light)
+  (import (sigil core)
+          (sigil list)
+          (sigil math)
+          (phantom floor mesh))
+
+  (export make-occluders occluded? bake-vertex bake-stats)
+
+  (begin
+    (define CELL 1.0)
+    (define LIFT 0.02)
+    (define TRI 13)               ; floats per triangle: v0 e1 e2 n d
+
+    ;; --- occluders ------------------------------------------------------------------
+    ;;
+    ;; #(tris n x0 y0 nx ny cells mailbox stamp tests): tris a flonum vector,
+    ;; TRI per triangle (v0, e1, e2, the unit normal n, and d = n.v0); cells a
+    ;; vector of vectors of triangle indices.
+
+    (define (make-occluders soup keep?)
+      (let* ((st (soup-tris soup)) (sd (growable-data st))
+             (n0 (soup-count soup))
+             (keep (filter (lambda (i) (keep? (growable-ref (soup-surfaces soup) i))) (iota n0)))
+             (n (length keep))
+             (tris (make-vector (* TRI (max n 1)) 0.0))
+             (bbs (make-vector (* 4 (max n 1)) 0.0)))
+        (let loop ((ks keep) (j 0))
+          (when (pair? ks)
+            (let* ((b (* 9 (car ks)))
+                   (ax (vector-ref sd b)) (ay (vector-ref sd (+ b 1))) (az (vector-ref sd (+ b 2)))
+                   (bx (vector-ref sd (+ b 3))) (by (vector-ref sd (+ b 4))) (bz (vector-ref sd (+ b 5)))
+                   (cx (vector-ref sd (+ b 6))) (cy (vector-ref sd (+ b 7))) (cz (vector-ref sd (+ b 8)))
+                   (e1x (- bx ax)) (e1y (- by ay)) (e1z (- bz az))
+                   (e2x (- cx ax)) (e2y (- cy ay)) (e2z (- cz az))
+                   (nx (- (* e1y e2z) (* e1z e2y))) (ny (- (* e1z e2x) (* e1x e2z))) (nz (- (* e1x e2y) (* e1y e2x)))
+                   (nl0 (sqrt (+ (* nx nx) (* ny ny) (* nz nz))))
+                   (nl (if (> nl0 0.0) nl0 1.0))
+                   (o (* TRI j)))
+              (vector-set! tris o ax) (vector-set! tris (+ o 1) ay) (vector-set! tris (+ o 2) az)
+              (vector-set! tris (+ o 3) e1x) (vector-set! tris (+ o 4) e1y) (vector-set! tris (+ o 5) e1z)
+              (vector-set! tris (+ o 6) e2x) (vector-set! tris (+ o 7) e2y) (vector-set! tris (+ o 8) e2z)
+              (vector-set! tris (+ o 9) (/ nx nl)) (vector-set! tris (+ o 10) (/ ny nl)) (vector-set! tris (+ o 11) (/ nz nl))
+              (vector-set! tris (+ o 12) (/ (+ (* nx ax) (* ny ay) (* nz az)) nl))
+              (vector-set! bbs (* 4 j) (min ax bx cx)) (vector-set! bbs (+ (* 4 j) 1) (min ay by cy))
+              (vector-set! bbs (+ (* 4 j) 2) (max ax bx cx)) (vector-set! bbs (+ (* 4 j) 3) (max ay by cy))
+              (loop (cdr ks) (+ j 1)))))
+        (let* ((x0 (- (vmin bbs n 0) 1.0))
+               (y0 (- (vmin bbs n 1) 1.0))
+               (x1 (+ (vmax bbs n 2) 1.0))
+               (y1 (+ (vmax bbs n 3) 1.0))
+               (nx (max 1 (exact (ceiling (/ (- x1 x0) CELL)))))
+               (ny (max 1 (exact (ceiling (/ (- y1 y0) CELL)))))
+               (cells (make-vector (* nx ny) '())))
+          (let loop ((j 0))
+            (when (< j n)
+              (let ((i0 (max 0 (exact (floor (/ (- (vector-ref bbs (* 4 j)) x0) CELL)))))
+                    (j0 (max 0 (exact (floor (/ (- (vector-ref bbs (+ (* 4 j) 1)) y0) CELL)))))
+                    (i1 (min (- nx 1) (exact (floor (/ (- (vector-ref bbs (+ (* 4 j) 2)) x0) CELL)))))
+                    (j1 (min (- ny 1) (exact (floor (/ (- (vector-ref bbs (+ (* 4 j) 3)) y0) CELL))))))
+                (let li ((i i0))
+                  (when (<= i i1)
+                    (let lj ((k j0))
+                      (when (<= k j1)
+                        (vector-set! cells (+ i (* k nx)) (cons j (vector-ref cells (+ i (* k nx)))))
+                        (lj (+ k 1))))
+                    (li (+ i 1)))))
+              (loop (+ j 1))))
+          ;; lists to vectors: the walk reads them by index
+          (let loop ((k 0))
+            (when (< k (vector-length cells))
+              (vector-set! cells k (list->vector (reverse (vector-ref cells k))))
+              (loop (+ k 1))))
+          (vector tris n x0 y0 nx ny cells (make-vector (max n 1) -1) (vector 0) (vector 0 0)))))
+
+    ;; The least (most) of every 4th value of v from offset k, over n entries.
+    (define (vmin v n k) (let loop ((j 0) (m 1e30)) (if (>= j n) m (loop (+ j 1) (min m (vector-ref v (+ (* 4 j) k)))))))
+    (define (vmax v n k) (let loop ((j 0) (m -1e30)) (if (>= j n) m (loop (+ j 1) (max m (vector-ref v (+ (* 4 j) k)))))))
+
+    ;; (triangle-tests . rays)
+    (define (bake-stats occ) (cons (vector-ref (vector-ref occ 9) 0) (vector-ref (vector-ref occ 9) 1)))
+
+    ;; Does segment P + t D, 0 < t < 1, cross triangle j? The plane test first:
+    ;; both ends on one side of the triangle's plane cannot cross it.
+    (define (tri-hit? tris j px py pz dx dy dz)
+      (let* ((o (* TRI j))
+             (nx (vector-ref tris (+ o 9))) (ny (vector-ref tris (+ o 10))) (nz (vector-ref tris (+ o 11)))
+             (d (vector-ref tris (+ o 12)))
+             (sp (- (+ (* nx px) (* ny py) (* nz pz)) d))
+             (sq (- (+ (* nx (+ px dx)) (* ny (+ py dy)) (* nz (+ pz dz))) d)))
+        (and (<= (* sp sq) 0.0)
+             (let* ((vx (vector-ref tris o)) (vy (vector-ref tris (+ o 1))) (vz (vector-ref tris (+ o 2)))
+                    (e1x (vector-ref tris (+ o 3))) (e1y (vector-ref tris (+ o 4))) (e1z (vector-ref tris (+ o 5)))
+                    (e2x (vector-ref tris (+ o 6))) (e2y (vector-ref tris (+ o 7))) (e2z (vector-ref tris (+ o 8)))
+                    (hx (- (* dy e2z) (* dz e2y))) (hy (- (* dz e2x) (* dx e2z))) (hz (- (* dx e2y) (* dy e2x)))
+                    (a (+ (* e1x hx) (* e1y hy) (* e1z hz))))
+               (and (> (abs a) 1e-12)
+                    (let* ((f (/ 1.0 a))
+                           (sx (- px vx)) (sy (- py vy)) (sz (- pz vz))
+                           (u (* f (+ (* sx hx) (* sy hy) (* sz hz)))))
+                      (and (>= u -1e-9) (<= u (+ 1.0 1e-9))
+                           (let* ((qx (- (* sy e1z) (* sz e1y))) (qy (- (* sz e1x) (* sx e1z))) (qz (- (* sx e1y) (* sy e1x)))
+                                  (v (* f (+ (* dx qx) (* dy qy) (* dz qz)))))
+                             (and (>= v -1e-9) (<= (+ u v) (+ 1.0 1e-9))
+                                  (let ((t (* f (+ (* e2x qx) (* e2y qy) (* e2z qz)))))
+                                    (and (> t 1e-4) (< t (- 1.0 1e-4)))))))))))))
+
+    ;; Does a triangle in cell (ci, cj) cross the segment? Each triangle is
+    ;; tested once per segment (the mailbox holds the segment's stamp).
+    (define (cell-hit? occ ci cj stamp px py pz dx dy dz)
+      (let* ((nx (vector-ref occ 4))
+             (ts (vector-ref (vector-ref occ 6) (+ ci (* cj nx))))
+             (m (vector-length ts))
+             (mail (vector-ref occ 7))
+             (tris (vector-ref occ 0))
+             (tests (vector-ref occ 9)))
+        (let loop ((k 0))
+          (and (< k m)
+               (let ((j (vector-ref ts k)))
+                 (if (= (vector-ref mail j) stamp)
+                     (loop (+ k 1))
+                     (begin (vector-set! mail j stamp)
+                            (vector-set! tests 0 (+ 1 (vector-ref tests 0)))
+                            (or (tri-hit? tris j px py pz dx dy dz)
+                                (loop (+ k 1))))))))))
+
+    ;; Does segment P->Q (strictly between its ends) cross a triangle? Walks
+    ;; the grid cells the segment's shadow on the floor crosses.
+    (define (occluded? occ px py pz qx qy qz)
+      (let* ((stampv (vector-ref occ 8))
+             (stamp (+ 1 (vector-ref stampv 0)))
+             (x0 (vector-ref occ 2)) (y0 (vector-ref occ 3))
+             (dx (- qx px)) (dy (- qy py)) (dz (- qz pz))
+             (fx (/ (- px x0) CELL)) (fy (/ (- py y0) CELL))
+             (gx (/ (- qx x0) CELL)) (gy (/ (- qy y0) CELL))
+             (ci (exact (floor fx))) (cj (exact (floor fy)))
+             (ce (exact (floor gx))) (cf (exact (floor gy)))
+             (sx (if (> gx fx) 1 -1)) (sy (if (> gy fy) 1 -1))
+             (ddx (abs (- gx fx))) (ddy (abs (- gy fy)))
+             (tdx (if (> ddx 1e-12) (/ 1.0 ddx) 1e30))
+             (tdy (if (> ddy 1e-12) (/ 1.0 ddy) 1e30))
+             (tmx (if (> ddx 1e-12) (* tdx (if (> sx 0) (- (+ ci 1) fx) (- fx ci))) 1e30))
+             (tmy (if (> ddy 1e-12) (* tdy (if (> sy 0) (- (+ cj 1) fy) (- fy cj))) 1e30)))
+        (vector-set! stampv 0 stamp)
+        (vector-set! (vector-ref occ 9) 1 (+ 1 (vector-ref (vector-ref occ 9) 1)))
+        (walk occ ci cj ce cf sx sy tmx tmy tdx tdy stamp px py pz dx dy dz 0)))
+
+    (define (walk occ ci cj ce cf sx sy tmx tmy tdx tdy stamp px py pz dx dy dz steps)
+      (let ((nx (vector-ref occ 4)) (ny (vector-ref occ 5)))
+        (cond ((or (< ci 0) (>= ci nx) (< cj 0) (>= cj ny)) #f)   ; left the grid: it cannot come back
+              ((cell-hit? occ ci cj stamp px py pz dx dy dz) #t)
+              ((or (and (= ci ce) (= cj cf)) (> steps 10000)) #f)
+              ((< tmx tmy) (walk occ (+ ci sx) cj ce cf sx sy (+ tmx tdx) tmy tdx tdy stamp px py pz dx dy dz (+ steps 1)))
+              (else (walk occ ci (+ cj sy) ce cf sx sy tmx (+ tmy tdy) tdx tdy stamp px py pz dx dy dz (+ steps 1))))))
+
+    ;; --- one vertex -------------------------------------------------------------------
+    ;;
+    ;; v: a batch vertex (its room at index 16). emitters: a vector of #(x y z
+    ;; radius strength circuit-index r g b down? room). sees: a vector of
+    ;; vectors, (sees[a][b]) true when rooms a and b can see each other, or #f
+    ;; to cast every ray; a room of -1 on either side always casts. Returns
+    ;; SLOTS.
+
+    (define (bake-vertex occ emitters v sees)
+      (let* ((x (vector-ref v 0)) (y (vector-ref v 1)) (z (vector-ref v 2))
+             (nx (vector-ref v 5)) (ny (vector-ref v 6)) (nz (vector-ref v 7))
+             (vroom (vector-ref v 16))
+             (lx (+ x (* LIFT nx))) (ly (+ y (* LIFT ny))) (lz (+ z (* LIFT nz)))
+             (n (vector-length emitters))
+             (acc (let loop ((i 0) (acc '()))
+                    (if (>= i n) acc
+                        (let* ((e (vector-ref emitters i))
+                               (ex (vector-ref e 0)) (ey (vector-ref e 1)) (ez (vector-ref e 2))
+                               (r (vector-ref e 3))
+                               (dx (- ex x)) (dy (- ey y)) (dz (- ez z))
+                               (d (sqrt (+ (* dx dx) (* dy dy) (* dz dz)))))
+                          (if (or (>= d r) (< d 1e-6) (not (can-see? sees vroom (vector-ref e 10))))
+                              (loop (+ i 1) acc)
+                              (let* ((ndl (/ (+ (* nx dx) (* ny dy) (* nz dz)) d))
+                                     (wrap (/ (+ ndl 0.3) 1.3))
+                                     (down (if (vector-ref e 9)
+                                               (if (> dz 0.0) (+ 0.25 (* 0.75 (/ dz d))) 0.0)
+                                               1.0))
+                                     (a (- 1.0 (/ d r)))
+                                     (w (* (vector-ref e 4) a a (max 0.0 wrap) down)))
+                                (if (or (< w 1e-3) (occluded? occ lx ly lz ex ey ez))
+                                    (loop (+ i 1) acc)
+                                    (loop (+ i 1) (add-to acc (vector-ref e 5) w))))))))))
+        (let ((top (take-strongest acc 4)))
+          (vector (slot-w top 0) (slot-w top 1) (slot-w top 2) (slot-w top 3)
+                  (slot-c top 0) (slot-c top 1) (slot-c top 2) (slot-c top 3)))))
+
+    (define (can-see? sees a b)
+      (or (not sees) (< a 0) (< b 0)
+          (vector-ref (vector-ref sees a) b)))
+
+    (define (add-to acc c w)
+      (let ((p (assv c acc)))
+        (if p (begin (set-cdr! p (+ (cdr p) w)) acc)
+            (cons (cons c w) acc))))
+
+    ;; The k strongest (circuit . weight), strongest first; ties by circuit
+    ;; index, so the result does not depend on list order.
+    (define (take-strongest acc k)
+      (let ((sorted (list-sort (lambda (a b) (or (> (cdr a) (cdr b))
+                                                 (and (= (cdr a) (cdr b)) (< (car a) (car b)))))
+                               acc)))
+        (if (> (length sorted) k) (take sorted k) sorted)))
+
+    (define (slot-w top i) (if (< i (length top)) (cdr (list-ref top i)) 0.0))
+    (define (slot-c top i) (if (< i (length top)) (car (list-ref top i)) 0))))

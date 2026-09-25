@@ -1,0 +1,81 @@
+;;; The whole slice compiled: no problems, the buffers consistent, every
+;;; render triangle facing the way its normal says, the circuits, and light
+;;; where the panels are.
+(import (sigil test)
+        (sigil fs)
+        (sigil list)
+        (sigil math)
+        (sigil time)
+        (phantom floor problem)
+        (phantom floor compile))
+
+(define (reader path) (and (file-exists? path) (read-file-string path)))
+(define t0 (current-jiffy))
+(define cf (compile-floor "floors/14-slice.floor" reader))
+(define ms (/ (* 1000.0 (- (current-jiffy) t0)) (jiffies-per-second)))
+
+(define vb (compiled-floor-vertices cf))
+(define ib (compiled-floor-indices cf))
+(define nv (compiled-floor-vertex-count cf))
+(define ni (compiled-floor-index-count cf))
+(define isize (if (eq? (compiled-floor-index-type cf) 'u16) 2 4))
+(define (f32 v i k) (bytevector-ieee-single-ref vb (+ (* 60 v) k)))
+(define (idx i) (let ((o (* isize i)))
+                  (+ (bytevector-u8-ref ib o) (* 256 (bytevector-u8-ref ib (+ o 1)))
+                     (if (= isize 4) (+ (* 65536 (bytevector-u8-ref ib (+ o 2))) (* 16777216 (bytevector-u8-ref ib (+ o 3)))) 0))))
+
+(test-group "the slice compiles"
+  (test "no problems"
+    (for-each (lambda (p) (display (problem->string p)) (newline)) (compiled-floor-problems cf))
+    (display (list 'compile-ms ms 'vertices nv 'indices ni 'stats (compiled-floor-stats cf))) (newline)
+    (assert-equal 0 (length (compiled-floor-problems cf))))
+  (test "parts: eight textures, then solid, then glass"
+    (let ((names (map part-name (compiled-floor-parts cf))))
+      (display names) (newline)
+      (assert-equal "solid" (list-ref names (- (length names) 2)))
+      (assert-equal "glass" (list-ref names (- (length names) 1)))
+      (assert-equal 10 (length names))))
+  (test "the parts cover the index buffer exactly, in order"
+    (let loop ((ps (compiled-floor-parts cf)) (at 0))
+      (if (null? ps)
+          (assert-equal ni at)
+          (begin (assert-equal at (part-first (car ps))) (loop (cdr ps) (+ at (part-count (car ps))))))))
+  (test "every index is a vertex"
+    (assert-true (let loop ((i 0)) (or (>= i ni) (and (< (idx i) nv) (loop (+ i 1)))))))
+  (test "every triangle faces the way its first vertex's normal says"
+    (let loop ((t 0) (bad 0))
+      (if (>= t (quotient ni 3))
+          (assert-equal 0 bad)
+          (let* ((a (idx (* 3 t))) (b (idx (+ (* 3 t) 1))) (c (idx (+ (* 3 t) 2)))
+                 (ux (- (f32 b 0 0) (f32 a 0 0))) (uy (- (f32 b 0 4) (f32 a 0 4))) (uz (- (f32 b 0 8) (f32 a 0 8)))
+                 (vx (- (f32 c 0 0) (f32 a 0 0))) (vy (- (f32 c 0 4) (f32 a 0 4))) (vz (- (f32 c 0 8) (f32 a 0 8)))
+                 (nx (- (* uy vz) (* uz vy))) (ny (- (* uz vx) (* ux vz))) (nz (- (* ux vy) (* uy vx)))
+                 (d (+ (* nx (f32 a 0 20)) (* ny (f32 a 0 24)) (* nz (f32 a 0 28))))
+                 (area (sqrt (+ (* nx nx) (* ny ny) (* nz nz)))))
+            (loop (+ t 1) (if (and (> area 1e-6) (<= d 0.0)) (+ bad 1) bad))))))
+  (test "the SGM1 file's size is what its header says"
+    (let ((s (compiled-floor->sgm1 cf)) (np (length (compiled-floor-parts cf))))
+      (assert-equal (+ 24 (* 8 np) (* 60 nv) (* isize ni)) (bytevector-length s))))
+  (test "circuits: c1 c2 c3 from the floor, emergency from the exit light"
+    (assert-equal '(c1 c2 c3 emergency) (map car (compiled-floor-circuits cf)))))
+
+;; The strongest circuit at the vertex nearest (x y z) with normal n.
+(define (strongest-near x y z nzz)
+  (let loop ((v 0) (best #f) (bd 1e30))
+    (if (>= v nv)
+        (and best (list (bytevector-u8-ref vb (+ (* 60 best) 56)) (f32 best 0 40) bd))
+        (let ((d (+ (square (- (f32 v 0 0) x)) (square (- (f32 v 0 4) y)) (square (- (f32 v 0 8) z)))))
+          (if (and (< d bd) (> (* nzz (f32 v 0 28)) 0.9))
+              (loop (+ v 1) v d)
+              (loop (+ v 1) best bd))))))
+
+(test-group "light"
+  (test "the lobby floor is lit by c2 (index 1)"
+    (let ((s (strongest-near 5.0 3.0 0.0 1.0))) (display s) (newline)
+      (assert-equal 1 (car s)) (assert-true (> (cadr s) 0.05))))
+  (test "the office floor is lit by c1 (index 0)"
+    (let ((s (strongest-near 19.0 17.0 0.0 1.0))) (display s) (newline)
+      (assert-equal 0 (car s)) (assert-true (> (cadr s) 0.05))))
+  (test "the fm-office floor by c3 (index 2)"
+    (let ((s (strongest-near 24.0 20.0 0.0 1.0))) (display s) (newline)
+      (assert-equal 2 (car s)))))

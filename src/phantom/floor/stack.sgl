@@ -37,9 +37,9 @@
 
   (begin
     (define SLAB 0.25)          ; an open room's floor slab (the mezzanine's: 2.75 to 3.0)
-    (define HATCH-SIZE 0.5)     ; a hatch's square side, when the floor gives no size:
-                                ; the largest that fits the slice's office-and-duct overlap
-                                ; (a 45-degree duct 0.71 m across, over a wall 0.4 m away)
+    (define HATCH-SIZE 0.64)    ; a hatch's square side, when the floor gives no size:
+                                ; the walker's body (0.56 m across) and 4 cm to spare,
+                                ; which still fits the slice's 45-degree duct (0.71 m across)
 
     ;; kind: room | hatch. room: the room record (a room), or #f. lower upper:
     ;; room indices (a hatch). poly: counter-clockwise.

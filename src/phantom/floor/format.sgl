@@ -54,7 +54,7 @@
           part-sides part-outline part-line
           lamp lamp? lamp-at lamp-colour lamp-radius lamp-strength lamp-circuit lamp-line
           texture texture? texture-name texture-path texture-legend texture-cells texture-line
-          OPENING-KINDS THING-KINDS hex->rgb)
+          OPENING-KINDS THING-KINDS RESERVED-CIRCUITS hex->rgb)
 
   (begin
     ;; --- records ------------------------------------------------------------
@@ -138,6 +138,10 @@
 
     (define OPENING-KINDS '(door arch glass grate hatch window exit))
     (define THING-KINDS '(lifts guard desk cabinet badge rail prop))
+    ;; Circuits no floor declares: lamps in props and the compiler's rules use
+    ;; them, and nothing switches them (the exit sign, screens left on, the
+    ;; city through the windows).
+    (define RESERVED-CIRCUITS '(emergency screens city))
 
     ;; --- value shapes -------------------------------------------------------
     ;;
@@ -738,10 +742,10 @@
           (let loop ((cs circuits) (seen '()) (acc '()))
             (if (null? cs) (reverse acc)
                 (loop (cdr cs) (cons (circuit-name (car cs)) seen)
-                      (if (memq (circuit-name (car cs)) (cons 'none (cons 'emergency seen)))
+                      (if (memq (circuit-name (car cs)) (cons 'none (append RESERVED-CIRCUITS seen)))
                           (cons (bad (circuit-line (car cs))
                                      (string-append "circuit " (symbol->string (circuit-name (car cs)))
-                                                    ": the name is used twice, or reserved (none, emergency)"))
+                                                    ": the name is used twice, or reserved (none, emergency, screens, city)"))
                                 acc)
                           acc))))
           ;; things: rooms and prop kinds

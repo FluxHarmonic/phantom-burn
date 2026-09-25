@@ -24,7 +24,7 @@
       (assert-equal 'duct (room-name duct))
       (assert-equal '(corridor office) (room-over duct))
       (assert-true (room-crouch-only duct))
-      (assert-equal (cons 22.8 13.8) (list-ref (room-corners duct) 1))))
+      (assert-equal (cons 23.4 14.4) (list-ref (room-corners duct) 1))))
   (test "room lines"
     (assert-equal '(11 13 15 17 19 21) (map room-line (floor-rooms (sources-floor src)))))
   (test "props and textures found"
