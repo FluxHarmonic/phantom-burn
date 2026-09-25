@@ -24,7 +24,7 @@
 
   (export make-play play? play-reset! play-tick!
           play-data play-guard play-guard-world
-          play-light play-light-01 play-visibility play-shape
+          play-light play-light-01 play-visibility play-shape play-light-state
           play-badge? play-outcome play-ticks play-start-walker
           play-near-exit? GUARD-START-LEG PICKUP-REACH EXIT-REACH)
 
@@ -50,6 +50,7 @@
     (define (play-outcome p) (vector-ref p 8))
     (define (play-ticks p) (vector-ref p 9))
     (define (play-light p) (vector-ref p 10))
+    (define (play-light-state p) (vector-ref p 4))
     (define (play-light-01 p) (vector-ref p 11))
     (define (play-visibility p) (vector-ref p 12))
     (define (play-shape p) (vector-ref p 13))
