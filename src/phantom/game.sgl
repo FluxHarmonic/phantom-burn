@@ -370,6 +370,9 @@
       (let ((t0 (current-jiffy))
             (dt (min MAX-DT (max 0.0 dt)))
             (held? (vector-ref ctl 0)))
+        ;; play's 6th hook (P3, the device API v4 §3): what is held this
+        ;; frame (the deck), before the ticks
+        (when (and *play* (> (vector-length *play*) 5)) ((vector-ref *play* 5) held?))
         ;; play (P2) sees each pressed key first: 5th hook, #t when it took it
         (for-each (lambda (k)
                     (unless (and *play* (> (vector-length *play*) 4) ((vector-ref *play* 4) k))

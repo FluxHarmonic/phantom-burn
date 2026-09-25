@@ -136,13 +136,18 @@
             ((string=? k "ArrowDown") 'down)
             ((string=? k "Shift") 'shift)
             ((string=? k "Control") 'control)
+            ((string=? k "deck") 'deck)
             ((string=? k " ") 'space)
             ((= (string-length k) 1) (string->symbol (string (char-downcase (string-ref k 0)))))
             (else #f)))
 
     ;; Ctrl runs natively but not here: Ctrl+W closes the tab.
+    ;; the deck (P3) is held: the page's right mouse button and DECK button
+    ;; send the key "deck", and T holds it too
     (define (held? k)
-      (and (not (eq? k 'control)) (memq k *keys*) #t))
+      (cond ((eq? k 'control) #f)
+            ((eq? k 'deck) (and (or (memq 'deck *keys*) (memq 't *keys*)) #t))
+            (else (and (memq k *keys*) #t))))
 
     (define (frame-dt payload)
       (let* ((ms (or (string->number payload) 0.0))

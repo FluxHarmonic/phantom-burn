@@ -73,7 +73,7 @@
   <div class="ring" id="lring"></div><div class="knob" id="lknob"></div>
   <div class="ring" id="rring"></div><div class="knob" id="rknob"></div>
   <div id="crouch">C</div>
-  <div id="lights"><button data-k="use">USE</button></div>
+  <div id="lights"><button data-k="deck" data-hold="1">DECK</button><button data-k="use">USE</button></div>
   <div id="lab">
     <button id="labbtn">LAB</button>
     <div id="labgrid">
@@ -369,9 +369,24 @@
         var b = e.target.closest ? e.target.closest("button") : null;
         e.preventDefault();
         if (!b) return;
+        // DECK (P3) is held: down while the thumb is on it
+        if (b.getAttribute("data-hold")) { app.dispatch("keydown", b.getAttribute("data-k")); b.classList.add("down"); return; }
         app.dispatch("press", b.getAttribute("data-k"));
         b.classList.add("down"); setTimeout(function () { b.classList.remove("down"); }, 150);
       }, { passive: false });
+      ["touchend", "touchcancel"].forEach(function (n) {
+        lights.addEventListener(n, function (e) {
+          var b = e.target.closest ? e.target.closest("button") : null;
+          if (b && b.getAttribute("data-hold")) { app.dispatch("keyup", b.getAttribute("data-k")); b.classList.remove("down"); }
+        });
+      });
+      // the deck (P3) on a desktop: hold the right mouse button (no context
+      // menu over the game); T holds it too, from the keyboard
+      canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+      document.addEventListener("mousedown", function (e) {
+        if (e.button === 2 && (e.target === canvas || document.pointerLockElement === canvas)) app.dispatch("keydown", "deck");
+      });
+      document.addEventListener("mouseup", function (e) { if (e.button === 2) app.dispatch("keyup", "deck"); });
     });
   })();
   </script>

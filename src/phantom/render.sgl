@@ -42,7 +42,7 @@
           render-lift? render-lift!
           render-world-ms render-post-ms
           render-scene! render-make-world-mesh render-draw-world-mesh render-title-scene!
-          render-draw-floor! render-floor-kind
+          render-draw-floor! render-floor-kind render-floor-info
           render-set-extra-draw! render-draw-object! render-hide-part! render-part-hidden?
           render-load-guard! render-guard-ready? render-guard-parts render-draw-guard!
           make-camera camera-set!)
@@ -502,7 +502,7 @@ void main() {
       (both (lambda (p) (set-pipeline-uniform! p 'model *model*))))
 
     (define (render-load-stand-in! load-mesh* load-texture* draws lights)
-      (set! *kind* 'stand-in)
+      (set! *kind* 'stand-in) (set! *floor-info* #f)
       (model-turn!)
       (set! *circuits* STAND-IN-CIRCUITS)
       (when *floor* (mesh-free! *floor*))
@@ -529,8 +529,14 @@ void main() {
     ;; its parts, circuits and fixtures. The city is still the stand-in's
     ;; skyline, drawn through the stand-in pipeline (Y-up, model matrix) with
     ;; no lights of its own.
+    ;; The compiled floor's floor.sexp datum (#f for the stand-in): the
+    ;; terminal's map reads its outlines, openings and devices.
+    (define *floor-info* #f)
+    (define (render-floor-info) *floor-info*)
+
     (define (render-load-compiled! load-mesh* load-texture* info)
       (set! *kind* 'compiled)
+      (set! *floor-info* info)
       (set! *hidden* '())
       (model-turn!)
       (set! *circuits* (cdr (assq 'circuits info)))
@@ -692,7 +698,7 @@ void main() {
     ;; by its own lights, the switchable circuits off (so the ambient is
     ;; the night's floor).
     (define (render-title-scene! lights)
-      (set! *kind* 'stand-in)
+      (set! *kind* 'stand-in) (set! *floor-info* #f)
       (set! *circuits* STAND-IN-CIRCUITS)
       (mat4-identity! *model*)
       (both (lambda (p) (set-pipeline-uniform! p 'model *model*)))

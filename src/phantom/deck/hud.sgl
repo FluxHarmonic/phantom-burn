@@ -1,0 +1,393 @@
+;;; (phantom deck hud) - The deck's prompt and the terminal's screen (P3,
+;;; topics/phantom-burn-device-api v4 §2 and §3). The shell draws; play mode
+;;; ((phantom play mode), the P2/P3 worker's) owns the data and calls these
+;;; from its play-hud!, after the frame is composited:
+;;;
+;;;   (deck-hud-draw! w h k deck)
+;;;     deck = (play-mode-deck) = (TIER TARGET COMMAND PROGRESS STATUS). The
+;;;     deck's shell prompt, bottom left, opposite the eye: `STAFF $` with the
+;;;     aimed command (`STAFF $ RING FM-PHONE`), a hold bar while held, `OK`
+;;;     in cyan when done, `DENIED` in ICE amber, `NO LINE` dim; a blinking
+;;;     cursor when nothing is aimed.
+;;;
+;;;   (terminal-draw! w h k terminal devices)
+;;;     terminal = (play-mode-terminal) = (ROWS SELECTED STATUS), a row being
+;;;     (ID KIND COMMAND-OR-#f ALLOWED? TIER); STATUS (idle) | (running P) |
+;;;     (done ID COMMAND) | (denied ID). devices = (play-mode-devices) =
+;;;     ((ID KIND X Y Z STATE) ...). The floor's map in Crash's hub vocabulary
+;;;     (C-BG ground, C-STATIC walls, lit links in C-WIRE-LIT cyan for doors,
+;;;     ICE amber for Gibson's eyes): rooms from floor.sexp's outlines (a room
+;;;     over another dashed), devices as glyphs coloured by state, you as a
+;;;     cyan arrow, the command list with Crash's `> ` cursor row, scanlines.
+;;;
+;;; w h: the window; k: the composite's whole-number scale (render-composite!).
+;;; Everything is laid out in the 480x270 frame's pixels, times k.
+;;;
+;;; The camera glyph is Crash The Stack's watcher eye (assets/src/glyphs/a.txt,
+;;; daemon-eye; CC-BY-4.0, David Wilson / Flux Harmonic), widened to the map's
+;;; 9x9 cells; the other glyphs are new, in the same manner.
+
+(define-library (phantom deck hud)
+  (import (sigil core)
+          (sigil math)
+          (sigil time)
+          (sigil graphics)
+          (phantom text)
+          (phantom walker)
+          (phantom render)
+          (phantom game))
+
+  (export deck-hud-draw! terminal-draw! deck-hud-reset! deck-hud-use-map!
+          map-outlines map-openings map-devices)
+
+  (begin
+
+    ;; --- Crash's colour roles (the style bible's) ----------------------------
+    (define (hex h) (vector (/ (string->number (substring h 1 3) 16) 255.0)
+                            (/ (string->number (substring h 3 5) 16) 255.0)
+                            (/ (string->number (substring h 5 7) 16) 255.0)))
+    (define C-BG (hex "#0D0A1A"))
+    (define C-BAR-A (hex "#17122E"))
+    (define C-BAR-C (hex "#2E1C4D"))
+    (define C-STATIC-A (hex "#8A8FA0"))
+    (define C-STATIC-B (hex "#2A2D3A"))
+    (define C-WIRE-DARK (hex "#1F3A4D"))
+    (define C-SELECTED (hex "#4DF2D9"))       ; = C-WIRE-LIT
+    (define C-ICE (hex "#FF9F1A"))
+    (define C-HOT (hex "#FF5959"))            ; C-TRACE-HOT
+    (define C-TEXT (hex "#CCE6FF"))
+    (define C-TEXT-DIM (hex "#7380A6"))
+    (define (color! c . a)
+      (set-color (vector-ref c 0) (vector-ref c 1) (vector-ref c 2) (if (pair? a) (car a) 1.0)))
+
+    (define (now) (/ (* 1.0 (current-jiffy)) (jiffies-per-second)))
+    (define (blink? hz) (< (- (* (now) hz) (floor (* (now) hz))) 0.5))
+    (define (ox-of w k) (quotient (- w (* VIEW-W k)) 2))
+    (define (oy-of h k) (quotient (- h (* VIEW-H k)) 2))
+    (define (name s) (if (symbol? s) (symbol->string s) (if s s "")))
+
+    ;; --- the prompt ---------------------------------------------------------
+
+    (define (deck-hud-draw! w h k deck)
+      (let* ((ox (ox-of w k)) (oy (oy-of h k)) (ts k)
+             (tier (list-ref deck 0)) (target (list-ref deck 1)) (cmd (list-ref deck 2))
+             (prog (list-ref deck 3)) (status (list-ref deck 4))
+             (x (+ ox (* 6 k))) (y (+ oy (* 252 k)))
+             (lead (string-append (name tier) " $"))
+             (act (if (and target cmd) (string-append " " (name cmd) " " (name target)) ""))
+             (tail (case status
+                     ((done) " OK")
+                     ((denied) " DENIED")
+                     ((blocked) " NO LINE")
+                     (else "")))
+             (cursor? (and (string=? act "") (blink? 1.6)))
+             (wlead (text-width lead ts)) (wact (text-width act ts))
+             (wall (+ wlead wact (text-width tail ts) (if (string=? act "") (* 6 ts) 0))))
+        ;; a dark plate behind, for any floor under it
+        (color! C-BG 0.6)
+        (with-blend-mode 'normal
+          (draw-filled-rect (- x (* 3 k)) (- y (* 3 k)) (+ wall (* 6 k)) (* 13 k)))
+        (color! C-TEXT)
+        (draw-text (name tier) x y ts)
+        (color! C-SELECTED)
+        (draw-text " $" (+ x (text-width (name tier) ts)) y ts)
+        (color! (case status ((holding done) C-TEXT) ((denied) C-ICE) (else C-TEXT-DIM)))
+        (draw-text act (+ x wlead) y ts)
+        (color! (case status ((done) C-SELECTED) ((denied) C-ICE) (else C-TEXT-DIM)))
+        (draw-text tail (+ x wlead wact) y ts)
+        (when cursor?
+          (color! C-SELECTED)
+          (draw-text "_" (+ x wlead (* 6 ts)) y ts))
+        ;; the hold bar under the command
+        (when (and (> wact 0) (or (eq? status 'holding) (> prog 0.0)))
+          (let ((bx (+ x wlead (* 6 ts))) (bw (- wact (* 6 ts))) (by (+ y (* 8 k))))
+            (color! C-BAR-C)
+            (draw-filled-rect bx by bw k)
+            (color! C-SELECTED)
+            (draw-filled-rect bx by (* bw (max 0.0 (min 1.0 prog))) k)))
+        (set-color 1.0 1.0 1.0)))
+
+    ;; --- the floor's map data (floor.sexp, the compiler's; v4 §3 (f)) ---------
+
+    (define (field info key) (let ((f (and info (assq key info)))) (if f (cdr f) '())))
+    (define (map-outlines info) (field info 'outlines))    ; ((ROOM FLOOR-Z (X Y) ...) ...)
+    (define (map-openings info) (field info 'openings))    ; ((KIND X0 Y0 X1 Y1) ...)
+    (define (map-devices info) (field info 'devices))      ; ((ID KIND X Y Z FACING TIER ROOM ARGS...) ...)
+
+    ;; The map's panel, in frame pixels, and the floor's fit into it.
+    (define PX0 8) (define PY0 20) (define PW 290) (define PH 226)
+    (define *fit* #f)             ; (vector scale x-off y-off) for the baked floor
+    (define *baked-for* #f)       ; the info the map was baked from
+    (define *map-rt* #f)
+
+    (define (deck-hud-reset!) (set! *baked-for* #f))
+    ;; A map to draw instead of the floor's (the native --terminal-preview,
+    ;; before the compiler writes outlines); #f goes back to the floor's.
+    (define *map-override* #f)
+    (define (deck-hud-use-map! info) (set! *map-override* info) (set! *baked-for* #f))
+
+    (define (fit-to outlines)
+      (let loop ((os outlines) (x0 1e9) (y0 1e9) (x1 -1e9) (y1 -1e9))
+        (if (null? os)
+            (let* ((dx (max 1.0 (- x1 x0))) (dy (max 1.0 (- y1 y0)))
+                   (s (min (/ (- PW 8) dx) (/ (- PH 8) dy))))
+              (vector s (+ PX0 (/ (- PW (* dx s)) 2.0) (- (* x0 s)))
+                      (+ PY0 (/ (- PH (* dy s)) 2.0) (* y1 s))))
+            (let pts ((ps (cddr (car os))) (x0 x0) (y0 y0) (x1 x1) (y1 y1))
+              (if (null? ps)
+                  (loop (cdr os) x0 y0 x1 y1)
+                  (let ((x (car (car ps))) (y (cadr (car ps))))
+                    (pts (cdr ps) (min x0 x) (min y0 y) (max x1 x) (max y1 y))))))))
+    ;; floor metres -> frame pixels (north up)
+    (define (gx x) (+ (vector-ref *fit* 1) (* x (vector-ref *fit* 0))))
+    (define (gy y) (- (vector-ref *fit* 2) (* y (vector-ref *fit* 0))))
+
+    ;; one frame pixel, or a line of them (Bresenham), into the bake target
+    (define (px! x y) (draw-filled-rect x y 1 1))
+    (define (line! x0 y0 x1 y1 dash)
+      (let* ((x0 (exact (round x0))) (y0 (exact (round y0)))
+             (x1 (exact (round x1))) (y1 (exact (round y1)))
+             (dx (abs (- x1 x0))) (dy (- (abs (- y1 y0))))
+             (sx (if (< x0 x1) 1 -1)) (sy (if (< y0 y1) 1 -1)))
+        (let loop ((x x0) (y y0) (err (+ dx dy)) (n 0))
+          (when (or (= dash 0) (< (modulo n (* 2 dash)) dash)) (px! x y))
+          (unless (and (= x x1) (= y y1))
+            (let* ((e2 (* 2 err))
+                   (x (if (>= e2 dy) (+ x sx) x)) (err (if (>= e2 dy) (+ err dy) err))
+                   (y (if (<= e2 dx) (+ y sy) y)) (err (if (<= e2 dx) (+ err dx) err)))
+              (loop x y err (+ n 1)))))))
+    (define (drop l n) (if (or (= n 0) (null? l)) l (drop (cdr l) (- n 1))))
+    ;; ascending, for a row's few edge crossings
+    (define (isort xs)
+      (let ins ((xs xs) (out '()))
+        (if (null? xs)
+            out
+            (ins (cdr xs)
+                 (let put ((o out))
+                   (cond ((null? o) (list (car xs)))
+                         ((< (car xs) (car o)) (cons (car xs) o))
+                         (else (cons (car o) (put (cdr o))))))))))
+    ;; a room's floor, filled row by row (any simple polygon)
+    (define (fill! pts)
+      (let* ((ys (map (lambda (p) (gy (cadr p))) pts))
+             (top (exact (floor (apply min ys)))) (bot (exact (ceiling (apply max ys))))
+             (ring (append pts (list (car pts)))))
+        (let row ((r top))
+          (when (<= r bot)
+            (let* ((yc (+ r 0.5))
+                   (xs (let edges ((e ring) (acc '()))
+                         (if (null? (cdr e))
+                             (isort acc)
+                             (let* ((ax (gx (car (car e)))) (ay (gy (cadr (car e))))
+                                    (bx (gx (car (cadr e)))) (by (gy (cadr (cadr e)))))
+                               (edges (cdr e)
+                                      (if (or (and (<= ay yc) (> by yc)) (and (<= by yc) (> ay yc)))
+                                          (cons (+ ax (* (- yc ay) (/ (- bx ax) (- by ay)))) acc)
+                                          acc)))))))
+              (let spans ((xs xs))
+                (when (and (pair? xs) (pair? (cdr xs)))
+                  (let ((a (exact (round (car xs)))) (b (exact (round (cadr xs)))))
+                    (when (> b a) (draw-filled-rect a r (- b a) 1)))
+                  (spans (cddr xs)))))
+            (row (+ r 1))))))
+
+    (define (bake-map! info)
+      (let ((outlines (map-outlines info)))
+        (unless *map-rt* (set! *map-rt* (make-render-target VIEW-W VIEW-H 'nearest)))
+        (set! *baked-for* info)
+        (with-render-target *map-rt*
+          (set-blend-mode 'none)
+          (set-color 0.0 0.0 0.0 0.0)
+          (draw-filled-rect 0 0 VIEW-W VIEW-H)
+          (when (pair? outlines)
+            (set! *fit* (fit-to outlines))
+            ;; the ground's rooms filled, then every outline: rooms on the
+            ;; lowest floor solid, rooms over others dashed (the mezzanine, the duct)
+            (let* ((lowest (apply min (map cadr outlines))))
+              (color! C-BAR-A)
+              (for-each (lambda (o) (when (<= (cadr o) lowest) (fill! (cddr o)))) outlines)
+              (for-each
+               (lambda (o)
+                 (let* ((pts (cddr o)) (upper? (> (cadr o) lowest))
+                        (ring (append pts (list (car pts)))))
+                   (color! (if upper? C-TEXT-DIM C-STATIC-A))
+                   (let edge ((e ring))
+                     (unless (null? (cdr e))
+                       (line! (gx (car (car e))) (gy (cadr (car e)))
+                              (gx (car (cadr e))) (gy (cadr (cadr e))) (if upper? 2 0))
+                       (edge (cdr e))))))
+               outlines))
+            ;; openings: doors as lit links across the gap, windows dark
+            ;; double lines, hatches a small square
+            (for-each
+             (lambda (op)
+               (let ((kind (car op))
+                     (x0 (gx (list-ref op 1))) (y0 (gy (list-ref op 2)))
+                     (x1 (gx (list-ref op 3))) (y1 (gy (list-ref op 4))))
+                 (case kind
+                   ((window) (color! C-WIRE-DARK) (line! x0 y0 x1 y1 0))
+                   ((hatch) (color! C-STATIC-A)
+                    (draw-rect (- (/ (+ x0 x1) 2) 2) (- (/ (+ y0 y1) 2) 2) 4 4))
+                   (else (color! C-BG) (line! x0 y0 x1 y1 0)
+                         (color! C-SELECTED) (line! x0 y0 x1 y1 1)))))
+             (map-openings info)))
+          (set-blend-mode 'normal))
+        (set-color 1.0 1.0 1.0)))
+
+    ;; --- the glyphs (9x9, '#' lit) --------------------------------------------
+
+    (define GLYPHS
+      (list
+       (cons 'phone    '(" ####### " "##     ##" "#  ###  #" "  #####  " " ## # ## " " ####### " " # # # # " " ####### " "         "))
+       (cons 'printer  '("  #####  " "  #   #  " " ####### " "#########" "#       #" "#  ###  #" "#########" "  #   #  " "  #####  "))
+       (cons 'vent     '("#########" "#       #" "# ##### #" "#       #" "# ##### #" "#       #" "# ##### #" "#       #" "#########"))
+       (cons 'blinds   '("#########" "#########" "         " "#########" "         " "#########" "         " "#########" "    #    "))
+       (cons 'terminal '("#########" "#       #" "# ##    #" "#       #" "# ####  #" "#       #" "#########" "   ###   " " ####### "))
+       ;; Crash's watcher eye (daemon-eye), widened
+       (cons 'camera   '("         " "  #####  " " #     # " "#  ###  #" "#  ###  #" "#  ###  #" " #     # " "  #####  " "         "))))
+    ;; each glyph as runs (row x0 len), computed once
+    (define RUNS
+      (map (lambda (g)
+             (cons (car g)
+                   (let rows ((rs (cdr g)) (r 0) (acc '()))
+                     (if (null? rs)
+                         (reverse acc)
+                         (let cols ((c 0) (start #f) (acc acc))
+                           (let ((s (car rs)))
+                             (cond ((= c (string-length s))
+                                    (rows (cdr rs) (+ r 1) (if start (cons (list r start (- c start)) acc) acc)))
+                                   ((char=? (string-ref s c) #\#)
+                                    (cols (+ c 1) (or start c) acc))
+                                   (else
+                                    (cols (+ c 1) #f (if start (cons (list r start (- c start)) acc) acc))))))))))
+           GLYPHS))
+    (define (glyph! kind cx cy ox oy k)
+      (let ((runs (assq kind RUNS)))
+        (when runs
+          (for-each (lambda (run)
+                      (draw-filled-rect (+ ox (* k (+ (- cx 4) (cadr run))))
+                                        (+ oy (* k (+ (- cy 4) (car run))))
+                                        (* k (caddr run)) k))
+                    (cdr runs)))))
+
+    ;; a device's colour by its state (play-mode-devices' STATE)
+    (define (state-colour kind state)
+      (let ((s (if (pair? state) (car state) state)))
+        (case kind
+          ((camera) (case s ((alarmed) C-HOT) ((seeing) (if (blink? 4.0) C-ICE C-BAR-C)) (else C-ICE)))
+          (else (case s
+                  ((ringing running on in-use) (if (blink? 2.0) C-SELECTED C-STATIC-B))
+                  (else C-STATIC-A))))))
+
+    ;; --- the terminal's screen ----------------------------------------------
+
+    (define (terminal-draw! w h k terminal devices)
+      (let* ((ox (ox-of w k)) (oy (oy-of h k)) (ts k)
+             (info (or *map-override* (render-floor-info)))
+             (rows (list-ref terminal 0)) (sel (list-ref terminal 1)) (status (list-ref terminal 2)))
+        (unless (eq? info *baked-for*) (bake-map! info))
+        ;; the screen
+        (color! C-BG 0.96)
+        (with-blend-mode 'normal (draw-filled-rect ox oy (* VIEW-W k) (* VIEW-H k)))
+        (color! C-BAR-C)
+        (draw-rect (+ ox (* PX0 k)) (+ oy (* PY0 k)) (* PW k) (* PH k))
+        (set-color 1.0 1.0 1.0)
+        (if (and *fit* (pair? (map-outlines info)))
+            (begin
+              (with-blend-mode 'normal (draw-render-target *map-rt* ox oy (* VIEW-W k) (* VIEW-H k)))
+              ;; the cameras' fans, ICE dots (the hub draws a daemon's sight so)
+              (for-each (lambda (d) (when (eq? (list-ref d 1) 'camera) (fan! d ox oy k))) (map-devices info))
+              ;; devices, by their live state
+              (for-each
+               (lambda (d)
+                 (let ((id (list-ref d 0)) (kind (list-ref d 1)))
+                   (color! (state-colour kind (list-ref d 5)))
+                   (glyph! kind (gx (list-ref d 2)) (gy (list-ref d 3)) ox oy k)
+                   (when (and (< sel (length rows)) (eq? id (car (list-ref rows sel))) (blink? 2.0))
+                     (color! C-SELECTED)
+                     (draw-rect (+ ox (* k (- (gx (list-ref d 2)) 6))) (+ oy (* k (- (gy (list-ref d 3)) 6))) (* 13 k) (* 13 k)))))
+               devices)
+              (you! ox oy k))
+            (begin
+              (color! C-TEXT-DIM)
+              (draw-text "NO MAP" (+ ox (* (+ PX0 120) k)) (+ oy (* (+ PY0 108) k)) ts)))
+        ;; the header, the prompt, the list
+        (color! C-TEXT)
+        (draw-text "FLOOR 14  FACILITIES MAP" (+ ox (* PX0 k)) (+ oy (* 7 k)) ts)
+        (list-draw! rows sel status (+ ox (* 306 k)) (+ oy (* 20 k)) k)
+        (color! C-TEXT-DIM)
+        (draw-text "W/S SELECT  F RUN  C CLOSE" (+ ox (* PX0 k)) (+ oy (* 252 k)) ts)
+        (scanlines! ox oy k)
+        (set-color 1.0 1.0 1.0)))
+
+    (define (list-draw! rows sel status x y k)
+      (color! C-TEXT)
+      (draw-text "DEVICES" x y k)
+      (let loop ((rs rows) (i 0))
+        (unless (null? rs)
+          (let* ((r (car rs)) (id (name (list-ref r 0))) (cmd (list-ref r 2))
+                 (ok? (list-ref r 3)) (yy (+ y (* k (+ 14 (* 11 i))))))
+            (color! (cond ((not ok?) C-TEXT-DIM) ((= i sel) C-SELECTED) (else C-TEXT)))
+            (draw-text (string-append (if (= i sel) "> " "  ") (if cmd (name cmd) "-")) x yy k)
+            (draw-text id (+ x (* k 6 15)) yy k)
+            (when (and (= i sel) (not ok?))
+              (color! C-ICE)
+              (draw-text (string-append "  NEEDS " (name (list-ref r 4))) x (+ yy (* 8 k)) k)))
+          (loop (cdr rs) (+ i 1))))
+      ;; the command's progress and result
+      (let ((yy (+ y (* k 200))))
+        (case (car status)
+          ((running)
+           (color! C-TEXT) (draw-text "RUNNING" x yy k)
+           (color! C-BAR-C) (draw-filled-rect x (+ yy (* 9 k)) (* 160 k) (* 2 k))
+           (color! C-SELECTED) (draw-filled-rect x (+ yy (* 9 k)) (* 160 k (max 0.0 (min 1.0 (cadr status)))) (* 2 k)))
+          ((done) (color! C-SELECTED)
+           (draw-text (string-append "OK  " (name (caddr status)) " " (name (cadr status))) x yy k))
+          ((denied) (color! C-ICE)
+           (draw-text (string-append "DENIED  " (name (cadr status))) x yy k))
+          (else #f))))
+
+    ;; a camera's view fan: ICE dots every 2 frame pixels inside its cone
+    (define (fan! d ox oy k)
+      (let* ((args (drop d 8))
+             (fov (if (pair? args) (car args) 70.0))
+             (range (if (and (pair? args) (pair? (cdr args))) (cadr args) 8.0))
+             (face (* (list-ref d 5) (/ 3.141592653589793 180.0)))
+             (half (* 0.5 fov (/ 3.141592653589793 180.0)))
+             (cx (list-ref d 2)) (cy (list-ref d 3))
+             (steps 7))
+        (color! C-ICE 0.55)
+        (with-blend-mode 'normal
+          (let rings ((r 1))
+            (when (<= r steps)
+              (let* ((dist (* range (/ r steps))) (n (+ 2 (* 2 r))))
+                (let dots ((j 0))
+                  (when (<= j n)
+                    (let* ((a (+ face (- half) (* 2.0 half (/ j n))))
+                           (x (gx (+ cx (* dist (cos a))))) (y (gy (+ cy (* dist (sin a))))))
+                      (draw-filled-rect (+ ox (* k (exact (round x)))) (+ oy (* k (exact (round y)))) k k))
+                    (dots (+ j 1)))))
+              (rings (+ r 1)))))))
+
+    ;; you: a cyan arrow at the walker, pointing where it faces (yaw from north)
+    (define (you! ox oy k)
+      (let* ((wk (game-walker)))
+        (when wk
+          (let* ((x (gx (walker-x wk))) (y (gy (walker-y wk))) (yaw (walker-yaw wk))
+                 (sx (- (sin yaw))) (sy (- (cos yaw)))       ; facing, on screen (y down)
+                 (px (lambda (u) (+ ox (* k (+ x u))))) (py (lambda (v) (+ oy (* k (+ y v))))))
+            ;; the tip 5 ahead; the back corners 3 behind and 3 to either side
+            (color! C-SELECTED)
+            (fill-triangle (px (* 5 sx)) (py (* 5 sy))
+                           (px (- (* -3 sx) (* 3 sy))) (py (+ (* -3 sy) (* 3 sx)))
+                           (px (+ (* -3 sx) (* 3 sy))) (py (- (* -3 sy) (* 3 sx))))))))
+
+    ;; Crash's scanlines: every other frame row a shade darker
+    (define (scanlines! ox oy k)
+      (when (> k 1)
+        (color! C-BG 0.22)
+        (with-blend-mode 'normal
+          (let row ((r 0))
+            (when (< r VIEW-H)
+              (draw-filled-rect ox (+ oy (* r k)) (* VIEW-W k) (max 1 (quotient k 2)))
+              (row (+ r 2)))))))))
