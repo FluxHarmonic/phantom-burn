@@ -125,18 +125,18 @@
 
     ;; Fill f with the distance (in steps) from the walkable cell nearest
     ;; (x, y); returns that cell, or -1 when there is none (f is then empty).
-    ;; With (fx, fy) (a guard's place; #f for the whole floor) the search
+    ;; With (fx, fy) a guard's place (fx #f: the whole floor) the search
     ;; stops FIELD-MARGIN steps past that place's cell: a chase needs only
     ;; the cells between the guard and its target, and the whole floor is
     ;; ten thousand cells.
     (define FIELD-MARGIN 16)
-    (define (nav-field! n f x y . from)
+    (define (nav-field! n f x y fx fy)
       (let* ((dist (vector-ref f 2))
              (q (vector-ref n 6))
              (w (vector-ref n 3))
              (h (vector-ref n 4))
              (t (nav-nearest-walkable n x y))
-             (stop-cell (if (pair? from) (nav-nearest-walkable n (car from) (cadr from)) -1)))
+             (stop-cell (if fx (nav-nearest-walkable n fx fy) -1)))
         (vector-fill! dist -1)
         (vector-set! f 1 t)
         (when (>= t 0)

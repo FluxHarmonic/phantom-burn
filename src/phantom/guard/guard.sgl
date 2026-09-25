@@ -96,7 +96,7 @@
         (let loop ((i 0))
           (when (< i np)
             (let ((f (make-field nav)))
-              (nav-field! nav f (vector-ref route (* 2 i)) (vector-ref route (+ 1 (* 2 i))))
+              (nav-field! nav f (vector-ref route (* 2 i)) (vector-ref route (+ 1 (* 2 i))) #f #f)
               (vector-set! fields i f))
             (loop (+ i 1))))
         (vector 'guard-world coll data nav fields (make-field nav))))
@@ -331,8 +331,11 @@
         (if (and (nav-walkable? nav tx ty)
                  (nav-line-clear? nav (vector-ref g S-X) (vector-ref g S-Y) tx ty))
             ;; in the open, straight there: no field to build (a field is
-            ;; a search over thousands of cells; most chases need none)
+            ;; a search over thousands of cells; most chases need none).
+            ;; The field it has is now for somewhere else: the next time
+            ;; the way is not clear, it is rebuilt first.
             (let* ((ex (- tx (vector-ref g S-X))) (ey (- ty (vector-ref g S-Y))))
+              (vector-set! g S-FTX 1e9)
               (if (< (+ (* ex ex) (* ey ey)) (* (max reach ARRIVE) (max reach ARRIVE)))
                   #t
                   (begin (step-to! g nav tx ty speed dt) #f)))

@@ -61,16 +61,21 @@
           (or (>= i n)
               (and (piece-clear? coll glass
                                  (+ ox (* dx (/ i n))) (+ oy (* dy (/ i n))) (+ oz (* dz (/ i n)))
-                                 (+ ox (* dx (/ (+ i 1) n))) (+ oy (* dy (/ (+ i 1) n))) (+ oz (* dz (/ (+ i 1) n))))
+                                 (+ ox (* dx (/ (+ i 1) n))) (+ oy (* dy (/ (+ i 1) n))) (+ oz (* dz (/ (+ i 1) n)))
+                                 (= (+ i 1) n))
                    (piece (+ i 1)))))))
 
-    (define (piece-clear? coll glass ox oy oz tx ty tz)
+    ;; One piece; last? is the piece that ends at the target, the only one
+    ;; where a hit at its very end (the target's own surface) counts as
+    ;; clear. On an inner piece a hit at its end is a wall the next piece
+    ;; would start just past and miss.
+    (define (piece-clear? coll glass ox oy oz tx ty tz last?)
       (let loop ((ox ox) (oy oy) (oz oz) (tries 0))
         (let* ((dx (- tx ox)) (dy (- ty oy)) (dz (- tz oz))
                (t (collide-ray coll ox oy oz dx dy dz)))
           (cond
             ((not t) #t)
-            ((> t 0.9999) #t)
+            ((and last? (> t 0.9999)) #t)
             ((>= tries 4) #f)
             (else
              (let ((hx (+ ox (* t dx))) (hy (+ oy (* t dy))) (hz (+ oz (* t dz)))

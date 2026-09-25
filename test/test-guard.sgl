@@ -86,7 +86,7 @@
       (display (list 'nav 'walkable (nav-walkable-count nav) 'of (* (nav-w nav) (nav-h nav)))) (newline)
       (assert-true (> (nav-walkable-count nav) 2500))
       (let* ((route (play-route DATA)) (f (make-field nav)))
-        (nav-field! nav f (vector-ref route 0) (vector-ref route 1))
+        (nav-field! nav f (vector-ref route 0) (vector-ref route 1) #f #f)
         (let loop ((i 1) (ok #t))
           (if (>= i (quotient (vector-length route) 2))
               (assert-true ok)
@@ -141,10 +141,12 @@
     (let ((r (gate-walk ALL-ON)))
       (display (list 'gate-lit 'max-awareness (car r) 'max-state (cadr r))) (newline)
       (assert-true (>= (car r) 0.3))))
-  (test "the same walk with the lobby's lights off is not noticed"
+  (test "the same walk with the lobby's lights off is not noticed at all"
+    ;; exactly 0: with decay applied while seen, a small sighting rate would
+    ;; hide under any threshold above 0
     (let ((r (gate-walk DARK)))
       (display (list 'gate-dark 'max-awareness (car r) 'max-state (cadr r))) (newline)
-      (assert-true (< (car r) 0.1)))))
+      (assert-true (= (car r) 0.0)))))
 
 (test-group "the P1 gate: graded light"
   (test "in half light (the dark lobby, 2.4 m from the city's window) you are noticed, but much more slowly than when lit"
@@ -158,10 +160,14 @@
            (lit (still ALL-ON))
            (dim (still DARK)))
       (display (list 'half-light 'lit lit 'dim dim)) (newline)
-      (assert-true (> (cadr dim) 0.2))
-      (assert-true (< (cadr dim) 0.8))
-      (assert-true (> (car dim) 0.0))
-      (assert-true (< (car dim) (* 0.6 (car lit)))))))
+      ;; the spot is half lit (this pins the light mapping: a scaled or
+      ;; shifted light-01 moves it out), fully lit with the lights on, and
+      ;; the awareness it builds there is real but a fraction of the lit one
+      (assert-true (> (cadr dim) 0.3))
+      (assert-true (< (cadr dim) 0.45))
+      (assert-true (= (cadr lit) 1.0))
+      (assert-true (> (car dim) 0.03))
+      (assert-true (< (car dim) (* 0.35 (car lit)))))))
 
 (test-group "crouching and circuits"
   (test "in full view and light, still, a crouched runner is noticed at about half the rate of a standing one"
@@ -229,15 +235,18 @@
                               (al (- (allocs) a0)))
                           (display (list label 'us-per-call (/ (* 1000.0 ms) n) 'allocs-per-call (/ (* 1.0 al) n)))
                           (newline))))))
-      (measure 'play-tick (lambda () (guard-reset! g gw 0) (play-tick! p w ALL-ON 1.0 2.0)))
+      ;; three ticks a call, so each call includes one perception (sight
+      ;; runs every third tick)
+      (measure 'play-3-ticks (lambda () (guard-reset! g gw 0) (play-tick! p w ALL-ON 1.0 2.0)
+                                       (play-tick! p w ALL-ON 1.0 2.0) (play-tick! p w ALL-ON 1.0 2.0)))
       (measure 'sight-ray-8m (lambda () (sight-clear? C glass 2.0 2.0 1.65 9.0 5.0 1.0)))
       (let ((ls (make-light-state)))
         (measure 'light-levels+at (lambda () (light-levels! ls CIRCUITS ALL-ON 1.0 2.0) (light-at ls DATA 12.5 7.5 0.0))))
       (let ((nav (guard-world-nav gw)) (f (make-field (guard-world-nav gw))))
-        (nav-field! nav f 12.5 1.5)
+        (nav-field! nav f 12.5 1.5 #f #f)
         (measure 'nav-steer (lambda () (nav-steer! nav f 2.0 2.0)))
         (set! n 10)
-        (measure 'nav-field-whole (lambda () (nav-field! nav f 12.5 1.5)))
+        (measure 'nav-field-whole (lambda () (nav-field! nav f 12.5 1.5 #f #f)))
         (measure 'nav-field-chase-6m (lambda () (nav-field! nav f 8.0 4.0 2.0 2.0))))
       ;; and it does see the runner there (sight runs every third tick)
       (guard-reset! g gw 0)
