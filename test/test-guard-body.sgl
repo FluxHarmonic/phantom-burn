@@ -1,0 +1,82 @@
+;;; The guard's body as baked (assets/guard/guard.sgm, from models/guard/guard.py)
+;;; and how the walk's phase picks its poses ((phantom guard body)). Run from
+;;; the repo root.
+
+(import (sigil test)
+        (sigil math)
+        (sigil fs)
+        (phantom guard body))
+
+(define B (read-file-bytes "assets/guard/guard.sgm"))
+(define (u8 o) (bytevector-u8-ref B o))
+(define (u16 o) (+ (u8 o) (* 256 (u8 (+ o 1)))))
+(define (u32 o) (+ (u16 o) (* 65536 (u16 (+ o 2)))))
+(define (s16 o) (let ((v (u16 o))) (if (>= v 32768) (- v 65536) v)))
+
+(define STRIDE (u32 4))
+(define NVERT (u32 8))
+(define NINDEX (u32 12))
+(define NPARTS (u32 20))
+(define VERTS (+ 24 (* 8 NPARTS)))
+(define INDICES (+ VERTS (* STRIDE NVERT)))
+(define PER-POSE (quotient NVERT NPARTS))
+(define (part-first k) (u32 (+ 24 (* 8 k))))
+(define (part-count k) (u32 (+ 28 (* 8 k))))
+
+;; vertex i's position p (0 pose a, 1 pose b, 2 rest), axis a, in metres
+(define (pos i p a) (/ (* 2.0 (s16 (+ VERTS (* STRIDE i) (* 8 p) (* 2 a)))) 32767.0))
+(define (alpha i) (bytevector-u8-ref B (+ VERTS (* STRIDE i) 39)))
+
+(define (all? pred n) (let loop ((i 0)) (or (= i n) (and (pred i) (loop (+ i 1))))))
+(define (fold-verts f init) (let loop ((i 0) (acc init)) (if (= i PER-POSE) acc (loop (+ i 1) (f i acc)))))
+(define (near? a b eps) (< (abs (- a b)) eps))
+
+(test-group "the baked body"
+  (test "an SGM1 file of eight parts, 40-byte vertices, u16 indices"
+    (assert-equal (list 83 71 77 49) (list (u8 0) (u8 1) (u8 2) (u8 3)))   ; "SGM1"
+    (assert-equal 40 STRIDE)
+    (assert-equal POSES NPARTS)
+    (assert-equal 2 (u32 16))
+    (assert-equal (+ INDICES (* 2 NINDEX)) (bytevector-length B)))
+  (test "every part is the same triangles, over its own block of vertices"
+    (assert-true
+     (all? (lambda (k)
+             (and (= (part-first k) (* k (part-count 0)))
+                  (= (part-count k) (part-count 0))
+                  (let ((lo (* k PER-POSE)) (hi (* (+ k 1) PER-POSE)))
+                    (all? (lambda (j)
+                            (let ((v (u16 (+ INDICES (* 2 (+ (part-first k) j))))))
+                              (and (>= v lo) (< v hi)
+                                   (= (- v lo) (u16 (+ INDICES (* 2 j)))))))
+                          (part-count k)))))
+           NPARTS)))
+  (test "the walk is seamless: each part's next pose is the following part's pose"
+    (assert-true
+     (all? (lambda (k)
+             (let ((next (modulo (+ k 1) NPARTS)))
+               (all? (lambda (i)
+                       (all? (lambda (a) (= (pos (+ (* k PER-POSE) i) 1 a) (pos (+ (* next PER-POSE) i) 0 a))) 3))
+                     PER-POSE)))
+           NPARTS)))
+  (test "standing, the feet are on the floor and the helmet tops out under 1.85 m"
+    (let ((lo (fold-verts (lambda (i m) (min m (pos i 2 2))) 9.0))
+          (hi (fold-verts (lambda (i m) (max m (pos i 2 2))) -9.0)))
+      (assert-true (near? lo 0.0 0.002))
+      (assert-true (and (> hi 1.7) (< hi 1.85)))))
+  (test "the visor's strip is at the guard's eyes (play's GUARD-EYE 1.65 m), in front"
+    (let ((strip (fold-verts (lambda (i acc) (if (= 0 (alpha i)) (cons i acc) acc)) '())))
+      (assert-true (> (length strip) 0))
+      (assert-true (all? (lambda (j)
+                           (let ((i (list-ref strip j)))
+                             (and (near? (pos i 2 2) 1.65 0.05) (> (pos i 2 1) 0.1))))
+                         (length strip))))))
+
+(test-group "the walk's phase"
+  (test "one cycle every CYCLE metres, eight poses to it"
+    (assert-true (near? (guard-pose 0.0) 0.0 1e-9))
+    (assert-true (near? (guard-pose (* CYCLE (/ 3.0 8.0))) 3.0 1e-9))
+    (assert-true (near? (guard-pose (* CYCLE 2.5)) 4.0 1e-9))
+    (assert-true (near? (guard-pose (* CYCLE 7.0)) 0.0 1e-9)))
+  (test "the fraction between poses runs 0 to 1"
+    (let ((f (guard-pose (* CYCLE (/ 5.25 8.0)))))
+      (assert-true (near? (- f (floor f)) 0.25 1e-9)))))

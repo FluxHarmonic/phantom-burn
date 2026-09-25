@@ -1,0 +1,111 @@
+;;; (phantom guard body) - How the guard is drawn (t-9e245c): the smooth body
+;;; from models/guard/guard.py, its walk baked as eight whole-body poses and
+;;; blended in the vertex shader ((phantom render)'s render-draw-guard!), no
+;;; skinning (G1 stays held, D33).
+;;;
+;;; The guard's AI and position are P1's ((phantom play mode)); this module
+;;; only draws. Its one entry, called inside the render's extra draw:
+;;;
+;;;   (guard-body-draw! model phase state r g b)
+;;;     model  the body's frame in the world: a column-major mat4 bytevector
+;;;            (x right, y forward, z up, feet at the origin), as play mode's
+;;;            pose! makes it
+;;;     phase  metres walked (guard-phase): one walk cycle, two steps, per
+;;;            CYCLE m. When it stops changing the body eases to standing.
+;;;     state  0 calm, 1 suspicious, 2 searching, 3 hunting: the visor's colour
+;;;     r g b  the light where the guard stands
+;;;
+;;; It registers no draw hook of its own (the title clears the extra draw and
+;;; play mode sets it). One guard's easing state is kept here; a second guard
+;;; will need it per guard.
+;;;
+;;; guard-preview-draw! is the native --guard preview (a guard walking a
+;;; circle, no AI), for shots of the body without P1's play.
+
+(define-library (phantom guard body)
+  (import (sigil core)
+          (sigil math)
+          (sigil time)
+          (phantom render))
+
+  (export guard-body-draw! guard-pose guard-preview-set! guard-preview-draw!
+          CYCLE POSES VISOR-COLORS)
+
+  (begin
+
+    (define CYCLE 1.5)       ; m walked per cycle: play mode's stand-in swung its legs on this period
+    (define POSES 8)
+    (define EASE 0.3)        ; s from walking to standing, and back
+    (define STILL 0.12)      ; s with the phase unchanged before the guard counts as standing
+                             ; (the phase moves on the 60 Hz tick, frames can come faster)
+
+    ;; play mode's VISORS, unchanged: cyan calm, amber suspicious, orange
+    ;; searching, red hunting
+    (define VISOR-COLORS
+      (vector (vector 0.302 0.949 0.851) (vector 1.0 0.62 0.1)
+              (vector 1.0 0.42 0.1) (vector 1.0 0.18 0.3)))
+
+    (define *last-phase* -1.0)
+    (define *changed-at* 0.0)
+    (define *drawn-at* #f)
+    (define *rest* 1.0)      ; 0 walking, 1 standing
+
+    (define (now) (/ (* 1.0 (current-jiffy)) (jiffies-per-second)))
+    (define (smooth x) (* x x (- 3.0 (* 2.0 x))))
+
+    ;; Where in the walk phase metres puts the body: 0 to POSES, the whole
+    ;; part the pose (the mesh's part), the fraction the blend to the next.
+    (define (guard-pose phase)
+      (let ((c (/ phase CYCLE)))
+        (* POSES (- c (floor c)))))
+
+    (define (guard-body-draw! model phase state r g b)
+      (let* ((t (now))
+             (dt (if *drawn-at* (max 0.0 (min 0.1 (- t *drawn-at*))) 0.0)))
+        (set! *drawn-at* t)
+        (unless (= phase *last-phase*)
+          (set! *last-phase* phase)
+          (set! *changed-at* t))
+        (set! *rest* (if (> (- t *changed-at*) STILL)
+                         (min 1.0 (+ *rest* (/ dt EASE)))
+                         (max 0.0 (- *rest* (/ dt EASE)))))
+        (let* ((f (guard-pose phase))
+               (k (min (- POSES 1) (max 0 (exact (floor f)))))
+               (v (vector-ref VISOR-COLORS (max 0 (min 3 state)))))
+          (render-draw-guard! model k (- f k) (smooth *rest*) r g b
+                              (vector-ref v 0) (vector-ref v 1) (vector-ref v 2)))))
+
+    ;; --- the --guard preview ---------------------------------------------------
+
+    ;; A guard walking a circle of radius rad around (cx, cy) at floor height
+    ;; z, 1.3 m/s (play's WALK-SPEED), counter-clockwise; speed 0 stands him
+    ;; at the circle's east point facing north. state: the visor, or -1 to
+    ;; step through the four every 3 s. light: grey, the light where he stands.
+    (define *pv* (vector 0.0 0.0 0.0 2.0 1.3 0 0.7))
+    (define *pv-model* (make-bytevector 64 0))
+    (define *pv-t0* #f)
+    (define (guard-preview-set! cx cy z rad speed state light)
+      (vector-set! *pv* 0 cx) (vector-set! *pv* 1 cy) (vector-set! *pv* 2 z)
+      (vector-set! *pv* 3 rad) (vector-set! *pv* 4 speed) (vector-set! *pv* 5 state)
+      (vector-set! *pv* 6 light))
+
+    (define (f32 i v) (bytevector-ieee-single-set! *pv-model* (* 4 i) v 'little))
+
+    (define (guard-preview-draw!)
+      (let* ((t (now))
+             (_ (unless *pv-t0* (set! *pv-t0* t)))
+             (s (- t *pv-t0*))
+             (rad (vector-ref *pv* 3))
+             (dist (* s (vector-ref *pv* 4)))
+             (a (/ dist rad))
+             (x (+ (vector-ref *pv* 0) (* rad (cos a))))
+             (y (+ (vector-ref *pv* 1) (* rad (sin a))))
+             (fx (- (sin a))) (fy (cos a))
+             (st (if (< (vector-ref *pv* 5) 0) (modulo (exact (floor (/ s 3.0))) 4) (vector-ref *pv* 5)))
+             (l (vector-ref *pv* 6)))
+        ;; columns: right (fy, -fx), forward (fx, fy), up, the feet
+        (f32 0 fy) (f32 1 (- fx)) (f32 2 0.0) (f32 3 0.0)
+        (f32 4 fx) (f32 5 fy) (f32 6 0.0) (f32 7 0.0)
+        (f32 8 0.0) (f32 9 0.0) (f32 10 1.0) (f32 11 0.0)
+        (f32 12 x) (f32 13 y) (f32 14 (vector-ref *pv* 2)) (f32 15 1.0)
+        (guard-body-draw! *pv-model* dist st l l l)))))

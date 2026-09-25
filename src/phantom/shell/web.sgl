@@ -62,7 +62,11 @@
 
     (define (stand-in?) (string=? *floor* "stand-in"))
 
-    (define (asset-names)
+    ;; the floor's meshes and textures, and the guard's body (assets/guard, for
+    ;; every floor: P1's play draws it)
+    (define GUARD-SGM "guard/guard.sgm")
+    (define (asset-names) (cons GUARD-SGM (floor-asset-names)))
+    (define (floor-asset-names)
       (if (stand-in?)
           (append '("floor14.sgm" "city.sgm")
                   (let loop ((ds stand-in-draws))
@@ -73,6 +77,9 @@
                   (filter (lambda (t) t) (map (lambda (p) (list-ref p 3)) (cdr (assq 'parts *info*)))))))
 
     (define (url name)
+      (cond ((string=? name GUARD-SGM) (string-append "assets/" name))
+            (else (floor-url name))))
+    (define (floor-url name)
       (if (stand-in?)
           (string-append "assets/stand-in/" name)
           (string-append "assets/floors/" *floor* "/" name)))
@@ -150,6 +157,7 @@
       ;; one attempt: a failure is reported once, not retried per frame
       (set! *started* 'failed)
       (game-init! load-mesh* load-texture* (pbc1->collision (base64->bytevector *collide*)) *info*)
+      (render-load-guard! (lambda (layout) (load-mesh* layout GUARD-SGM)))
       (set! *collide* #f)
       (apply-params!)
       (set! *started* #t)
