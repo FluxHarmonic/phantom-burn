@@ -13,10 +13,11 @@
 ;;;   (play-hud! w h k)          after the frame is composited: the eye, the
 ;;;                              guard's caption and meter, the objective, fades
 ;;;
-;;; The guard is a stand-in body (legs, torso, arms, head) in the world's
-;;; own dithered pass, lit by the light where it stands (the same baked grid
-;;; the runner's visibility uses), with a visor whose colour is its state:
-;;; cyan calm, amber suspicious, orange searching, red hunting.
+;;; The guard is drawn by (phantom guard body) (p0-shell's, t-9e245c): the
+;;; smooth body with its walk baked as poses, in the world's own dithered
+;;; pass, lit by the light where it stands (the same baked grid the
+;;; runner's visibility uses), with a visor whose colour is its state: cyan
+;;; calm, amber suspicious, orange searching, red hunting.
 
 (define-library (phantom play mode)
   (import (sigil core)
@@ -29,7 +30,8 @@
           (phantom play data)
           (phantom play core)
           (phantom guard sense)
-          (phantom guard guard))
+          (phantom guard guard)
+          (phantom guard body))
 
   (export play-mode-start! play-mode-active? play-mode-core
           play-mode-reset! play-mode-set-on-win!
@@ -43,10 +45,7 @@
 
     (define *core* #f)
     (define *coll* #f)
-    (define *mesh* #f)
     (define *model* (make-bytevector 64 0))
-    (define *leg-l* (make-bytevector 64 0))
-    (define *leg-r* (make-bytevector 64 0))
     (define *phase* 'play)          ; play, caught, won
     (define *timer* 0.0)            ; s in the phase
     (define *fade-in* 0.0)          ; s left of the fade back in
@@ -69,7 +68,6 @@
         (set! *coll* coll)
         (set! *place* place?)
         (set! *core* (play-reset! (make-play coll data (cdr (assq 'circuits info)))))
-        (unless *mesh* (set! *mesh* (render-make-world-mesh (guard-mesh-bytes))))
         (render-set-extra-draw! draw-guard!)
         (set! *phase* 'play)
         (set! *timer* 0.0)
@@ -142,85 +140,11 @@
 
     ;; --- the guard's body ------------------------------------------------------
 
-    ;; Parts in the body's own frame: x right, y forward, z up, feet at 0.
-    ;; Vertex layout: the world's (position uv normal color emission), 40 bytes.
-    (define BODY '(0.20 0.21 0.27))
-    (define DARK '(0.08 0.08 0.11))
+    ;; The visor's colours by state (the caption uses them too; (phantom guard
+    ;; body) draws the same four) and the caption's words.
     (define VISORS '((0.302 0.949 0.851) (1.0 0.62 0.1) (1.0 0.42 0.1) (1.0 0.18 0.3)))
-    (define HIP 0.86)
-    (define VISOR-NAMES (vector 'visor0 'visor1 'visor2 'visor3))
     (define WORDS (vector "" "?" "SEARCHING" "THERE"))
 
-    ;; (name . (first count)) ranges, filled by guard-mesh-bytes
-    (define *ranges* '())
-    (define (range name) (cdr (assq name *ranges*)))
-
-    (define (guard-mesh-bytes)
-      (let* ((parts
-              (list
-               (cons 'body (append (prism 0.0 0.0 0.22 0.17 HIP 1.42 BODY #f)       ; torso
-                                   (prism 0.0 0.0 0.26 0.19 1.28 1.46 BODY #f)      ; shoulders
-                                   (prism -0.31 0.0 0.06 0.07 0.82 1.42 DARK #f)    ; arms
-                                   (prism 0.31 0.0 0.06 0.07 0.82 1.42 DARK #f)
-                                   (prism 0.0 0.0 0.055 0.055 1.44 1.52 DARK #f)    ; neck
-                                   (prism 0.0 0.0 0.12 0.13 1.5 1.78 BODY #f)       ; head
-                                   (prism 0.0 -0.02 0.14 0.15 1.74 1.8 DARK #f)))   ; cap
-               (cons 'leg (prism 0.0 0.0 0.085 0.1 0.0 HIP DARK #f))
-               (cons 'visor0 (visor (list-ref VISORS 0)))
-               (cons 'visor1 (visor (list-ref VISORS 1)))
-               (cons 'visor2 (visor (list-ref VISORS 2)))
-               (cons 'visor3 (visor (list-ref VISORS 3)))))
-             (n (apply + (map (lambda (p) (length (cdr p))) parts)))
-             (bv (make-bytevector (* 40 n) 0)))
-        (let loop ((ps parts) (i 0) (ranges '()))
-          (if (null? ps)
-              (begin (set! *ranges* (reverse ranges)) bv)
-              (let each ((vs (cdar ps)) (j i))
-                (if (null? vs)
-                    (loop (cdr ps) j (cons (list (caar ps) i (- j i)) ranges))
-                    (begin (put-vertex! bv j (car vs)) (each (cdr vs) (+ j 1)))))))))
-
-    ;; A vertex: (x y z nx ny nz (r g b) emission-rgb-or-#f)
-    (define (put-vertex! bv j v)
-      (let ((o (* 40 j)))
-        (bytevector-ieee-single-set! bv o (list-ref v 0) 'little)
-        (bytevector-ieee-single-set! bv (+ o 4) (list-ref v 1) 'little)
-        (bytevector-ieee-single-set! bv (+ o 8) (list-ref v 2) 'little)
-        (bytevector-ieee-single-set! bv (+ o 20) (list-ref v 3) 'little)
-        (bytevector-ieee-single-set! bv (+ o 24) (list-ref v 4) 'little)
-        (bytevector-ieee-single-set! bv (+ o 28) (list-ref v 5) 'little)
-        (let ((c (list-ref v 6)) (e (list-ref v 7)))
-          (bytevector-u8-set! bv (+ o 32) (byte (car c)))
-          (bytevector-u8-set! bv (+ o 33) (byte (cadr c)))
-          (bytevector-u8-set! bv (+ o 34) (byte (caddr c)))
-          (bytevector-u8-set! bv (+ o 35) 255)
-          (when e
-            (bytevector-u8-set! bv (+ o 36) (byte (car e)))
-            (bytevector-u8-set! bv (+ o 37) (byte (cadr e)))
-            (bytevector-u8-set! bv (+ o 38) (byte (caddr e)))
-            (bytevector-u8-set! bv (+ o 39) 255)))))
-    (define (byte x) (max 0 (min 255 (exact (round (* 255 x))))))
-
-    ;; An octagonal prism around (cx, cy), half-widths rx (x) and ry (y),
-    ;; from z0 to z1, with its top closed; counter-clockwise from outside.
-    (define (prism cx cy rx ry z0 z1 col em)
-      (let* ((pt (lambda (k) (let ((a (* k (/ TAU 8.0)))) (list (+ cx (* rx (dcos a))) (+ cy (* ry (dsin a)))))))
-             (nrm (lambda (k) (let ((a (* (+ k 0.5) (/ TAU 8.0)))) (list (dcos a) (dsin a))))))
-        (let loop ((k 0) (acc '()))
-          (if (= k 8)
-              acc
-              (let* ((a (pt k)) (b (pt (+ k 1))) (n (nrm k))
-                     (v (lambda (p z nx ny nz) (list (car p) (cadr p) z nx ny nz col em)))
-                     (side (list (v a z0 (car n) (cadr n) 0.0) (v b z0 (car n) (cadr n) 0.0) (v b z1 (car n) (cadr n) 0.0)
-                                 (v a z0 (car n) (cadr n) 0.0) (v b z1 (car n) (cadr n) 0.0) (v a z1 (car n) (cadr n) 0.0)))
-                     (top (list (v (list cx cy) z1 0.0 0.0 1.0) (v a z1 0.0 0.0 1.0) (v b z1 0.0 0.0 1.0))))
-                (loop (+ k 1) (append side top acc)))))))
-
-    ;; The visor: a band across the front of the head, glowing.
-    (define (visor rgb)
-      (let* ((y 0.132) (x0 -0.1) (x1 0.1) (z0 1.6) (z1 1.67)
-             (v (lambda (x z) (list x y z 0.0 1.0 0.0 rgb rgb))))
-        (list (v x0 z0) (v x1 z0) (v x1 z1) (v x0 z0) (v x1 z1) (v x0 z1))))
 
     ;; --- drawing it ------------------------------------------------------------
 
@@ -237,11 +161,7 @@
           (set! *pose-y* (lerp (guard-prev-y g) (guard-y g) alpha))
           (set! *pose-fx* (if (> m 1e-6) (/ fx m) 0.0))
           (set! *pose-fy* (if (> m 1e-6) (/ fy m) 1.0))
-          (let* ((swing (* 0.42 (sin (* (/ TAU 1.5) (guard-phase g)))))
-                 (z (guard-z g)))
-            (pose! *model* *pose-x* *pose-y* z *pose-fx* *pose-fy* 0.0 0.0 0.0)
-            (pose! *leg-l* *pose-x* *pose-y* z *pose-fx* *pose-fy* -0.11 swing HIP)
-            (pose! *leg-r* *pose-x* *pose-y* z *pose-fx* *pose-fy* 0.11 (- swing) HIP)))))
+          (pose! *model* *pose-x* *pose-y* (guard-z g) *pose-fx* *pose-fy* 0.0 0.0 0.0))))
 
     ;; A column-major model matrix: the body's frame at (x y z) facing
     ;; (fx fy), offset ox along its right, and turned by angle a about its
@@ -260,17 +180,12 @@
 
     ;; Inside the world pass ((phantom render)'s extra draw).
     (define (draw-guard!)
-      (when (and *core* *mesh*)
+      (when *core*
         (let* ((g (play-guard *core*))
                (ls (play-light-state *core*))
-               (_ (light-rgb-at! ls (play-data *core*) *pose-x* *pose-y* (guard-z g)))
-               (r (light-r ls)) (gg (light-g ls)) (b (light-b ls))
-               (body (range 'body)) (leg (range 'leg))
-               (vis (range (vector-ref VISOR-NAMES (guard-state g)))))
-          (render-draw-object! *mesh* (car body) (cadr body) *model* r gg b)
-          (render-draw-object! *mesh* (car vis) (cadr vis) *model* r gg b)
-          (render-draw-object! *mesh* (car leg) (cadr leg) *leg-l* r gg b)
-          (render-draw-object! *mesh* (car leg) (cadr leg) *leg-r* r gg b))))
+               (_ (light-rgb-at! ls (play-data *core*) *pose-x* *pose-y* (guard-z g))))
+          (guard-body-draw! *model* (guard-phase g) (guard-state g)
+                            (light-r ls) (light-g ls) (light-b ls)))))
 
     ;; --- the HUD ---------------------------------------------------------------
 
