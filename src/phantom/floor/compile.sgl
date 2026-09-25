@@ -605,8 +605,9 @@
                                             (loop (+ i 1)
                                                   (append (reverse (map (lambda (h) (cons (vector-ref es i) h)) (vector-ref holes i))) acc))))
                                       (lambda (eh)
-                                        (let* ((e (car eh)) (h (cdr eh)) (a (edge-a e)) (b (edge-b e))
-                                               (at (lambda (t) (cons (+ (px a) (* t (- (px b) (px a)))) (+ (py a) (* t (- (py b) (py a)))))))
+                                        ;; a hole's t0 t1 are metres along its edge from edge-a
+                                        (let* ((e (car eh)) (h (cdr eh))
+                                               (at (lambda (t) (edge-point e t)))
                                                (kind (vector-ref h 4)))
                                           (js-obj (list (cons "kind" (js-str (case kind ((arch exit door) "door") ((window) "window") ((grate) "grate") ((hatch) "hatch") (else (symbol->string kind)))))
                                                         (cons "from" (js-pt (at (vector-ref h 0))))
