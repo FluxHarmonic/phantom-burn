@@ -84,21 +84,25 @@
 
 ;; --- the gate: heard two rooms away running, not sneaking -----------------------
 
-;; The runner crosses the lobby toward the arch for 3 s at a gait; the guard
-;; is held in the office facing away (north), with the lights off, so only
-;; hearing can raise its awareness. Returns (loudest-level awareness heard?).
+;; The runner crosses the same 4 m of the lobby's marble (x 9.5, y 3 to 7,
+;; heading north) at a gait, so every gait covers the same ground at the
+;; same distances: only the gait differs. (A fixed time would not do: a
+;; slower gait also stays farther away, and distance alone would keep a
+;; sneak quiet; the first version of this gate passed with gait ignored.)
+;; The guard is held in the office, 1.2 m in from the corridor's door,
+;; facing away (north), with the lights off, so only hearing can raise its
+;; awareness. Returns (loudest-level awareness heard?).
 (define (cross gait)
   (let* ((p (play-reset! (make-play C DATA CIRCUITS)))
          (g (play-guard p))
          (gw (play-guard-world p))
-         (in (make-input 0.0 1.0 0.0 0.0 (eq? gait 'sneak) (eq? gait 'run) #f 0))
-         (east (- (/ PI 2.0))))
+         (in (make-input 0.0 1.0 0.0 0.0 (eq? gait 'sneak) (eq? gait 'run) #f 0)))
     (guard-reset! g gw 0)
-    (let loop ((i 0) (w (make-walker 3.0 6.0 0.0 east)) (loud 0.0) (aware 0.0) (heard #f))
-      (if (>= i 180)
-          (list loud aware heard)
+    (let loop ((i 0) (w (make-walker 9.5 3.0 0.0 0.0)) (loud 0.0) (aware 0.0) (heard #f))
+      (if (or (>= i 900) (>= (walker-y w) 7.0))
+          (list loud aware heard (walker-y w))
           (let ((w (walker-step w in TICK C)))
-            (guard-place! g 19.0 17.0 0.0 1.0)
+            (guard-place! g 20.5 14.2 0.0 1.0)
             (play-tick! p w DARK 1.0 2.0)
             (loop (+ i 1) w (max loud (play-last-heard p)) (max aware (guard-awareness g))
                   (or heard (guard-heard? g))))))))
@@ -106,12 +110,14 @@
 (test-group "the P2 gate: hearing"
   (test "a run across the lobby is heard in the office, two rooms away"
     (let ((r (cross 'run)))
+      (assert-true (>= (cadddr r) 7.0))
       (display (list 'gate-run r 'threshold (hearing-threshold DATA))) (newline)
       (assert-true (caddr r))
       (assert-true (> (car r) (hearing-threshold DATA)))
       (assert-true (>= (cadr r) 0.3))))
   (test "the same crossing sneaked is not heard"
     (let ((r (cross 'sneak)))
+      (assert-true (>= (cadddr r) 7.0))
       (display (list 'gate-sneak r)) (newline)
       (assert-false (caddr r))
       (assert-true (< (car r) (hearing-threshold DATA)))
