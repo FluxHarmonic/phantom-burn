@@ -86,18 +86,9 @@
         (let loop ((w w1) (k 0))
           (if (>= k SETTLE) w (loop (walker-step w NO-INPUT TICK c) (+ k 1))))))
 
-    ;; A walker already crouched (toggle on, crouched height), for a low place:
-    ;; one made standing there has its head in the ceiling, and the walker's
-    ;; collision throws it out sideways (0.63 m in the first tick, measured in
-    ;; the duct with --probe). STOPGAP: it sets the walker's slots I-H (9),
-    ;; I-CROUCH (10) and I-EYEZ (22) directly, until (phantom walker) offers
-    ;; a crouched constructor; the probe shows it in effect (h 0.9 at tick 0).
-    (define (crouched-walker x y z)
-      (let ((w (walker-copy (make-walker x y z 0.0))))
-        (vector-set! w 9 CROUCH)
-        (vector-set! w 10 #t)
-        (vector-set! w 22 (+ z (- CROUCH EYE-DROP)))
-        w))
+    ;; A walker already crouched, for a low place (the duct), as a player
+    ;; arrives there: the walker's crouched constructor (shell 57f4493).
+    (define (crouched-walker x y z) (make-walker x y z 0.0 #t))
 
     ;; The room whose air holds the feet at (x y z): of the rooms whose
     ;; outline holds the point and whose height span holds z, the one with the
