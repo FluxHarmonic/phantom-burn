@@ -17,7 +17,7 @@
 ;;;   ("press", "KEY")       a button on the page (the crouch button sends c)
 ;;;   ("dpr", "N")           window.devicePixelRatio, at boot and on a resize
 ;;;   ("floorinfo", TEXT)    a compiled floor's floor.sexp (before its assets load)
-;;;   ("playinfo", TEXT)     ?play=1: the floor's play.sexp (before the collision)
+;;;   ("playinfo", TEXT)     the floor's play.sexp, P1's game (not with ?play=0), before the collision
 
 (define-library (phantom shell web)
   (import (sigil core)
@@ -157,7 +157,7 @@
         (play-mode-start! (game-collision) *info* *play-text* (not (param "view")))
         (set! *play-text* #f)
         (game-set-play! (vector play-hold? play-after-tick! play-frame! play-hud!))
-        (unless (param "hud") (game-set-hud! 0)))
+        (unless (or (param "hud") (param "dev")) (game-set-hud! 0)))
       (set! *started* #t)
       (when *replay-text* (run-replay! *replay-text*) (set! *replay-text* #f)))
 
