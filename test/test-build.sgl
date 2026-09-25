@@ -12,6 +12,7 @@
         (phantom floor plan)
         (phantom floor stack)
         (phantom floor mesh)
+        (phantom floor light)
         (phantom floor build))
 
 (define (reader path) (and (file-exists? path) (read-file-string path)))
@@ -67,3 +68,29 @@
                           (apply append (vector->list (ctx-holes c))))))
       (assert-true (< (abs (- (fold-left + 0.0 (map (lambda (h) (- (vector-ref h 1) (vector-ref h 0))) arches)) 3.0)) 1e-6))
       (assert-true (every (lambda (h) (and (= (vector-ref h 2) 0.0) (= (vector-ref h 3) 2.75))) arches)))))
+
+;; The stair's two styles (D35's growth plan: the style is a field, solid by
+;; default): the slice's open stair leaves the space under its treads as air,
+;; where the solid one is mass down to the floor. A ray across the stair's
+;; width at y 5, 0.9 m up (under tread 11, whose bottom is at 1.78 m, and under
+;; the stringers' lower edge there, at 1.66 m) must pass for the open stair and
+;; be blocked for the solid one.
+(define (build-with edit)
+  (let* ((rd (lambda (p) (let ((t (reader p))) (if (and t (string=? p "floors/14-slice.floor")) (edit t) t))))
+         (s (load-sources "floors/14-slice.floor" rd)))
+    (build-architecture! (make-ctx (sources-floor s) (sources-legend s) (sources-props s)))))
+(define (clear-under-stair? cx)
+  (not (occluded? (make-occluders (ctx-soup cx) (lambda (t) #t)) 9.5 5.0 0.9 12.5 5.0 0.9)))
+
+(test-group "the stair's style"
+  (test "the slice's stair is open"
+    (assert-equal 'open (stair-style (car (floor-stairs (sources-floor src))))))
+  (test "a stair without style: is solid"
+    (let ((s2 (load-sources "floors/14-slice.floor"
+                            (lambda (p) (let ((t (reader p)))
+                                          (if (and t (string=? p "floors/14-slice.floor")) (string-replace t "  style: open" "") t))))))
+      (assert-equal 'solid (stair-style (car (floor-stairs (sources-floor s2)))))))
+  (test "under the open stair is air"
+    (assert-true (clear-under-stair? c)))
+  (test "under the solid stair is mass"
+    (assert-false (clear-under-stair? (build-with (lambda (t) (string-replace t "  style: open" "")))))))

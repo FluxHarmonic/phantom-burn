@@ -5,6 +5,7 @@
         (sigil list)
         (phantom floor problem)
         (phantom floor format)
+        (sigil string)
         (phantom floor sources))
 
 (define (reader path) (and (file-exists? path) (read-file-string path)))
@@ -30,3 +31,16 @@
   (test "props and textures found"
     (assert-equal '(lift exit-door light-switch badge office-desk filing-cabinet) (map car (sources-props src)))
     (assert-equal 8 (length (sources-textures src)))))
+
+;; A stair's style: solid or open, gate 1 otherwise.
+(define (has? s part)
+  (let ((n (string-length s)) (k (string-length part)))
+    (let loop ((i 0)) (and (<= (+ i k) n) (or (string=? (substring s i (+ i k)) part) (loop (+ i 1)))))))
+
+(test-group "a stair's style"
+  (test "a style that is not solid or open is reported"
+    (let ((s2 (load-sources "floors/14-slice.floor"
+                            (lambda (p) (let ((t (reader p)))
+                                          (if (and t (string=? p "floors/14-slice.floor")) (string-replace t "style: open" "style: spiral") t))))))
+      (assert-true (any (lambda (p) (and (= (problem-gate p) 1) (has? (problem-message p) "style is solid or open, not spiral")))
+                        (sources-problems s2))))))

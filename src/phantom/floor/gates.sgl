@@ -234,7 +234,7 @@
                           zs))))))
 
     (define (inside-stair? c p z)
-      (any (lambda (sb) (and (point-in-poly? p (car sb)) (< z (cadr sb))))
+      (any (lambda (sb) (and (point-in-poly? p (car sb)) (< z (cadr sb)) (> z (caddr sb))))
            (growable->list (ctx-stair-boxes c))))
 
     (define (check-sealed! c)

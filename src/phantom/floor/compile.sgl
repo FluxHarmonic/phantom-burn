@@ -48,7 +48,7 @@
           compiled-floor-collision compiled-floor-circuits compiled-floor-surfaces
           compiled-floor-rooms compiled-floor-edges compiled-floor-views compiled-floor-start
           compiled-floor-things compiled-floor-emitters compiled-floor-paths compiled-floor-stats
-          compiled-floor-ctx
+          compiled-floor-ctx compiled-floor-ambient
           part-name part-first part-count part-texture part-pass
           collision-tris collision-surface collision-room collision-count
           compiled-floor->sgm1 compiled-floor->collide compiled-floor->json
@@ -58,9 +58,12 @@
     (define LAYOUT-SPEC '((position float3) (uv float2) (normal float3) (color ubyte4n)
                           (emission ubyte4n) (light float4) (circuit ubyte4)))
     (define STRIDE 60)
-    ;; The light every surface gets with every circuit off (G0's demo value:
-    ;; the export's world ambient #21173D at 0.6, lifted so a dark room reads).
-    (define AMBIENT '(0.2 0.14 0.34))
+    ;; The contract's ambient, the light every surface gets besides the baked
+    ;; circuits: the shell's night floor plus its full bounce, NIGHT (0.042
+    ;; 0.042 0.042) + BOUNCE (0.138 0.138 0.138) in render.sgl. Neutral grey,
+    ;; David's pick (2026-09-25); it was G0's violet (0.2 0.14 0.34), which
+    ;; tinted every floor lavender and pushed the embers mapping to magenta.
+    (define AMBIENT '(0.18 0.18 0.18))
 
     (define-struct compiled-floor
       (name default: "") (path default: "") (problems default: '())
@@ -72,7 +75,8 @@
       (circuits default: '()) (surfaces default: '())
       (rooms default: '()) (edges default: '()) (views default: '())
       (start default: #f) (things default: '()) (emitters default: '())
-      (paths default: '()) (stats default: '()) (ctx default: #f))
+      (paths default: '()) (stats default: '()) (ctx default: #f)
+      (ambient default: AMBIENT))  ; the shader's ambient (r g b): AMBIENT, or the look-lab setting
 
     ;; A part: #(name first count texture pass)
     (define (part-name p) (vector-ref p 0))
@@ -109,12 +113,16 @@
     ;; --- compiling ------------------------------------------------------------------------
 
     ;; raise? (optional, #f): let an internal error through instead of
-    ;; reporting it as a problem, for debugging the compiler.
+    ;; reporting it as a problem, for debugging the compiler. look (optional,
+    ;; after it): the look lab's settings, ((city STRENGTH RADIUS) (ambient R G
+    ;; B)), each optional; the defaults are CITY-DEFAULT and AMBIENT.
     (define (compile-floor floor-path read-text . opt)
       (floor-debug! (and (pair? opt) (car opt) #t))
       (let* ((src (load-sources floor-path read-text))
              (fl (sources-floor src))
              (lg (sources-legend src))
+             ;; the look lab's settings (the second optional argument): ((city S R) (ambient R G B))
+             (look (if (and (pair? opt) (pair? (cdr opt))) (cadr opt) '()))
              (base (compiled-floor name: (base-name floor-path) path: floor-path
                                    problems: (sources-problems src) paths: (sources-paths src))))
         (if (or (not fl) (not lg) (any (lambda (p) (= (problem-gate p) 0)) (sources-problems src)))
@@ -126,7 +134,7 @@
                                                                            message: (string-append "the compiler failed: "
                                                                                                    (if (error-object? e) (error-object-message e) "an error"))))))))
               (let* ((t0 (current-jiffy))
-                     (c (build-architecture! (make-ctx fl lg (sources-props src))))
+                     (c (build-architecture! (make-ctx fl lg (sources-props src) look)))
                      (t1 (current-jiffy))
                      (_1 (checkpoint opt "architecture done"))
                      (c (dress! c))
@@ -171,6 +179,7 @@
                                              (cons (quote ms-architecture) (ms t0 t1)) (cons (quote ms-dress) (ms t1 t2))
                                              (cons (quote ms-gates) (ms t2 t3)) (cons (quote ms-light-and-buffers) (ms t3 t4))
                                              (cons 'collision-triangles (soup-count (ctx-soup c))))
+                                ambient: (let ((a (assq 'ambient look))) (if a (cdr a) AMBIENT))
                                 ctx: c))))))
 
     ;; --- assembling the buffers ---------------------------------------------------------
@@ -478,7 +487,7 @@
                                                                                 (cons "height" (js-num (caddr t)))
                                                                                 (cons "file" (js-str (string-append "tex-" (car t) ".png")))))))
                                         (compiled-floor-textures cf))))
-          (cons "ambient" (js-list AMBIENT js-num))
+          (cons "ambient" (js-list (compiled-floor-ambient cf) js-num))
           (cons "circuits" (js-list (compiled-floor-circuits cf)
                                     (lambda (ci) (js-obj (list (cons "name" (js-sym (list-ref ci 0)))
                                                                (cons "index" (js-num (list-ref ci 1)))
