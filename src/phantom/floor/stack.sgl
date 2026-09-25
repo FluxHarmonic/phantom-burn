@@ -96,6 +96,8 @@
       (and (room-edge u) (memq (room-name l) (room-over u)) #t))
 
     ;; A vector: each room's group id (the smallest room index in its group).
+    ;; Transitive: rooms under one open room are one group, as light sees
+    ;; them; walls use linked?, which is not.
     (define (room-groups rooms)
       (let* ((n (length rooms))
              (rv (list->vector rooms))
@@ -113,12 +115,15 @@
             (loop (+ i 1))))
         (list->vector (map find (iota n)))))
 
-    ;; Do owners i and j share air?
+    ;; Do owners i and j share air? Two rooms do when one is open over the
+    ;; other, and only then: two rooms under one mezzanine share its air, not
+    ;; each other's, so the wall between them stands (room-groups is the
+    ;; transitive relation, for light). groups is kept for the callers.
     (define (linked? owners groups i j)
       (or (= i j)
           (let ((a (vector-ref owners i)) (b (vector-ref owners j)))
             (cond ((and (eq? (owner-kind a) 'room) (eq? (owner-kind b) 'room))
-                   (= (vector-ref groups i) (vector-ref groups j)))
+                   (or (open-over? (owner-room a) (owner-room b)) (open-over? (owner-room b) (owner-room a))))
                   ((eq? (owner-kind a) 'hatch)
                    (or (eqv? (owner-lower a) j) (eqv? (owner-upper a) j)))
                   ((eq? (owner-kind b) 'hatch)

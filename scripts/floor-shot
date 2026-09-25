@@ -1,0 +1,113 @@
+#!/bin/sh
+# floor-shot [--web BUILD] [--src DIR] FLOOR [K...] - in-game shots of a
+# compiled floor's views, beside the Blender export's renders of the same
+# views (design section 7, "Review surfaces"; P0: "each floor-shot sits beside
+# the export's render").
+#
+#   scripts/floor-shot 14-slice            the three export views (0 1 2), native
+#   scripts/floor-shot 14-slice 0 3 6      views by the game's index
+#   scripts/floor-shot --web build/remote-web-SHA --src build/remote-out-SHA/build/floors 14-slice
+#                                          the same through the web build (headless
+#                                          Chrome), with a runner's compile
+#
+# Needs DIR/FLOOR.{sgm,sgm.json,collide} and textures (phantom-burn
+# --floor-compile floors/FLOOR.floor; DIR defaults to build/floors). The shots
+# come from the game's own render path: the shell's scripts/floor-import.mjs
+# brings the floor in, run from a scratch copy so the tracked assets/floors/ is
+# never touched.
+#   native: scripts/shot-native takes each view with --shot K; needs
+#           SHOT_DISPLAY (your own Xvfb, never David's display) and a local
+#           dev build.
+#   --web:  a scratch copy of the web build BUILD gets the imported floor, and
+#           the shell's scripts/shot-web.mjs opens ?floor=FLOOR&shot=K&hud=0 at
+#           2x; needs node and google-chrome.
+#
+# The game orders a compiled floor's views: arrival overlook office (the
+# export's three), then its three dark views, then the floor's others.
+#
+# Writes build/floors/shots/FLOOR-K.png (FLOOR-K-web.png for --web), and for
+# K = 0 1 2 a side-by-side ...-vs-export.png (the game's 480x270 frame at 2x,
+# then the export's look-test render). Exit 0, or 2 when anything it needs is
+# missing.
+set -eu
+cd "$(dirname "$0")/.."
+WEB=""
+SRC=build/floors
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --web) [ $# -ge 2 ] || { echo "SETUP-FAILED: --web needs a web build's directory"; exit 2; }; WEB="$2"; shift 2 ;;
+    --src) [ $# -ge 2 ] || { echo "SETUP-FAILED: --src needs a directory"; exit 2; }; SRC="$2"; shift 2 ;;
+    *) break ;;
+  esac
+done
+[ $# -ge 1 ] || { echo "usage: scripts/floor-shot [--web BUILD] [--src DIR] FLOOR [K...]"; exit 2; }
+FLOOR="$1"; shift
+# FLOOR names files under build/floors/shots/ that this script deletes and writes
+case "$FLOOR" in
+  ''|*[!a-z0-9-]*) echo "SETUP-FAILED: FLOOR is a floor's name (a-z, 0-9, -), not '$FLOOR'"; exit 2 ;;
+esac
+[ $# -gt 0 ] || set -- 0 1 2
+for k in "$@"; do
+  case "$k" in ''|*[!0-9]*) echo "SETUP-FAILED: K is a view's index (0, 1, ...), not '$k'"; exit 2 ;; esac
+done
+if [ -z "$WEB" ]; then
+  [ -n "${SHOT_DISPLAY:-}" ] || { echo "SETUP-FAILED: set SHOT_DISPLAY to your own Xvfb display"; exit 2; }
+else
+  [ -f "$WEB/index.html" ] || { echo "SETUP-FAILED: $WEB/index.html missing (a web build's served tree)"; exit 2; }
+fi
+command -v node >/dev/null 2>&1 || { echo "SETUP-FAILED: node is not on PATH (the floor import needs it)"; exit 2; }
+for f in "$SRC/$FLOOR.sgm" "$SRC/$FLOOR.sgm.json" "$SRC/$FLOOR.collide"; do
+  [ -f "$f" ] || { echo "SETUP-FAILED: $f missing (phantom-burn --floor-compile floors/$FLOOR.floor)"; exit 2; }
+done
+SRC_ABS="$(cd "$SRC" && pwd)"
+EXPORT="${EXPORT_DIR:-$HOME/Ops/attachments/stealth-game-design}"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/floor-shot.XXXXXX")"
+trap 'rm -rf "$TMP"' EXIT
+if [ -z "$WEB" ]; then
+  mkdir -p "$TMP/scripts" "$TMP/assets"
+  ln -s "$PWD/assets/stand-in" "$TMP/assets/stand-in"
+  ROOT="$TMP"
+else
+  # the whole served tree, so the page loads the imported floor and nothing else changes
+  cp -r "$WEB" "$TMP/web"
+  mkdir -p "$TMP/web/scripts"
+  [ -d "$TMP/web/assets/stand-in" ] || ln -s "$PWD/assets/stand-in" "$TMP/web/assets/stand-in"
+  rm -rf "$TMP/web/assets/floors/$FLOOR"
+  ROOT="$TMP/web"
+fi
+cp scripts/floor-import.mjs "$ROOT/scripts/"
+node "$ROOT/scripts/floor-import.mjs" "$SRC_ABS" "$FLOOR" || { echo "SETUP-FAILED: the floor import failed"; exit 2; }
+DIR="$ROOT/assets/floors/$FLOOR"
+[ -f "$DIR/floor.sexp" ] || { echo "SETUP-FAILED: the import wrote no $DIR/floor.sexp"; exit 2; }
+mkdir -p build/floors/shots
+for k in "$@"; do
+  if [ -z "$WEB" ]; then
+    out="build/floors/shots/$FLOOR-$k.png"
+    rm -f "$out"
+    scripts/shot-native "$out" --floor "$DIR" --shot "$k" --hud 0 || { echo "SETUP-FAILED: shot-native failed on view $k"; exit 2; }
+    scale="-filter point -resize 200%"
+  else
+    out="build/floors/shots/$FLOOR-$k-web.png"
+    rm -f "$out"
+    # ports of our own, so another worker's shot-web on the defaults cannot answer
+    node scripts/shot-web.mjs "$ROOT" "$out" --query "floor=$FLOOR&shot=$k&hud=0" --scale 2 --wait 2500 \
+      --port $((20000 + $$ % 10000)) --cdp $((30000 + $$ % 10000)) \
+      || { echo "SETUP-FAILED: shot-web failed on view $k"; exit 2; }
+    scale=""
+  fi
+  [ -f "$out" ] || { echo "SETUP-FAILED: no shot for view $k"; exit 2; }
+  case "$k" in
+    0) ref="$EXPORT/look-2-arrival.png" ;;
+    1) ref="$EXPORT/look-3-overlook.png" ;;
+    2) ref="$EXPORT/look-4-office.png" ;;
+    *) ref="" ;;
+  esac
+  if [ -n "$ref" ] && [ -f "$ref" ]; then
+    side="${out%.png}-vs-export.png"
+    # $scale is deliberately split into words
+    # shellcheck disable=SC2086
+    guix shell imagemagick -- convert \( "$out" $scale \) \( "$ref" -resize 960x540 \) +append "$side" \
+      || { echo "SETUP-FAILED: the side-by-side for view $k"; exit 2; }
+    echo "floor-shot: $side (game | export)"
+  fi
+done

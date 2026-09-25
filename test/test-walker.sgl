@@ -163,6 +163,70 @@
       (assert-true (<= (walker-height w2) 1.0))
       (assert-true (near? (walker-height w0) CROUCH 1e-9)))))
 
+;; A flat horizontal quad (two triangles, facing down) with no side faces:
+;; only the flat-piece logic can make it block anything.
+(define (ceiling-quad x0 y0 x1 y1 z)
+  (list (list x0 y0 z x0 y1 z x1 y1 z) (list x0 y0 z x1 y1 z x1 y0 z)))
+
+(test-group "the review's cases"
+  (test "a bare lintel at 1 m (one horizontal quad) blocks a standing body walking into it"
+    (let* ((c (scene (ground) (ceiling-quad 3.0 -2.0 5.0 2.0 1.0)))
+           (w (run (make-walker 0.0 0.0 0.0 EAST) c 180 FORWARD)))
+      (assert-true (< (walker-x w) (- 3.0 (* 0.9 RADIUS))))))
+  (test "... and a crouched body walks under it"
+    (let* ((c (scene (ground) (ceiling-quad 3.0 -2.0 5.0 2.0 1.0)))
+           (w (run (make-walker 0.0 0.0 0.0 EAST #t) c 360 FORWARD)))
+      (assert-true (> (walker-x w) 5.0))))
+  (test "make-walker's crouched? starts the body at CROUCH, toggled on"
+    (let ((w (make-walker 0.0 0.0 0.0 0.0 #t)))
+      (assert-true (near? (walker-height w) CROUCH 1e-9))
+      (assert-true (walker-crouching? w))))
+  (test "a standing body placed under a 1 m ceiling crouches and is not thrown sideways"
+    (let* ((c (scene (ground) (box -2.0 -2.0 1.0 2.0 2.0 1.2)))
+           (w (walker-step (make-walker 0.3 0.1 0.0 0.0) NO-INPUT TICK c)))
+      (assert-true (< (abs (- (walker-x w) 0.3)) 0.01))
+      (assert-true (< (abs (- (walker-y w) 0.1)) 0.01))
+      (assert-true (walker-crouching? w))
+      (assert-true (<= (walker-height w) 1.0))))
+  (test "under a small ceiling lower than a crouched body (0.7 m), the body is not thrown out sideways"
+    ;; the crouch alone cannot clear this one, and the patch is small, so a
+    ;; shove would land where there is headroom (the compiler's duct case):
+    ;; only collide's rule (no sideways push out of a ceiling over the
+    ;; centre) keeps the body put
+    (let* ((c (scene (ground) (box 0.0 -0.2 0.7 0.6 0.4 0.9)))
+           (w (run (make-walker 0.3 0.1 0.0 0.0) c 10 NO-INPUT)))
+      (assert-true (< (abs (- (walker-x w) 0.3)) 0.01))
+      (assert-true (< (abs (- (walker-y w) 0.1)) 0.01))))
+  (test "no mantle through a thin wall onto a desk behind it (F1)"
+    (let* ((c (scene (ground) (box 3.0 -3.0 0.0 3.1 3.0 3.0) (box 3.1 -1.0 0.85 4.1 1.0 0.9)))
+           (w (run (make-walker 0.0 0.0 0.0 EAST) c 300 FORWARD)))
+      (assert-true (< (walker-x w) 3.0))
+      (assert-true (near? (walker-z w) 0.0 1e-9))))
+  (test "under a soffit over the start, a climb goes crouched: the head never rises through it (F2)"
+    (let* ((c (scene (ground) (box 1.5 -3.0 2.4 2.9 3.0 2.6) (box 3.0 -3.0 0.0 4.0 3.0 1.0))))
+      ;; step by step, the highest the head gets while under the soffit
+      ;; (it climbs, then walks on off the block's far side: what counts is
+      ;; that it got to the top and the head stayed under the soffit)
+      (let loop ((w (make-walker 0.0 0.0 0.0 EAST)) (n 0) (worst 0.0) (top 0.0))
+        (if (= n 300)
+            (begin
+              (assert-true (<= worst 2.4))
+              (assert-true (near? top 1.0 1e-6)))
+            (let* ((w2 (walker-step w FORWARD TICK c))
+                   (head (+ (walker-z w2) (walker-height w2)))
+                   (under (and (> (walker-x w2) (- 1.5 RADIUS)) (< (walker-x w2) (+ 2.9 RADIUS)))))
+              (loop w2 (+ n 1) (if under (max worst head) worst) (max top (walker-z w2))))))))
+  (test "a riser of exactly STEP (as float32 stores it) is stepped onto (F3)"
+    (let* ((c (scene (ground) (box 3.0 -3.0 0.0 15.0 3.0 STEP)))
+           (w (run (make-walker 0.0 0.0 0.0 EAST) c 180 FORWARD)))
+      (assert-true (> (walker-x w) 3.5))
+      (assert-true (near? (walker-z w) STEP 1e-6))))
+  (test "a crouch pressed during a mantle is not lost"
+    (let* ((c (scene (ground) (box 3.0 -3.0 0.0 6.0 3.0 1.0)))
+           (m (run-until (make-walker 0.0 0.0 0.0 EAST) c FORWARD walker-mantling? 300))
+           (w (and m (run (walker-step m CROUCH-PRESS TICK c) c 60 NO-INPUT))))
+      (assert-true (and w (walker-crouching? w))))))
+
 (test-group "leaning"
   (test "a lean right in the open moves the eyes 0.4 m right"
     (let* ((c (scene (ground)))

@@ -203,6 +203,7 @@
              (ib (make-bytevector (* isize (max ni 1)) 0))
              (occ (make-occluders (ctx-soup c) (let ((glass (tag-of c 'glass))) (lambda (t) (not (= t glass))))))
              (sees (room-sight c))
+             (nudge (outline-nudge c))
              (prof (vector 0 0))
              (voff 0) (ioff 0) (parts '()))
         (for-each
@@ -216,7 +217,7 @@
                     (let loop ((i 0))
                       (when (< i n)
                         (let* ((j0 (current-jiffy))
-                               (slots (bake-vertex occ emitters (vector-ref vs i) sees))
+                               (slots (bake-vertex occ emitters (vector-ref vs i) sees nudge))
                                (j1 (current-jiffy)))
                           (write-vertex! vb (* STRIDE (+ base i)) (vector-ref vs i) slots)
                           (vector-set! prof 0 (+ (vector-ref prof 0) (- j1 j0)))
@@ -279,12 +280,37 @@
                       (else #f))))
             panels))))
 
-    ;; The room holding point (x y z) in its air, or -1.
+    ;; The room holding point (x y z) in its air, or -1: of the rooms whose
+    ;; outline and height span hold it, the one with the highest floor (a
+    ;; panel over the mezzanine lights the mezzanine, not the lobby under it).
     (define (room-at c x y z)
-      (let ((r (find (lambda (r) (and (point-in-poly? (cons x y) (room-corners r))
-                                      (>= z (room-floor r)) (<= z (room-ceiling r))))
-                     (floor-rooms (ctx-floor c)))))
-        (if r (room-index r) -1)))
+      (let ((rs (filter (lambda (r) (and (point-in-poly? (cons x y) (room-corners r))
+                                         (>= z (room-floor r)) (<= z (room-ceiling r))))
+                        (floor-rooms (ctx-floor c)))))
+        (if (null? rs) -1
+            (room-index (fold-left (lambda (a b) (if (> (room-floor b) (room-floor a)) b a)) (car rs) rs)))))
+
+    ;; The bake's origin offset: for a vertex of room ri at (x y), 2 cm into
+    ;; the room off each of its outline edges within 3 cm, or #f. A floor or
+    ;; wall vertex on a wall line, lifted only along its own normal, stays in
+    ;; the plane of the zero-thickness walls there and sees through them (the
+    ;; ray meets both at t ~ 0, which the ray test ignores).
+    (define (outline-nudge c)
+      (let ((rings (list->vector
+                     (map (lambda (r)
+                            (let ((cs (poly-ccw (room-corners r))))
+                              (map cons cs (append (cdr cs) (list (car cs))))))
+                          (floor-rooms (ctx-floor c))))))
+        (lambda (ri x y)
+          (and (>= ri 0) (< ri (vector-length rings))
+               (let ((p (cons x y)))
+                 (let loop ((es (vector-ref rings ri)) (ox 0.0) (oy 0.0) (hit #f))
+                   (cond ((null? es) (and hit (cons ox oy)))
+                         ((< (point-seg-dist p (caar es) (cdar es)) 0.03)
+                          ;; a counter-clockwise ring's inside is its edges' left
+                          (let ((d (pt-norm (pt- (cdar es) (caar es)))))
+                            (loop (cdr es) (- ox (* 0.02 (py d))) (+ oy (* 0.02 (px d))) #t)))
+                         (else (loop (cdr es) ox oy hit)))))))))
 
     ;; Which rooms can light each other: a room itself, rooms of one volume,
     ;; and rooms an opening joins (the sector graph's edges). A vector of
@@ -384,7 +410,7 @@
       (let* ((parts (compiled-floor-parts cf))
              (np (length parts))
              (nv (compiled-floor-vertex-count cf)) (ni (compiled-floor-index-count cf))
-             (isize (if (eq? (compiled-floor-index-type cf) 'u16) 2 4))
+             (isize (cond ((= ni 0) 0) ((eq? (compiled-floor-index-type cf) 'u16) 2) (else 4)))   ; sigil-graphics wants 0 with no indices
              (head (make-bytevector (+ 24 (* 8 np)) 0)))
         (bytevector-u8-set! head 0 83) (bytevector-u8-set! head 1 71) (bytevector-u8-set! head 2 77) (bytevector-u8-set! head 3 49)
         (put-u32! head 4 STRIDE) (put-u32! head 8 nv) (put-u32! head 12 ni) (put-u32! head 16 isize) (put-u32! head 20 np)
@@ -415,7 +441,11 @@
                      (apply string-append
                             (map (lambda (ch)
                                    (cond ((char=? ch #\") "\\\"") ((char=? ch #\\) "\\\\")
-                                         ((char=? ch #\newline) "\\n") (else (string ch))))
+                                         ((char=? ch #\newline) "\\n")
+                                         ((< (char->integer ch) 32)
+                                          (let ((h (number->string (char->integer ch) 16)))
+                                            (string-append "\\u00" (if (< (char->integer ch) 16) "0" "") h)))
+                                         (else (string ch))))
                                  (string->list s)))
                      "\""))
     (define (js-num x)
@@ -424,7 +454,7 @@
     (define (js-sym s) (if s (js-str (symbol->string s)) "null"))
     (define (js-list xs f) (string-append "[" (string-join (map f xs) ",") "]"))
     (define (js-obj kvs) (string-append "{" (string-join (map (lambda (kv) (string-append (js-str (car kv)) ":" (cdr kv))) kvs) ",") "}"))
-    (define (js-pt p) (js-list (list (px p) (py p)) js-num))
+    (define (js-pt p) (if p (js-list (list (px p) (py p)) js-num) "null"))
     (define (js-bool b) (if b "true" "false"))
 
     (define (compiled-floor->json cf)

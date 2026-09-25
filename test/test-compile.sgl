@@ -56,8 +56,8 @@
   (test "the SGM1 file's size is what its header says"
     (let ((s (compiled-floor->sgm1 cf)) (np (length (compiled-floor-parts cf))))
       (assert-equal (+ 24 (* 8 np) (* 60 nv) (* isize ni)) (bytevector-length s))))
-  (test "circuits: c1 c2 c3 from the floor, emergency from the exit light"
-    (assert-equal '(c1 c2 c3 emergency) (map car (compiled-floor-circuits cf)))))
+  (test "circuits: c1 c2 c3 from the floor, then every reserved circuit in a fixed order"
+    (assert-equal '(c1 c2 c3 emergency screens city) (map car (compiled-floor-circuits cf)))))
 
 ;; The strongest circuit at the vertex nearest (x y z) with normal n.
 (define (strongest-near x y z nzz)

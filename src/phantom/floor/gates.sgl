@@ -100,39 +100,116 @@
                   (apply append (map (lambda (x) (apply append (map (lambda (y) (map (lambda (z) (list x y z)) '(-1 0 1))) '(-1 0 1))))
                                      '(-1 0 1)))))
 
-    ;; Rays from points in every room; returns (rays . leaks), leaks as
-    ;; ((room point dir) ...).
+    ;; Rays from points in every room and in every opening. Returns
+    ;; (rays leaks unsampled): leaks as ((room point dir) ...), unsampled the
+    ;; rooms no point was found in (the check must never pass a room vacuously).
     (define (sealed-rays c)
       (let* ((occ (make-occluders (ctx-soup c) (lambda (tag) #t)))
-             (so (ctx-soup c))
-             (reach 400.0)
-             (pts (apply append
-                         (map (lambda (r)
-                                (let* ((bb (poly-bbox (room-corners r)))
-                                       (zs (list (+ (room-floor r) 0.4)
-                                                 (* 0.5 (+ (room-floor r) (room-ceiling r))))))
-                                  (let xl ((x (+ (car bb) 0.5)) (acc '()))
-                                    (if (> x (caddr bb)) acc
-                                        (xl (+ x 1.5)
-                                            (let yl ((y (+ (cadr bb) 0.5)) (acc acc))
-                                              (if (> y (cadddr bb)) acc
-                                                  (yl (+ y 1.5)
-                                                      (let ((p (cons x y)))
-                                                        (if (air-at? c r p zs)
-                                                            (append (map (lambda (z) (list r x y z)) (air-heights c r p zs)) acc)
-                                                            acc))))))))))
-                              (floor-rooms (ctx-floor c)))))
+             ;; past every surface, but no further: occluded? ignores hits
+             ;; within 1e-4 of the segment's length of its ends, and the
+             ;; opening samples sit 3 cm off a floor
+             (reach (floor-reach c))
+             (room-pts (map (lambda (r) (cons r (room-samples c r))) (floor-rooms (ctx-floor c))))
              (leaks '())
-             (rays 0))
-        (for-each (lambda (s)
-                    (let ((r (car s)) (x (cadr s)) (y (caddr s)) (z (cadddr s)))
-                      (for-each (lambda (d)
-                                  (set! rays (+ rays 1))
-                                  (unless (occluded? occ x y z (+ x (* reach (car d))) (+ y (* reach (cadr d))) (+ z (* reach (caddr d))))
-                                    (set! leaks (cons (list r (list x y z) d) leaks))))
-                                DIRS)))
-                  pts)
-        (cons rays (reverse leaks))))
+             (rays 0)
+             (shoot! (lambda (r p dirs)
+                       (let ((x (car p)) (y (cadr p)) (z (caddr p)))
+                         (for-each (lambda (d)
+                                     (set! rays (+ rays 1))
+                                     (unless (occluded? occ x y z (+ x (* reach (car d))) (+ y (* reach (cadr d)))
+                                                        (+ z (* reach (caddr d))))
+                                       (set! leaks (cons (list r p d) leaks))))
+                                   dirs)))))
+        (for-each (lambda (rp) (for-each (lambda (p) (shoot! (car rp) p DIRS)) (cdr rp))) room-pts)
+        (for-each (lambda (s) (shoot! (car s) (cadr s) (caddr s))) (opening-samples c))
+        (list rays (reverse leaks) (map car (filter (lambda (rp) (null? (cdr rp))) room-pts)))))
+
+    ;; The diagonal of the box round every room, plus 2 m.
+    (define (floor-reach c)
+      (let* ((rs (floor-rooms (ctx-floor c)))
+             (bbs (map (lambda (r) (poly-bbox (room-corners r))) rs))
+             (dx (- (fold-left max -1e30 (map caddr bbs)) (fold-left min 1e30 (map car bbs))))
+             (dy (- (fold-left max -1e30 (map cadddr bbs)) (fold-left min 1e30 (map cadr bbs))))
+             (dz (- (fold-left max -1e30 (map room-ceiling rs)) (fold-left min 1e30 (map room-floor rs)))))
+        (+ 2.0 (sqrt (+ (* dx dx) (* dy dy) (* dz dz))))))
+
+    ;; A room's sample points (x y z): a 1 m grid, and the centroid of each
+    ;; triangle of its outline, so a strip narrower than the grid (the duct)
+    ;; still gets points.
+    (define (room-samples c r)
+      (let* ((bb (poly-bbox (room-corners r)))
+             (zs (list (+ (room-floor r) 0.4) (* 0.5 (+ (room-floor r) (room-ceiling r)))))
+             (grid (let xl ((x (+ (car bb) 0.5)) (acc '()))
+                     (if (> x (caddr bb)) acc
+                         (xl (+ x 1.0)
+                             (let yl ((y (+ (cadr bb) 0.5)) (acc acc))
+                               (if (> y (cadddr bb)) acc
+                                   (yl (+ y 1.0) (cons (cons x y) acc))))))))
+             (cents (map poly-centroid (ear-clip (room-corners r)))))
+        (apply append
+               (map (lambda (p)
+                      (if (air-at? c r p zs)
+                          (map (lambda (z) (list (car p) (cdr p) z)) (air-heights c r p zs))
+                          '()))
+                    (append cents (reverse grid))))))
+
+    ;; Points in and beside every hole cut in a wall, each with a fan of rays
+    ;; through the hole: ((room (x y z) dirs) ...). A slit a few cm wide (under
+    ;; a door leaf set back from the wall) slips between the room grid's
+    ;; points and its 26 directions; these catch it.
+    (define OPENING-ANGLES '(-60 -40 -25 -15 -8 0 8 15 25 40 60))
+
+    (define (opening-samples c)
+      (let ((es (plan-edges (ctx-plan c))))
+        (let loop ((ei 0) (acc '()))
+          (if (= ei (vector-length es))
+              (reverse acc)
+              (loop (+ ei 1) (fold-left (lambda (acc h) (hole-samples c (vector-ref es ei) h acc))
+                                        acc (vector-ref (ctx-holes c) ei)))))))
+
+    (define (hole-samples c e h acc)
+      (let ((t0 (vector-ref h 0)) (t1 (vector-ref h 1)) (z0 (vector-ref h 2)) (z1 (vector-ref h 3))
+            (n (side-normal e 'left)) (d (edge-dir e)))
+        (fold-left
+          (lambda (acc s)
+            (let ((dirs (opening-fan n d (- s))))
+              (fold-left
+                (lambda (acc off)
+                  (fold-left
+                    (lambda (acc t)
+                      (fold-left
+                        (lambda (acc z)
+                          (let* ((q (pt+ (edge-point e t) (pt* n (* s off))))
+                                 (r (room-with-air c q z)))
+                            (if r (cons (list r (list (px q) (py q) z) dirs) acc) acc)))
+                        acc (list (+ z0 0.03) (* 0.5 (+ z0 z1)) (- z1 0.03))))
+                    acc (map (lambda (f) (+ t0 (* f (- t1 t0)))) '(0.2 0.5 0.8))))
+                acc '(0.05 0.3))))
+          acc '(1 -1))))
+
+    ;; Unit directions roughly along s n (s is 1 or -1, n a wall's normal):
+    ;; tilted up and down by OPENING-ANGLES and swung a little along the wall
+    ;; (d) either way. A point on side s of the wall shoots along -s n.
+    (define (opening-fan n d s)
+      (apply append
+             (map (lambda (deg)
+                    (let* ((a (* deg (/ 3.141592653589793 180.0))) (h (cos a)) (v (sin a)))
+                      (map (lambda (lat)
+                             (let* ((x (* h (+ (* s (px n)) (* lat (px d)))))
+                                    (y (* h (+ (* s (py n)) (* lat (py d)))))
+                                    (l (sqrt (+ (* x x) (* y y) (* v v)))))
+                               (list (/ x l) (/ y l) (/ v l))))
+                           '(-0.6 0.0 0.6))))
+                  OPENING-ANGLES)))
+
+    ;; The room with air at (q, z), if any (not inside a stair's steps).
+    (define (room-with-air c q z)
+      (let ((f (plan-face-at (ctx-plan c) q)))
+        (and (>= f 0) (not (inside-stair? c q z))
+             (let ((iv (find (lambda (iv) (and (owner-room-of c (iv-owner iv))
+                                               (> z (+ (iv-lo iv) 0.01)) (< z (- (iv-hi iv) 0.01))))
+                             (face-ivs c f))))
+               (and iv (owner-room-of c (iv-owner iv)))))))
 
     ;; Is p inside room r, clear of its outline (a sample on a wall line would
     ;; see through the wall's own edge), with r's own air there?
@@ -161,7 +238,12 @@
            (growable->list (ctx-stair-boxes c))))
 
     (define (check-sealed! c)
-      (let* ((r (sealed-rays c)) (leaks (cdr r)))
+      (let* ((r (sealed-rays c)) (leaks (cadr r)))
+        (for-each (lambda (room)
+                    (add-problem! c 2 (room-line room)
+                                  (string-append "room " (rname room)
+                                                 " has no point clear of its walls to test the seal from")))
+                  (caddr r))
         (for-each (lambda (l)
                     (let ((room (car l)) (p (cadr l)) (d (caddr l)))
                       (add-problem! c 2 (room-line room)
@@ -250,6 +332,11 @@
 
     ;; --- gate 6: stairs -----------------------------------------------------------------------------
 
+    (define (seg-seg-dist a b p q)
+      (if (seg-cross a b p q)
+          0.0
+          (min (point-seg-dist a p q) (point-seg-dist b p q) (point-seg-dist p a b) (point-seg-dist q a b))))
+
     (define (check-stairs! c)
       (let ((rails (growable->list (ctx-rails c))))
         (for-each
@@ -283,12 +370,14 @@
                                     (string-append "the stair to " (rname upper) " lands at " (fmt-pt bad)
                                                    ", which is not on an open edge of " (rname upper)
                                                    (if (room-edge upper) "" " (it has no open edge: it declares no edge:)")))))
-                  ;; rails left open where it lands
-                  (let* ((a (pt+ q (pt* side (* -0.49 w)))) (b (pt+ q (pt* side (* 0.49 w))))
+                  ;; rails left open where it lands: no rail within 10 cm of
+                  ;; the head, short of its last 15 cm each side (where the
+                  ;; edge's rails end)
+                  (let* ((a (pt+ q (pt* side (- 0.15 (* 0.5 w))))) (b (pt+ q (pt* side (- (* 0.5 w) 0.15))))
                          (hit (find (lambda (rl)
                                       (let ((rp (vector-ref rl 0)) (rq (vector-ref rl 1)))
                                         (and (< (abs (- (vector-ref rl 2) (room-floor upper))) 0.5)
-                                             (or (seg-cross a b rp rq) (seg-overlap? a b rp rq)))))
+                                             (< (seg-seg-dist a b rp rq) 0.1))))
                                     rails)))
                     (when hit
                       (add-problem! c 6 (or (vector-ref hit 3) line)

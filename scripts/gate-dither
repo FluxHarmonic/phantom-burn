@@ -29,6 +29,7 @@
 set -eu
 cd "$(dirname "$0")/.."
 TARGETS="${1:-both}"
+case "$TARGETS" in native|web|both) ;; *) echo "SETUP-FAILED: the first argument is native, web or both (got '$TARGETS')"; exit 2 ;; esac
 [ "$TARGETS" = both ] && TARGETS="native web"
 WRONG=""
 [ "${2:-}" = --expect-wrong ] && WRONG="${3:?--expect-wrong needs spread or palette}"

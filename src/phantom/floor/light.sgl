@@ -110,92 +110,90 @@
     ;; (triangle-tests . rays)
     (define (bake-stats occ) (cons (vector-ref (vector-ref occ 9) 0) (vector-ref (vector-ref occ 9) 1)))
 
-    ;; Does segment P + t D, 0 < t < 1, cross triangle j? The plane test first:
-    ;; both ends on one side of the triangle's plane cannot cross it.
-    (define (tri-hit? tris j px py pz dx dy dz)
-      (let* ((o (* TRI j))
-             (nx (vector-ref tris (+ o 9))) (ny (vector-ref tris (+ o 10))) (nz (vector-ref tris (+ o 11)))
-             (d (vector-ref tris (+ o 12)))
-             (sp (- (+ (* nx px) (* ny py) (* nz pz)) d))
-             (sq (- (+ (* nx (+ px dx)) (* ny (+ py dy)) (* nz (+ pz dz))) d)))
-        (and (<= (* sp sq) 0.0)
-             (let* ((vx (vector-ref tris o)) (vy (vector-ref tris (+ o 1))) (vz (vector-ref tris (+ o 2)))
-                    (e1x (vector-ref tris (+ o 3))) (e1y (vector-ref tris (+ o 4))) (e1z (vector-ref tris (+ o 5)))
-                    (e2x (vector-ref tris (+ o 6))) (e2y (vector-ref tris (+ o 7))) (e2z (vector-ref tris (+ o 8)))
-                    (hx (- (* dy e2z) (* dz e2y))) (hy (- (* dz e2x) (* dx e2z))) (hz (- (* dx e2y) (* dy e2x)))
-                    (a (+ (* e1x hx) (* e1y hy) (* e1z hz))))
-               (and (> (abs a) 1e-12)
-                    (let* ((f (/ 1.0 a))
-                           (sx (- px vx)) (sy (- py vy)) (sz (- pz vz))
-                           (u (* f (+ (* sx hx) (* sy hy) (* sz hz)))))
-                      (and (>= u -1e-9) (<= u (+ 1.0 1e-9))
-                           (let* ((qx (- (* sy e1z) (* sz e1y))) (qy (- (* sz e1x) (* sx e1z))) (qz (- (* sx e1y) (* sy e1x)))
-                                  (v (* f (+ (* dx qx) (* dy qy) (* dz qz)))))
-                             (and (>= v -1e-9) (<= (+ u v) (+ 1.0 1e-9))
-                                  (let ((t (* f (+ (* e2x qx) (* e2y qy) (* e2z qz)))))
-                                    (and (> t 1e-4) (< t (- 1.0 1e-4)))))))))))))
-
-    ;; Does a triangle in cell (ci, cj) cross the segment? Each triangle is
-    ;; tested once per segment (the mailbox holds the segment's stamp).
-    (define (cell-hit? occ ci cj stamp px py pz dx dy dz)
-      (let* ((nx (vector-ref occ 4))
-             (ts (vector-ref (vector-ref occ 6) (+ ci (* cj nx))))
-             (m (vector-length ts))
-             (mail (vector-ref occ 7))
-             (tris (vector-ref occ 0))
-             (tests (vector-ref occ 9)))
-        (let loop ((k 0))
-          (and (< k m)
-               (let ((j (vector-ref ts k)))
-                 (if (= (vector-ref mail j) stamp)
-                     (loop (+ k 1))
-                     (begin (vector-set! mail j stamp)
-                            (vector-set! tests 0 (+ 1 (vector-ref tests 0)))
-                            (or (tri-hit? tris j px py pz dx dy dz)
-                                (loop (+ k 1))))))))))
-
-    ;; Does segment P->Q (strictly between its ends) cross a triangle? Walks
-    ;; the grid cells the segment's shadow on the floor crosses.
+    ;; Does segment P->Q (strictly between its ends) cross an occluding
+    ;; triangle? It walks the grid cells the segment's shadow on the floor
+    ;; crosses (a 2D DDA), and tests each cell's triangles once per segment
+    ;; (the mailbox holds the segment's stamp): the plane test first (both
+    ;; ends on one side of a triangle's plane cannot cross it), then
+    ;; Moller-Trumbore. One procedure with loops, no calls per cell or per
+    ;; triangle: the bake runs this about forty thousand times.
     (define (occluded? occ px py pz qx qy qz)
-      (let* ((stampv (vector-ref occ 8))
+      (let* ((tris (vector-ref occ 0))
+             (nxc (vector-ref occ 4)) (nyc (vector-ref occ 5))
+             (cells (vector-ref occ 6)) (mail (vector-ref occ 7))
+             (stampv (vector-ref occ 8)) (tests (vector-ref occ 9))
              (stamp (+ 1 (vector-ref stampv 0)))
              (x0 (vector-ref occ 2)) (y0 (vector-ref occ 3))
              (dx (- qx px)) (dy (- qy py)) (dz (- qz pz))
              (fx (/ (- px x0) CELL)) (fy (/ (- py y0) CELL))
              (gx (/ (- qx x0) CELL)) (gy (/ (- qy y0) CELL))
-             (ci (exact (floor fx))) (cj (exact (floor fy)))
              (ce (exact (floor gx))) (cf (exact (floor gy)))
              (sx (if (> gx fx) 1 -1)) (sy (if (> gy fy) 1 -1))
              (ddx (abs (- gx fx))) (ddy (abs (- gy fy)))
              (tdx (if (> ddx 1e-12) (/ 1.0 ddx) 1e30))
              (tdy (if (> ddy 1e-12) (/ 1.0 ddy) 1e30))
-             (tmx (if (> ddx 1e-12) (* tdx (if (> sx 0) (- (+ ci 1) fx) (- fx ci))) 1e30))
-             (tmy (if (> ddy 1e-12) (* tdy (if (> sy 0) (- (+ cj 1) fy) (- fy cj))) 1e30)))
+             (ci0 (exact (floor fx))) (cj0 (exact (floor fy))))
         (vector-set! stampv 0 stamp)
-        (vector-set! (vector-ref occ 9) 1 (+ 1 (vector-ref (vector-ref occ 9) 1)))
-        (walk occ ci cj ce cf sx sy tmx tmy tdx tdy stamp px py pz dx dy dz 0)))
-
-    (define (walk occ ci cj ce cf sx sy tmx tmy tdx tdy stamp px py pz dx dy dz steps)
-      (let ((nx (vector-ref occ 4)) (ny (vector-ref occ 5)))
-        (cond ((or (< ci 0) (>= ci nx) (< cj 0) (>= cj ny)) #f)   ; left the grid: it cannot come back
-              ((cell-hit? occ ci cj stamp px py pz dx dy dz) #t)
-              ((or (and (= ci ce) (= cj cf)) (> steps 10000)) #f)
-              ((< tmx tmy) (walk occ (+ ci sx) cj ce cf sx sy (+ tmx tdx) tmy tdx tdy stamp px py pz dx dy dz (+ steps 1)))
-              (else (walk occ ci (+ cj sy) ce cf sx sy tmx (+ tmy tdy) tdx tdy stamp px py pz dx dy dz (+ steps 1))))))
+        (vector-set! tests 1 (+ 1 (vector-ref tests 1)))
+        (let walk ((ci ci0) (cj cj0)
+                   (tmx (if (> ddx 1e-12) (* tdx (if (> sx 0) (- (+ ci0 1) fx) (- fx ci0))) 1e30))
+                   (tmy (if (> ddy 1e-12) (* tdy (if (> sy 0) (- (+ cj0 1) fy) (- fy cj0))) 1e30))
+                   (steps 0))
+          (cond
+            ((or (< ci 0) (>= ci nxc) (< cj 0) (>= cj nyc)) #f)   ; left the grid (see make-occluders)
+            ((let* ((ts (vector-ref cells (+ ci (* cj nxc))))
+                    (m (vector-length ts)))
+               (let tri-loop ((k 0))
+                 (and (< k m)
+                      (let ((j (vector-ref ts k)))
+                        (if (= (vector-ref mail j) stamp)
+                            (tri-loop (+ k 1))
+                            (begin
+                              (vector-set! mail j stamp)
+                              (vector-set! tests 0 (+ 1 (vector-ref tests 0)))
+                              (or (let* ((o (* TRI j))
+                                         (nx (vector-ref tris (+ o 9))) (ny (vector-ref tris (+ o 10))) (nz (vector-ref tris (+ o 11)))
+                                         (d (vector-ref tris (+ o 12)))
+                                         (sp (- (+ (* nx px) (* ny py) (* nz pz)) d))
+                                         (sq (- (+ (* nx qx) (* ny qy) (* nz qz)) d)))
+                                    (and (<= (* sp sq) 0.0)
+                                         (let* ((vx (vector-ref tris o)) (vy (vector-ref tris (+ o 1))) (vz (vector-ref tris (+ o 2)))
+                                                (e1x (vector-ref tris (+ o 3))) (e1y (vector-ref tris (+ o 4))) (e1z (vector-ref tris (+ o 5)))
+                                                (e2x (vector-ref tris (+ o 6))) (e2y (vector-ref tris (+ o 7))) (e2z (vector-ref tris (+ o 8)))
+                                                (hx (- (* dy e2z) (* dz e2y))) (hy (- (* dz e2x) (* dx e2z))) (hz (- (* dx e2y) (* dy e2x)))
+                                                (a (+ (* e1x hx) (* e1y hy) (* e1z hz))))
+                                           (and (> (abs a) 1e-12)
+                                                (let* ((f (/ 1.0 a))
+                                                       (tx (- px vx)) (ty (- py vy)) (tz (- pz vz))
+                                                       (u (* f (+ (* tx hx) (* ty hy) (* tz hz)))))
+                                                  (and (>= u -1e-9) (<= u (+ 1.0 1e-9))
+                                                       (let* ((rx (- (* ty e1z) (* tz e1y))) (ry (- (* tz e1x) (* tx e1z))) (rz (- (* tx e1y) (* ty e1x)))
+                                                              (v (* f (+ (* dx rx) (* dy ry) (* dz rz)))))
+                                                         (and (>= v -1e-9) (<= (+ u v) (+ 1.0 1e-9))
+                                                              (let ((t (* f (+ (* e2x rx) (* e2y ry) (* e2z rz)))))
+                                                                (and (> t 1e-4) (< t (- 1.0 1e-4))))))))))))
+                                  (tri-loop (+ k 1)))))))))
+             #t)
+            ((or (and (= ci ce) (= cj cf)) (> steps 10000)) #f)
+            ((< tmx tmy) (walk (+ ci sx) cj (+ tmx tdx) tmy (+ steps 1)))
+            (else (walk ci (+ cj sy) tmx (+ tmy tdy) (+ steps 1)))))))
 
     ;; --- one vertex -------------------------------------------------------------------
     ;;
     ;; v: a batch vertex (its room at index 16). emitters: a vector of #(x y z
     ;; radius strength circuit-index r g b down? room). sees: a vector of
     ;; vectors, (sees[a][b]) true when rooms a and b can see each other, or #f
-    ;; to cast every ray; a room of -1 on either side always casts. Returns
+    ;; to cast every ray; a room of -1 on either side always casts. opt: an
+    ;; optional (off room x y), giving a plan offset (dx . dy) or #f to add to
+    ;; the ray origin (compile.sgl moves it off the room's outline). Returns
     ;; SLOTS.
 
-    (define (bake-vertex occ emitters v sees)
+    (define (bake-vertex occ emitters v sees . opt)
       (let* ((x (vector-ref v 0)) (y (vector-ref v 1)) (z (vector-ref v 2))
              (nx (vector-ref v 5)) (ny (vector-ref v 6)) (nz (vector-ref v 7))
              (vroom (vector-ref v 16))
-             (lx (+ x (* LIFT nx))) (ly (+ y (* LIFT ny))) (lz (+ z (* LIFT nz)))
+             (off (and (pair? opt) ((car opt) vroom x y)))
+             (lx (+ x (* LIFT nx) (if off (car off) 0.0))) (ly (+ y (* LIFT ny) (if off (cdr off) 0.0))) (lz (+ z (* LIFT nz)))
              (n (vector-length emitters))
              (acc (let loop ((i 0) (acc '()))
                     (if (>= i n) acc

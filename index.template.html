@@ -109,6 +109,9 @@
   //     half a look stick, each ("move"|"lookstick", "x,y") in -1..1; the C
   //     button is ("press", "c"); the LAB button (top left) opens the style
   //     lab's keys as buttons, each ("press", KEY), for the phone.
+  //   window.phantomDispatch("replay", SCRIPT): gate 5's driver hands the game
+  //     a replay script ((phantom floor replay)'s text form); the game prints
+  //     "phantom-burn: replay LINE" per tick, then "phantom-burn: replay-done N".
   (function () {
     "use strict";
     var params = new URLSearchParams(location.search);
@@ -120,6 +123,18 @@
       document.addEventListener("sigil-web-app-ready", function (e) { fn(e.detail); }, { once: true });
     }
     if (params.has("touch")) document.body.classList.add("touch");
+    // the game says so when a load fails (a fetch never lands): show it
+    (function () {
+      var log0 = console.log.bind(console);
+      console.log = function () {
+        var line = Array.prototype.join.call(arguments, " ");
+        if (line.indexOf("phantom-burn: load failed") === 0) {
+          var st = document.getElementById("status");
+          if (st) st.textContent = line.replace("phantom-burn: ", "");
+        }
+        log0.apply(null, arguments);
+      };
+    })();
     // ?play=1: P1's game (the guard, the badge, the exit), with a how-to-play
     // line that goes away on the first key, click or touch.
     var playing = params.has("play") && params.get("play") !== "0";
@@ -148,6 +163,7 @@
       var booted = app.ready && app.ready.then ? app.ready : Promise.resolve();
       booted.then(function () {
         app.dispatch("params", location.search.replace(/^\?/, ""));
+        app.dispatch("floor", floor);
         app.dispatch("dpr", String(window.devicePixelRatio || 1));
         window.addEventListener("resize", function () { app.dispatch("dpr", String(window.devicePixelRatio || 1)); });
         function text(f) {
@@ -241,6 +257,13 @@
       var lastTouch = 0;
       lab.addEventListener("touchstart", function (e) { lastTouch = Date.now(); labTap(e); }, { passive: false });
       lab.addEventListener("click", function (e) { if (Date.now() - lastTouch > 800) labTap(e); });
+      // gate 5 (determinism): a driver hands the game a replay script. An
+      // explicit allowlist: only these event types can be sent this way.
+      var DRIVER_EVENTS = ["replay"];
+      window.phantomDispatch = function (type, payload) {
+        if (DRIVER_EVENTS.indexOf(type) < 0) throw new Error("phantomDispatch: " + type + " is not a driver event");
+        app.dispatch(type, String(payload));
+      };
       var crouch = document.getElementById("crouch");
       crouch.addEventListener("touchstart", function (e) {
         crouch.classList.add("down"); app.dispatch("press", "c"); e.preventDefault();

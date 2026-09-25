@@ -64,18 +64,10 @@
                       (and (every (lambda (x) x) (take start 4)) (every (lambda (x) x) ins)
                            (cons start ins))))))))
 
-    ;; The walker a script starts from. A crouched start sets the walker's
-    ;; slots directly (see (phantom floor reach)'s crouched-walker: the same
-    ;; stopgap until (phantom walker) has a crouched constructor).
+    ;; The walker a script starts from (crouched when the start line says so).
     (define (replay-walker start)
-      (let ((w (make-walker (list-ref start 0) (list-ref start 1) (list-ref start 2) (list-ref start 3))))
-        (if (list-ref start 4)
-            (let ((w (walker-copy w)))
-              (vector-set! w 9 CROUCH)
-              (vector-set! w 10 #t)
-              (vector-set! w 22 (+ (list-ref start 2) (- CROUCH EYE-DROP)))
-              w)
-            w)))
+      (make-walker (list-ref start 0) (list-ref start 1) (list-ref start 2) (list-ref start 3)
+                   (list-ref start 4)))
 
     ;; The trace of a parsed script over collision c, stepped at dt (TICK
     ;; for the gate; any other dt is outside the determinism claim).

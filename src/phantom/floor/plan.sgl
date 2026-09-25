@@ -110,7 +110,7 @@
                                                           (and (not (= k (car s))) (not (= k (cdr s)))
                                                                (let ((t (seg-param (vector-ref pts k) a b)))
                                                                  (and (> t 0.0) (< t 1.0)))
-                                                               (< (point-seg-dist (vector-ref pts k) a b) (* 10 SNAP))))
+                                                               (< (point-seg-dist (vector-ref pts k) a b) SNAP)))
                                                         (iota np)))
                                             (sorted (list-sort (lambda (k l) (< (seg-param (vector-ref pts k) a b)
                                                                                 (seg-param (vector-ref pts l) a b)))
@@ -180,12 +180,18 @@
                (pos (filter (lambda (c) (> (vector-ref areav c) 1e-9)) (iota nc)))
                ;; each negative cycle is the outline of a component: a hole in the
                ;; smallest positive cycle containing it, or the void
+               ;; the host must be a face of ANOTHER connected piece of the
+               ;; plan: a piece's own faces lie inside its outline too, and
+               ;; comparing areas to tell them apart fails by one ulp (the
+               ;; outline and a single face sum their areas in different
+               ;; orders), which once made a lone room its own hole
+               (comp (components np ev ne))
+               (comp-of (lambda (c) (vector-ref comp (origin (car (vector-ref cyclev c))))))
                (host (lambda (c)
                        (let* ((ring (vector-ref ringv c))
-                              (probe (car ring))
                               (hosts (filter (lambda (f)
-                                               (and (point-in-poly? (inside-nudge ring) (vector-ref ringv f))
-                                                    (> (vector-ref areav f) (abs (vector-ref areav c)))))
+                                               (and (not (= (comp-of f) (comp-of c)))
+                                                    (point-in-poly? (inside-nudge ring) (vector-ref ringv f))))
                                              pos)))
                          (if (null? hosts) -1
                              (fold-left (lambda (best f) (if (< (vector-ref areav f) (vector-ref areav best)) f best))
@@ -227,6 +233,18 @@
                                        dir: (pt-norm (pt- b a)))))
                              (iota ne))))
             (plan points: pts edges: (list->vector edges) faces: (list->vector faces))))))
+
+    ;; The connected piece each corner belongs to (union-find over the
+    ;; edges): a vector, corner index -> the piece's smallest corner index.
+    (define (components np ev ne)
+      (let ((g (list->vector (iota np))))
+        (define (find i) (if (= (vector-ref g i) i) i (find (vector-ref g i))))
+        (let loop ((e 0))
+          (when (< e ne)
+            (let ((a (find (car (vector-ref ev e)))) (b (find (cdr (vector-ref ev e)))))
+              (unless (= a b) (vector-set! g (max a b) (min a b))))
+            (loop (+ e 1))))
+        (list->vector (map find (iota np)))))
 
     ;; A point just inside a negative (clockwise) ring, beside its first edge:
     ;; for a clockwise ring the inside of the component is on the right.
