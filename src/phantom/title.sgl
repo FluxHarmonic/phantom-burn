@@ -1,0 +1,426 @@
+;;; (phantom title) - The title screen prototype (David's idea, 2026-09-25):
+;;; PHANTOM BURN in chunky italic block letters that slide in fast, one at
+;;; a time; once all have landed a magenta laser focuses in from the left
+;;; and shoots through the top third of every letter, burning that stroke
+;;; into each one, white-hot, then flickering down to a steady magenta.
+;;; Behind it, a live render of the root-console room (the top floor's
+;;; goal, unexplained): a slow camera drift, the console's screen glow, a
+;;; blinking # cursor on its terminal. Everything goes through the same
+;;; 480x270 frame and Bayer dither as the game.
+;;;
+;;; The letters are Crash The Stack's block alphabet (crash-the-stack
+;;; src/crash/title/alphabet.sgl at 262a0e0, generated from its
+;;; assets/src/title/blocky.txt): 7 x 6 cells, # full, ^ v the top and
+;;; bottom halves, < > the left and right halves, drawn here 4 x 8 pixels a
+;;; cell (a terminal cell's 1:2), coloured cyan at the top to magenta at the
+;;; bottom as Crash's logo is. They are baked once into an atlas and drawn
+;;; as one sheared quad each, in the 3D pass, after the room: about 25
+;;; draws a frame.
+;;;
+;;; The room is a stand-in built here from boxes until the floor compiler's
+;;; root-console room lands.
+;;;
+;;; Time is seconds since the title started; (title-frame! t w h) draws one
+;;; frame. The pace: letters from 0.3 s, 0.09 s apart, 0.22 s each; the
+;;; beam focuses at 1.55 s for 0.4 s, crosses in 0.35 s, fades in 0.5 s.
+
+(define-library (phantom title)
+  (import (sigil core)
+          (sigil math)
+          (sigil graphics)
+          (phantom render))
+
+  (export title-init! title-frame! TITLE-SETTLED)
+
+  (begin
+
+    ;; --- the letters ------------------------------------------------------------
+
+    (define GLYPHS
+      '(("P" "######v" "##   ##" "##vvv#^" "##^^^  " "##     " "##     ")
+        ("H" "##   ##" "##   ##" "##vvv##" "##^^^##" "##   ##" "##   ##")
+        ("A" " v###v " "##^ ^##" "##   ##" "#######" "##   ##" "##   ##")
+        ("N" "##v  ##" "###v ##" "##^#v##" "## ^###" "##  ^##" "##   ##")
+        ("T" "#######" "^^###^^" "  ##   " "  ##   " "  ##   " "  ##   ")
+        ("O" " v###v " "##^ ^##" "##   ##" "##   ##" "##v v##" " ^###^ ")
+        ("M" "##v v##" "#######" "##^#^##" "##   ##" "##   ##" "##   ##")
+        ("B" "######v" "##   ##" "##vvv#^" "##^^^##" "##   ##" "######^")
+        ("U" "##   ##" "##   ##" "##   ##" "##   ##" "##v v##" " ^###^ ")
+        ("R" "######v" "##   ##" "##vvv#^" "##^^## " "##   ##" "##   ##")))
+
+    (define CW 4)                    ; cell width, pixels
+    (define CH 8)                    ; cell height
+    (define GW (* 7 CW))             ; glyph 28 x 48
+    (define GH (* 6 CH))
+    (define ADV 32)                  ; advance per letter
+    (define SPACE 16)                ; the gap between the words
+    (define SHEAR 10.0)              ; the top edge's shift right, pixels
+    (define TITLE "PHANTOM BURN")
+    (define TOP 72)                  ; the letters' top row in the frame
+    ;; the burned stroke: rows 14 to 17 of 48, in the top third
+    (define BAND0 (/ 14.0 GH))
+    (define BAND1 (/ 18.0 GH))
+
+    (define (glyph-index ch)
+      (let loop ((gs GLYPHS) (i 0))
+        (cond ((null? gs) #f)
+              ((string=? (caar gs) (string ch)) i)
+              (else (loop (cdr gs) (+ i 1))))))
+
+    ;; The atlas: every glyph side by side, RGBA, top row first; a cell's
+    ;; filled pixels coloured by their row, cyan (#4DF2D9) at the top to
+    ;; magenta (#FF59D9) at the bottom, the last row a shade darker.
+    (define (atlas-pixels)
+      (let* ((n (length GLYPHS))
+             (w (* n GW))
+             (px (make-bytevector (* w GH 4) 0)))
+        (let each ((gs GLYPHS) (k 0))
+          (unless (null? gs)
+            (let rows ((r 0) (lines (cdar gs)))
+              (unless (null? lines)
+                (let cols ((c 0))
+                  (when (< c 7)
+                    (let ((code (string-ref (car lines) c)))
+                      (let fill ((y 0))
+                        (when (< y CH)
+                          (let fx ((x 0))
+                            (when (< x CW)
+                              (when (cell-lit? code x y)
+                                (let* ((py (+ (* r CH) y))
+                                       (t (/ py (- GH 1.0)))
+                                       (dark (if (= y (- CH 1)) 0.85 1.0))
+                                       (o (* 4 (+ (* py w) (* k GW) (* c CW) x))))
+                                  (bytevector-u8-set! px o (exact (round (* dark (+ 77 (* t 178))))))
+                                  (bytevector-u8-set! px (+ o 1) (exact (round (* dark (+ 242 (* t -153))))))
+                                  (bytevector-u8-set! px (+ o 2) (exact (round (* dark (+ 217 (* t 0))))))
+                                  (bytevector-u8-set! px (+ o 3) 255)))
+                              (fx (+ x 1))))
+                          (fill (+ y 1)))))
+                    (cols (+ c 1))))
+                (rows (+ r 1) (cdr lines))))
+            (each (cdr gs) (+ k 1))))
+        (cons w px)))
+
+    (define (cell-lit? code x y)
+      (cond ((char=? code #\#) #t)
+            ((char=? code #\^) (< y (/ CH 2)))
+            ((char=? code #\v) (>= y (/ CH 2)))
+            ((char=? code #\<) (< x (/ CW 2)))
+            ((char=? code #\>) (>= x (/ CW 2)))
+            (else #f)))
+
+    ;; Each letter's final x (left edge of its bottom row) and atlas slot.
+    (define (layout)
+      (let* ((total (+ (* 11 ADV) SPACE (- GW ADV)))
+             (x0 (exact (floor (/ (- 480 total SHEAR) 2)))))
+        (let loop ((i 0) (x x0) (acc '()))
+          (if (>= i (string-length TITLE))
+              (reverse acc)
+              (let ((ch (string-ref TITLE i)))
+                (if (char=? ch #\space)
+                    (loop (+ i 1) (+ x SPACE) acc)
+                    (loop (+ i 1) (+ x ADV) (cons (cons x (glyph-index ch)) acc))))))))
+
+    (define SPRITE-VERTEX
+      "uniform vec4 rect;    // x y w h, view pixels, y down
+uniform vec4 shear;   // x: the top edge's shift right, pixels
+in vec2 position;
+out vec2 v_uv;
+void main() {
+  vec2 p = vec2(rect.x + position.x * rect.z + (1.0 - position.y) * shear.x,
+                rect.y + position.y * rect.w);
+  v_uv = position;
+  gl_Position = vec4(p.x / 240.0 - 1.0, 1.0 - p.y / 135.0, 0.0, 1.0);
+}
+")
+
+    ;; mode.x: 0 a letter, 1 its shadow, 2 the beam (a glow across its
+    ;; height, brightest at the middle row; tint.a its strength).
+    ;; burn: x y the band (0..1 of the glyph's height), z heat (1 white-hot,
+    ;; 0 magenta), w 1 once burned.
+    (define SPRITE-FRAGMENT
+      "uniform vec4 src;     // atlas texels: x y w h
+uniform vec4 tint;
+uniform vec4 burn;
+uniform vec4 mode;
+uniform sampler2D atlas;
+in vec2 v_uv;
+out vec4 frag_color;
+void main() {
+  if (mode.x > 1.5) {
+    float d = abs(v_uv.y - 0.5) * 2.0;
+    float core = clamp(1.0 - d * 3.0, 0.0, 1.0);
+    float glow = (1.0 - d) * (1.0 - d);
+    vec3 c = mix(vec3(1.0, 0.349, 0.851), vec3(1.0, 0.94, 1.0), core);
+    frag_color = vec4(c, clamp((glow * 0.6 + core) * tint.a, 0.0, 1.0));
+    return;
+  }
+  ivec2 t = ivec2(src.xy + floor(v_uv * src.zw));
+  t = clamp(t, ivec2(src.xy), ivec2(src.xy + src.zw) - 1);
+  vec4 c = texelFetch(atlas, t, 0);
+  if (c.a < 0.5) discard;
+  vec3 rgb = c.rgb;
+  if (mode.x > 0.5) {
+    rgb = vec3(13.0, 10.0, 26.0) / 255.0;
+  } else if (burn.w > 0.5 && v_uv.y >= burn.x && v_uv.y < burn.y) {
+    rgb = mix(vec3(1.0, 0.349, 0.851), vec3(1.0, 0.95, 1.0), clamp(burn.z, 0.0, 1.0));
+  }
+  frag_color = vec4(rgb * tint.rgb, tint.a);
+}
+")
+
+    ;; --- the room (a stand-in) --------------------------------------------------
+
+    ;; Vertices for the stand-in layout (position uv normal color emission,
+    ;; 40 bytes), built as a list of 40-byte records, then packed.
+    (define *verts* '())
+    (define *nverts* 0)
+
+    (define (push-vertex! x y z nx ny nz r g b e)
+      (set! *verts* (cons (vector x y z nx ny nz r g b e) *verts*))
+      (set! *nverts* (+ *nverts* 1)))
+
+    ;; A quad a b c d (counter-clockwise from its front) in colour rgb
+    ;; (0..255); e #t for an emissive surface (the colour is its glow).
+    (define (quad! a b c d rgb e)
+      (let* ((ux (- (list-ref b 0) (list-ref a 0))) (uy (- (list-ref b 1) (list-ref a 1))) (uz (- (list-ref b 2) (list-ref a 2)))
+             (vx (- (list-ref d 0) (list-ref a 0))) (vy (- (list-ref d 1) (list-ref a 1))) (vz (- (list-ref d 2) (list-ref a 2)))
+             (nx (- (* uy vz) (* uz vy))) (ny (- (* uz vx) (* ux vz))) (nz (- (* ux vy) (* uy vx)))
+             (l (sqrt (+ (* nx nx) (* ny ny) (* nz nz))))
+             (nx (/ nx l)) (ny (/ ny l)) (nz (/ nz l)))
+        (for-each (lambda (p)
+                    (push-vertex! (list-ref p 0) (list-ref p 1) (list-ref p 2) nx ny nz
+                                  (car rgb) (cadr rgb) (caddr rgb) e))
+                  (list a b c a c d))))
+
+    ;; A box seen from outside (inside? #f) or from within (a room).
+    (define (box! x0 y0 z0 x1 y1 z1 rgb e inside?)
+      (let ((q (lambda (a b c d) (if inside? (quad! d c b a rgb e) (quad! a b c d rgb e)))))
+        (q (list x0 y0 z1) (list x1 y0 z1) (list x1 y1 z1) (list x0 y1 z1))   ; top
+        (q (list x0 y1 z0) (list x1 y1 z0) (list x1 y0 z0) (list x0 y0 z0))   ; bottom
+        (q (list x0 y0 z0) (list x1 y0 z0) (list x1 y0 z1) (list x0 y0 z1))   ; south
+        (q (list x1 y1 z0) (list x0 y1 z0) (list x0 y1 z1) (list x1 y1 z1))   ; north
+        (q (list x0 y1 z0) (list x0 y0 z0) (list x0 y0 z1) (list x0 y1 z1))   ; west
+        (q (list x1 y0 z0) (list x1 y1 z0) (list x1 y1 z1) (list x1 y0 z1)))) ; east
+
+    ;; A flat glowing rectangle on the screen's plane (y = sy, facing -y).
+    (define (glow-rect! x0 z0 x1 z1 sy rgb)
+      (quad! (list x0 sy z0) (list x1 sy z0) (list x1 sy z1) (list x0 sy z1) rgb #t))
+
+    (define ROOM-DARK '(33 23 61))       ; #21173D
+    (define FLOOR '(42 45 58))           ; #2A2D3A
+    (define CEIL '(23 18 46))            ; #17122E
+    (define STEEL '(61 64 82))           ; #3D4052
+    (define SCREEN '(26 56 64))          ; #1A3840, the glass
+    (define CYAN '(77 242 217))          ; #4DF2D9
+    (define MAGENTA '(255 89 217))       ; #FF59D9
+
+    ;; The console's screen sits at y = SY facing south (-y), x -0.5..0.5,
+    ;; z 0.95..1.55; the # cursor is its own range, drawn when it blinks on.
+    (define SY -0.36)
+    (define (build-room!)
+      (set! *verts* '()) (set! *nverts* 0)
+      (box! -4.0 -4.0 0.0 4.0 4.0 3.2 ROOM-DARK #f #t)            ; the room
+      (box! -4.0 -4.0 -0.1 4.0 4.0 0.0 FLOOR #f #f)               ; floor slab (its top faces up)
+      (box! -1.2 -1.2 0.0 1.2 1.2 0.12 STEEL #f #f)               ; the plinth
+      (box! -0.75 -0.3 0.12 0.75 0.35 0.92 STEEL #f #f)           ; the console body
+      (box! -0.55 -0.34 0.92 0.55 -0.26 1.6 STEEL #f #f)          ; the screen's frame
+      (glow-rect! -0.5 0.97 0.5 1.55 (- SY 0.001) SCREEN)         ; the glass, glowing faintly
+      ;; the terminal's lines of text, as bars
+      (let loop ((k 0))
+        (when (< k 6)
+          (let ((z (- 1.48 (* k 0.075))) (len (list-ref '(0.62 0.44 0.7 0.3 0.52 0.18) k)))
+            (glow-rect! -0.44 (- z 0.03) (+ -0.44 len) z (- SY 0.003) CYAN))
+          (loop (+ k 1))))
+      ;; a tall slit of city light in the far wall, right of the console (a
+      ;; wide slit at 2.2 m sat exactly behind the letters' top edge)
+      (glow-rect! 2.1 0.4 2.26 2.9 3.99 MAGENTA)
+      (let ((room-count *nverts*))
+        ;; the # cursor: a 5 x 5 grid of 1.6 cm cells after the last line
+        (let ()
+          (let rows ((r 0) (lines '(" x x " "xxxxx" " x x " "xxxxx" " x x ")))
+            (unless (null? lines)
+              (let cols ((c 0))
+                (when (< c 5)
+                  (when (char=? (string-ref (car lines) c) #\x)
+                    (let* ((x0 (+ -0.25 (* c 0.016))) (z1 (- 1.1 (* r 0.016))))
+                      (glow-rect! x0 (- z1 0.016) (+ x0 0.016) z1 (- SY 0.004) CYAN)))
+                  (cols (+ c 1))))
+              (rows (+ r 1) (cdr lines)))))
+        (cons room-count (- *nverts* room-count))))
+
+    (define (pack-vertices)
+      (let* ((n *nverts*)
+             (bv (make-bytevector (* 40 n) 0)))
+        (let loop ((vs (reverse *verts*)) (i 0))
+          (unless (null? vs)
+            (let ((v (car vs)) (o (* 40 i)))
+              (bytevector-ieee-single-set! bv o (vector-ref v 0) 'little)
+              (bytevector-ieee-single-set! bv (+ o 4) (vector-ref v 1) 'little)
+              (bytevector-ieee-single-set! bv (+ o 8) (vector-ref v 2) 'little)
+              ;; uv 0 0 (no texture)
+              (bytevector-ieee-single-set! bv (+ o 20) (vector-ref v 3) 'little)
+              (bytevector-ieee-single-set! bv (+ o 24) (vector-ref v 4) 'little)
+              (bytevector-ieee-single-set! bv (+ o 28) (vector-ref v 5) 'little)
+              (bytevector-u8-set! bv (+ o 32) (vector-ref v 6))
+              (bytevector-u8-set! bv (+ o 33) (vector-ref v 7))
+              (bytevector-u8-set! bv (+ o 34) (vector-ref v 8))
+              (bytevector-u8-set! bv (+ o 35) 255)
+              (when (vector-ref v 9)
+                (bytevector-u8-set! bv (+ o 36) (vector-ref v 6))
+                (bytevector-u8-set! bv (+ o 37) (vector-ref v 7))
+                (bytevector-u8-set! bv (+ o 38) (vector-ref v 8))
+                (bytevector-u8-set! bv (+ o 39) 255))
+              (loop (cdr vs) (+ i 1)))))
+        bv))
+
+    ;; the room's lights (the stand-in shader's form: x y z radius r g b
+    ;; circuit; 4 = always lit): the screen's glow, the city slit, a trace
+    ;; of violet from above
+    (define ROOM-LIGHTS
+      '((0.0 -0.9 1.25 4.2 0.45 1.4 1.28 4)
+        (2.2 3.4 1.6 6.5 0.9 0.25 0.7 4)
+        (0.0 0.0 3.0 6.0 0.12 0.09 0.25 4)))
+
+    ;; --- state and the frame ------------------------------------------------------
+
+    (define *atlas* #f)
+    (define *sprite* #f)
+    (define *quad* #f)
+    (define *room* #f)
+    (define *room-count* 0)
+    (define *cursor-count* 0)
+    (define *letters* '())           ; ((x . slot) ...)
+    (define *cam* (make-camera))
+    (define *rect* (make-bytevector 16 0))
+    (define *shear* (make-bytevector 16 0))
+    (define *src* (make-bytevector 16 0))
+    (define *tint* (make-bytevector 16 0))
+    (define *burn* (make-bytevector 16 0))
+    (define *mode* (make-bytevector 16 0))
+
+    (define (f4! bv a b c d)
+      (bytevector-ieee-single-set! bv 0 (* 1.0 a) 'little)
+      (bytevector-ieee-single-set! bv 4 (* 1.0 b) 'little)
+      (bytevector-ieee-single-set! bv 8 (* 1.0 c) 'little)
+      (bytevector-ieee-single-set! bv 12 (* 1.0 d) 'little)
+      bv)
+
+    (define (title-init!)
+      (render-init!)
+      (let* ((a (atlas-pixels)))
+        (set! *atlas* (make-texture-from-pixels (car a) GH (cdr a) 'nearest)))
+      (let ((pl (make-vertex-layout '((position float2))))
+            (q (make-bytevector 48 0)))
+        (for-each (lambda (i xy) (bytevector-ieee-single-set! q (* 4 i) xy 'little))
+                  '(0 1 2 3 4 5 6 7 8 9 10 11)
+                  '(0.0 0.0 1.0 0.0 1.0 1.0 0.0 0.0 1.0 1.0 0.0 1.0))
+        (set! *quad* (make-mesh pl q))
+        (set! *sprite* (make-pipeline pl
+                                      (string-append (glsl-header) SPRITE-VERTEX)
+                                      (string-append (glsl-header) SPRITE-FRAGMENT)
+                                      '(depth-test #f depth-write #f cull none blend normal))))
+      (let ((counts (build-room!)))
+        (set! *room-count* (car counts))
+        (set! *cursor-count* (cdr counts)))
+      (set! *room* (render-make-world-mesh (pack-vertices)))
+      (set! *verts* '())
+      (set! *letters* (layout))
+      (render-title-scene! ROOM-LIGHTS))
+
+    (define TITLE-SETTLED 3.2)       ; seconds: everything has landed and cooled
+    (define (clamp01 x) (if (< x 0.0) 0.0 (if (> x 1.0) 1.0 x)))
+    (define (ease-out t) (let ((u (- 1.0 (clamp01 t)))) (- 1.0 (* u u u))))
+    (define L0 0.3) (define LSTEP 0.09) (define LDUR 0.22)
+    (define FOCUS 1.55) (define FDUR 0.4) (define SDUR 0.35) (define FADE 0.5)
+    (define BEAM-Y (+ TOP (* GH 0.5 (+ BAND0 BAND1))))
+
+    ;; A cheap flicker: a hash of the time, stepped at 30 Hz, in 0..1.
+    (define (flicker t k)
+      (let* ((n (+ (* 30 (floor (* t 30))) (* 7 k)))
+             (s (sin (* n 12.9898))))
+        (- (* s 43758.5453) (floor (* s 43758.5453)))))
+
+    ;; The beam's head, x in pixels at time t (#f before it shoots).
+    (define (beam-head t)
+      (let ((s (- t FOCUS FDUR)))
+        (cond ((< s 0.0) #f)
+              (else (* 480.0 (ease-out (/ s SDUR)))))))
+
+    (define (draw-letter! lx slot y alpha shadow? heat burned?)
+      (let ((x lx))
+        (f4! *rect* (+ x (if shadow? 2 0)) (+ y (if shadow? 2 0)) GW GH)
+        (f4! *shear* SHEAR 0 0 0)
+        (f4! *src* (* slot GW) 0 GW GH)
+        (f4! *tint* 1 1 1 alpha)
+        (f4! *burn* BAND0 BAND1 heat (if burned? 1 0))
+        (f4! *mode* (if shadow? 1 0) 0 0 0)
+        (set-pipeline-uniform! *sprite* 'rect *rect*)
+        (set-pipeline-uniform! *sprite* 'shear *shear*)
+        (set-pipeline-uniform! *sprite* 'src *src*)
+        (set-pipeline-uniform! *sprite* 'tint *tint*)
+        (set-pipeline-uniform! *sprite* 'burn *burn*)
+        (set-pipeline-uniform! *sprite* 'mode *mode*)
+        (draw-mesh *sprite* *quad* *atlas*)))
+
+    (define (draw-beam! t)
+      (let* ((f (- t FOCUS))
+             (head (beam-head t)))
+        (when (and (>= f 0.0) (< f (+ FDUR SDUR FADE)))
+          (let* (;; focusing: a short, tall, dim glow at the left edge that
+                 ;; narrows and brightens; then the beam, 3 px tall
+                 (focus (clamp01 (/ f FDUR)))
+                 (h (+ 3.0 (* 30.0 (- 1.0 focus))))
+                 (x1 (or head (* 30.0 focus)))
+                 (fade (clamp01 (/ (- f FDUR SDUR) FADE)))
+                 (a (* (+ 0.35 (* 0.65 focus)) (- 1.0 fade) (+ 0.85 (* 0.15 (flicker t 99))))))
+            (f4! *rect* 0 (- BEAM-Y (/ h 2.0)) x1 h)
+            (f4! *shear* 0 0 0 0)
+            (f4! *tint* 1 1 1 a)
+            (f4! *mode* 2 0 0 0)
+            (set-pipeline-uniform! *sprite* 'rect *rect*)
+            (set-pipeline-uniform! *sprite* 'shear *shear*)
+            (set-pipeline-uniform! *sprite* 'tint *tint*)
+            (set-pipeline-uniform! *sprite* 'mode *mode*)
+            (draw-mesh *sprite* *quad* *atlas*)))))
+
+    (define (draw-letters! t)
+      (let ((head (beam-head t)))
+        (let loop ((ls *letters*) (i 0))
+          (unless (null? ls)
+            (let* ((lx (caar ls)) (slot (cdar ls))
+                   (s (/ (- t (+ L0 (* i LSTEP))) LDUR)))
+              (when (> s 0.0)
+                (let* ((x (+ lx (* 520.0 (- 1.0 (ease-out s)))))
+                       ;; the beam reaches this letter when its head passes
+                       ;; the letter's middle at the band's height
+                       (mid (+ lx (* 0.5 GW) (* SHEAR (- 1.0 (* 0.5 (+ BAND0 BAND1))))))
+                       (hit (and head (>= head mid)))
+                       (since (if hit (- t (+ FOCUS FDUR (* SDUR (/ mid 480.0)))) 0.0))
+                       (heat (if hit
+                                 (* (exp (* -3.2 (max 0.0 since)))
+                                    (+ 0.75 (* 0.25 (flicker t i))))
+                                 0.0)))
+                  (draw-letter! x slot TOP 1.0 #t 0.0 #f)
+                  (draw-letter! x slot TOP 1.0 #f heat hit))))
+            (loop (cdr ls) (+ i 1))))))
+
+    (define (title-frame! t w h)
+      (let* ((a (* 0.26 (sin (* t 0.11))))
+             (ex (* 3.3 (sin a))) (ey (- (* 3.5 (cos a))))
+             (ez (+ 1.5 (* 0.08 (sin (* t 0.23)))))
+             (dx (- 0.0 ex)) (dy (- -0.3 ey)) (dz (- 1.2 ez)))
+        (camera-set! *cam* ex ey ez (atan (- dx) dy) (atan dz (sqrt (+ (* dx dx) (* dy dy)))) 0.0 50.0)
+        (begin-frame)
+        (clear-screen 0.0 0.0 0.0)
+        (render-scene! *cam*
+          (lambda ()
+            (render-draw-world-mesh *room* 0 *room-count*)
+            ;; the cursor blinks at 1.2 Hz
+            (when (< (- (* t 1.2) (floor (* t 1.2))) 0.55)
+              (render-draw-world-mesh *room* *room-count* *cursor-count*))
+            (draw-letters! t)
+            (draw-beam! t)))
+        (render-post!)
+        (render-composite! w h)
+        (end-frame)))))

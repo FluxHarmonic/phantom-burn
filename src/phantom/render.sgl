@@ -41,6 +41,7 @@
           render-night render-night! render-pools render-pools!
           render-lift? render-lift!
           render-world-ms render-post-ms
+          render-scene! render-make-world-mesh render-draw-world-mesh render-title-scene!
           make-camera camera-set!)
 
   (begin
@@ -499,9 +500,9 @@ void main() {
           (set! *world-ms* 0.0)
           (render-world*! cam)))
 
-    (define (render-world*! cam)
-      (let* ((t0 (current-jiffy))
-             (x (vector-ref cam 0)) (y (vector-ref cam 1)) (z (vector-ref cam 2))
+    ;; The camera's matrices, into every world pipeline (view_proj) and *eye*.
+    (define (camera! cam)
+      (let* ((x (vector-ref cam 0)) (y (vector-ref cam 1)) (z (vector-ref cam 2))
              (yaw (vector-ref cam 3)) (pitch (vector-ref cam 4)) (roll (vector-ref cam 5))
              (cp (cos pitch)) (sp (sin pitch)) (sy (sin yaw)) (cy (cos yaw))
              (cr (cos roll)) (sr (sin roll))
@@ -517,7 +518,43 @@ void main() {
         (mat4-look-at! *cam-m* *eye-at* *look-at* *up*)
         (mat4-mul! *vp* *proj* *cam-m*)
         (f32! *eye* 0 x) (f32! *eye* 1 y) (f32! *eye* 2 z)
-        (for-each (lambda (p) (set-pipeline-uniform! p 'view_proj *vp*)) (worlds))
+        (for-each (lambda (p) (set-pipeline-uniform! p 'view_proj *vp*)) (worlds))))
+
+    ;; --- the title screen's hooks ((phantom title)) ---------------------------
+
+    ;; A mesh in the stand-in's layout, from vertex bytes (non-indexed).
+    (define (render-make-world-mesh bytes) (make-mesh (world-layout) bytes))
+    (define (render-draw-world-mesh mesh first count) (draw-mesh-range *opaque* mesh first count))
+
+    ;; The title's room: built in design coordinates (no model turn), lit
+    ;; by its own lights, the switchable circuits off (so the ambient is
+    ;; the night's floor).
+    (define (render-title-scene! lights)
+      (set! *kind* 'stand-in)
+      (set! *circuits* STAND-IN-CIRCUITS)
+      (mat4-identity! *model*)
+      (both (lambda (p) (set-pipeline-uniform! p 'model *model*)))
+      (let ((ls (pad-lights lights NLIGHTS)))
+        (both (lambda (p)
+                (set-pipeline-uniform! p 'lights (map (lambda (l) (list (list-ref l 0) (list-ref l 1) (list-ref l 2) (list-ref l 3))) ls))
+                (set-pipeline-uniform! p 'light_rgb (map (lambda (l) (list (list-ref l 4) (list-ref l 5) (list-ref l 6) (list-ref l 7))) ls)))))
+      (vector-fill! *on* 0.0)
+      (sync-light!))
+
+    ;; One 3D pass into the frame's view target from cam, with draw (a
+    ;; thunk) inside it: the title's room and letters.
+    (define (render-scene! cam draw)
+      (let ((t0 (current-jiffy)))
+        (camera! cam)
+        (with-3d-pass *view* (list BG-R BG-G BG-B 1.0)
+          (f32! *eye* 3 *fog*)
+          (set-pipeline-uniform! *opaque* 'eye *eye*)
+          (draw))
+        (set! *world-ms* (ms-since t0))))
+
+    (define (render-world*! cam)
+      (let ((t0 (current-jiffy)))
+        (camera! cam)
         (with-3d-pass *view* (list BG-R BG-G BG-B 1.0)
           (f32! *eye* 3 *fog*)
           (let ((opaque (if (eq? *kind* 'compiled) *c-opaque* *opaque*)))

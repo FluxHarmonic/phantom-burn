@@ -1,0 +1,41 @@
+#!/bin/sh
+# dark-sheet OUTDIR [SPREAD]
+#
+# The dark-room sheet for David, from the native game's shots of the three
+# dark views (3 lobby-dark, 4 office-night, 5 corridor-dark), one row each:
+#   lights on      the same camera with every switchable circuit on
+#   dark           the view's own circuits (what J K L show)
+#   dark, no lift  the same without the black-level lift: shading below
+#                  the palette's darkest colour snaps flat to C-BG
+# Every cell is the 480x270 frame at 2x, point-scaled, dithered at SPREAD
+# (default 12, David's desktop pick; 40 is his phone's). Writes
+# OUTDIR/p0-dark-rooms.png. Needs SHOT_DISPLAY (your own Xvfb) and build/dev.
+set -eu
+cd "$(dirname "$0")/.."
+OUT="${1:?usage: dark-sheet OUTDIR [SPREAD]}"
+SPREAD="${2:-12}"
+mkdir -p "$OUT"
+T="$(mktemp -d /tmp/phantom-dark-sheet.XXXXXX)"
+trap 'rm -rf "$T"' EXIT
+FONT="-font DejaVu-Sans -pointsize 22 -fill #CCE6FF -background #0D0A1A"
+cell() { convert "$1" -filter point -resize 960x540! $FONT -gravity center label:"$2" -append "$3"; }
+
+rows=""
+for v in 3 4 5; do
+  case $v in
+    3) name="lobby-dark"; own="all switchable off" ;;
+    4) name="office-night"; own="c3 on" ;;
+    5) name="corridor-dark"; own="c1 on" ;;
+  esac
+  scripts/shot-native "$T/$v-on.png" --shot "$v" --hud 0 --spread "$SPREAD" --on all > /dev/null
+  scripts/shot-native "$T/$v-dark.png" --shot "$v" --hud 0 --spread "$SPREAD" > /dev/null
+  scripts/shot-native "$T/$v-nolift.png" --shot "$v" --hud 0 --spread "$SPREAD" --no-lift > /dev/null
+  cell "$T/$v-on.png" "$name: every circuit on" "$T/a$v.png"
+  cell "$T/$v-dark.png" "$name: $own (J K L)" "$T/b$v.png"
+  cell "$T/$v-nolift.png" "$name: $own, no black-level lift" "$T/c$v.png"
+  convert "$T/a$v.png" "$T/b$v.png" "$T/c$v.png" -background '#0D0A1A' -splice 8x0 +append "$T/row$v.png"
+  rows="$rows $T/row$v.png"
+done
+# shellcheck disable=SC2086
+convert $rows -background '#0D0A1A' -splice 0x8 -append +repage -depth 8 "$OUT/p0-dark-rooms.png"
+identify "$OUT/p0-dark-rooms.png"

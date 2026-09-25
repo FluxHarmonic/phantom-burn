@@ -4,6 +4,8 @@
 ;;;                [--shot K] [--hud 0|1|2] [--dither on|off] [--spread S]
 ;;;                [--bayer 4|8] [--palette NAME] [--fog M] [--card]
 ;;;                [--snap] [--affine] [--trace] [--auto] [--night N] [--no-lift] [--pools G]
+;;;                [--on all|none|c1,c3]
+;;;   phantom-burn --title [--title-at T] [--freeze]   the title screen
 ;;;
 ;;; --trace prints a stats line every 120 frames (frame, CPU, world and post
 ;;; pass CPU, draws, allocations per frame); --auto walks forward, turning.
@@ -32,7 +34,8 @@
           (sigil graphics)
           (phantom soup)
           (phantom render)
-          (phantom game))
+          (phantom game)
+          (phantom title))
 
   (export native-main)
 
@@ -109,7 +112,8 @@
         (when f (render-fog! f))
         (when h (game-set-hud! h))
         (when v (game-set-view! v))
-        (when shot (game-set-shot! shot))))
+        (when shot (game-set-shot! shot))
+        (let ((on (arg-value args "--on" #f))) (when on (game-set-on! on)))))
 
     (define (game-loop args frames seconds)
       (lambda ()
@@ -144,11 +148,37 @@
         (display "phantom-burn: status ") (write (game-status)) (newline)
         (gfx-shutdown)))
 
+    ;; The title screen (--title): its own loop, no floor. --title-at T
+    ;; starts its clock at T seconds, --freeze holds it there (shots of one
+    ;; moment of the animation).
+    (define (title-loop args frames seconds)
+      (lambda ()
+        (gfx-setup)
+        (title-init!)
+        (apply-settings! args)
+        (let ((freeze? (member "--freeze" args))
+              (t0 (or (string->number (arg-value args "--title-at" "none")) 0.0)))
+        (let loop ((n 0) (t t0) (elapsed 0.0))
+          (let* ((dt (wait-frame))
+                 (elapsed (+ elapsed dt))
+                 (t (if freeze? t (+ t dt))))
+            (title-frame! t (frame-width) (frame-height))
+            (when (= n 0) (display "phantom-burn: ready title") (newline))
+            (cond ((key-pressed? 'escape) (request-quit))
+                  ((quit-requested?) #t)
+                  ((and frames (>= n frames)) (request-quit))
+                  ((and seconds (>= elapsed seconds)) (request-quit))
+                  (else (loop (+ n 1) t elapsed))))))
+        (gfx-shutdown)))
+
     (define (native-main . _args)
       (let* ((args (cdr (command-line)))
              (frames (string->number (arg-value args "--frames" "none")))
              (seconds (string->number (arg-value args "--seconds" "none")))
              (size (size-of (arg-value args "--size" "1440x810"))))
         (set! *dir* (arg-value args "--floor" *dir*))
-        (run-game "Phantom Burn" (car size) (cdr size) (game-loop args frames seconds))
+        (run-game "Phantom Burn" (car size) (cdr size)
+                  (if (member "--title" args)
+                      (title-loop args frames seconds)
+                      (game-loop args frames seconds)))
         0))))

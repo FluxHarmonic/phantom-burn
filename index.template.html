@@ -30,6 +30,20 @@
               color: rgba(204, 230, 255, 0.7); font: bold 22px ui-monospace, monospace;
               text-align: center; line-height: 60px; }
     #crouch.down { background: rgba(204, 230, 255, 0.3); }
+    /* The style lab on a phone (David, 2026-09-25): a LAB button top left
+       (out of both thumb zones; the crouch button is top right) opens a
+       grid of the keyboard's lab keys. Each button sends the key it stands
+       for, so the game reads it exactly as a key press. */
+    #lab { position: fixed; left: 8px; top: 8px; z-index: 3; font: bold 12px ui-monospace, monospace;
+           -webkit-user-select: none; user-select: none; touch-action: none; }
+    #labbtn, #labgrid button { color: #CCE6FF; background: rgba(13, 10, 26, 0.72); border: 1px solid rgba(204, 230, 255, 0.4);
+                               border-radius: 6px; font: inherit; padding: 0; }
+    #labbtn { width: 48px; height: 32px; }
+    #labgrid { display: none; margin-top: 6px; grid-template-columns: repeat(4, 64px); gap: 5px; }
+    #lab.open #labgrid { display: grid; }
+    #labgrid button { height: 34px; }
+    #labgrid button.down { background: rgba(204, 230, 255, 0.35); }
+    #labgrid .sep { grid-column: 1 / -1; height: 1px; background: rgba(204, 230, 255, 0.2); }
     body.touch #crouch { display: block; }
   </style>
 </head>
@@ -38,6 +52,19 @@
   <div class="ring" id="lring"></div><div class="knob" id="lknob"></div>
   <div class="ring" id="rring"></div><div class="knob" id="rknob"></div>
   <div id="crouch">C</div>
+  <div id="lab">
+    <button id="labbtn">LAB</button>
+    <div id="labgrid">
+      <button data-k="1">C1</button><button data-k="2">C2</button><button data-k="3">C3</button><button data-k="0">ALL</button>
+      <button data-k="4">EXIT</button><button data-k="5">SCRN</button><button data-k="6">CITY</button><button data-k="g">LIFT</button>
+      <div class="sep"></div>
+      <button data-k="7">LIT</button><button data-k="j">LOBBY</button><button data-k="k">OFFICE</button><button data-k="l">CORR</button>
+      <div class="sep"></div>
+      <button data-k="n">PAL</button><button data-k="p">DITH</button><button data-k="b">BAYER</button><button data-k="h">HUD</button>
+      <button data-k="[">SPR-</button><button data-k="]">SPR+</button><button data-k="/">AUTO</button><button data-k=";">POOL-</button>
+      <button data-k=",">NITE-</button><button data-k=".">NITE+</button><button data-k="'">POOL+</button><button data-k="8">OVERLK</button>
+    </div>
+  </div>
   <div id="status"></div>
   <script>
   // Phantom Burn's page. The generic loader (sigil-web-app.js) boots the
@@ -49,6 +76,7 @@
   //                   the dark rooms: 3 lobby-dark, 4 office-night, 5 corridor-dark)
   //     ?night=N      the dark rooms' ambient floor (1 default; , . on the keyboard)
   //     ?lift=0       no black-level lift (G on the keyboard)
+  //     ?on=all|none|c1,c3   the switchable circuits after the view's own
   //     ?pools=G      the always-lit circuits' gain (2 default; ; ' on the keyboard)
   //     ?shot=K       hold the camera at view K (floor shots)
   //     ?hud=0|1|2    the readout: off, stats, stats and keys
@@ -57,13 +85,15 @@
   //     ?trace        a console stats line every 120 frames, each also sent to the
   //                   host (report?LINE, the host's log), so the phone's numbers
   //                   need no transcribing; ?auto walks by itself
+  //     ?title=1      the title screen (its own scene; no floor)
   //     ?card         the test card (a sweep of the colour cube) through the post pass
   //     ?touch        show the phone controls without a touch screen
   //   the collision (assets/NAME/floor14.collide.b64) as ("collide", BASE64);
   //   the mouse: a click locks the pointer, movement is ("look", "dx,dy");
   //   touch: a thumb landing on the left half is a move stick, on the right
   //     half a look stick, each ("move"|"lookstick", "x,y") in -1..1; the C
-  //     button is ("press", "c").
+  //     button is ("press", "c"); the LAB button (top left) opens the style
+  //     lab's keys as buttons, each ("press", KEY), for the phone.
   (function () {
     "use strict";
     var params = new URLSearchParams(location.search);
@@ -100,6 +130,7 @@
             return r.text();
           });
         }
+        if (params.has("title")) return null;   // the title screen loads no floor
         var info = floor === "stand-in" ? Promise.resolve(null) : text("floor.sexp");
         return info.then(function (t) {
           if (t !== null) app.dispatch("floorinfo", t);
@@ -165,6 +196,19 @@
       }
       canvas.addEventListener("touchend", end);
       canvas.addEventListener("touchcancel", end);
+      // the lab panel: every button sends its key; the HUD shows the state
+      var lab = document.getElementById("lab");
+      function labTap(e) {
+        var b = e.target.closest ? e.target.closest("button") : null;
+        if (!b) return;
+        e.preventDefault();
+        if (b.id === "labbtn") { lab.classList.toggle("open"); return; }
+        var k = b.getAttribute("data-k");
+        if (k) { app.dispatch("press", k); b.classList.add("down"); setTimeout(function () { b.classList.remove("down"); }, 120); }
+      }
+      var lastTouch = 0;
+      lab.addEventListener("touchstart", function (e) { lastTouch = Date.now(); labTap(e); }, { passive: false });
+      lab.addEventListener("click", function (e) { if (Date.now() - lastTouch > 800) labTap(e); });
       var crouch = document.getElementById("crouch");
       crouch.addEventListener("touchstart", function (e) {
         crouch.classList.add("down"); app.dispatch("press", "c"); e.preventDefault();

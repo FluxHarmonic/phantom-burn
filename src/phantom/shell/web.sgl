@@ -27,6 +27,7 @@
           (phantom soup)
           (phantom render)
           (phantom game)
+          (phantom title)
           (phantom stand-in))
 
   (export web-main web-dispatch)
@@ -133,7 +134,8 @@
         (when f (render-fog! f))
         (when h (game-set-hud! h))
         (when v (game-set-view! v))
-        (when shot (game-set-shot! shot))))
+        (when shot (game-set-shot! shot))
+        (when (param "on") (game-set-on! (param "on")))))
 
     (define (start!)
       ;; one attempt: a failure is reported once, not retried per frame
@@ -143,7 +145,29 @@
       (apply-params!)
       (set! *started* #t))
 
+    ;; ?title=1: the title screen, which needs no floor.
+    (define *title-t* #f)
+    (define (title-tick payload)
+      (let ((dt (frame-dt payload)))
+        (if *title-t*
+            (set! *title-t* (+ *title-t* dt))
+            (begin
+              (title-init!)
+              (apply-params!)
+              (set! *title-t* 0.0)))
+        (title-frame! *title-t* (gles3-canvas-width) (gles3-canvas-height))
+        (unless *said-ready*
+          (set! *said-ready* #t)
+          (display "phantom-burn: ready title") (newline))))
+
     (define (web-tick payload)
+      (when (and *params-seen* (param "title"))
+        (gles3-resize-to-display)
+        (title-tick payload))
+      (unless (and *params-seen* (param "title"))
+        (web-tick* payload)))
+
+    (define (web-tick* payload)
       (when (and *params-seen* (not *info*) *info-text*)
         (set! *info* (floor-info-from-string *info-text*)))
       (when (and *params-seen* (null? *fetches*) (or (stand-in?) *info*))
