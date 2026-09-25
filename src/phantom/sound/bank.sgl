@@ -115,9 +115,16 @@
               (instrument-text 18 "sting ?" STING-Q #f 0.8)
               (instrument-text 19 "sting there" STING-THERE #f 0.9))))
 
-    ;; Channels: a slot's main notes on channel 1; a rattle on channel 2 (a
-    ;; tracker channel is monophonic, and the heel's tail must not be cut).
-    ;; Each slot starts with a note-off on both, so nothing rings into the next.
+    ;; Channels: one per surface (carpet 1, tile 2, marble 3, grate 4 with its rattle
+    ;; on 5, raised 6), the guard 7, the stings 8: motif plays at most 8 voices a
+    ;; channel, instruments and their layers counted (the first test run, all on
+    ;; one channel, was refused). Nothing rings into the next slot: 0.6 s is longer
+    ;; than any of these sounds.
+    (define (channel-of key)
+      (case (car key)
+        ((step) (case (cadr key) ((carpet) 1) ((tile) 2) ((marble) 3) ((grate) 4) (else 6)))
+        ((guard) 7)
+        (else 8)))
     (define (bank-tune-text)
       (let* ((entries (plan))
              (events
@@ -128,7 +135,7 @@
                                       ;; a grate heel's later notes are its rattle, on channel 2
                                       (let ((rattle? (and (> k 0) (eq? (car (car e)) 'step)
                                                           (eq? (list-ref (car e) 2) 'heel) (eq? (cadr (car e)) 'grate))))
-                                        (list (+ base (car n)) (if rattle? 2 1) (cadr n) (if rattle? (+ inst 2) inst) (caddr n))))
+                                        (list (+ base (car n)) (if rattle? 5 (channel-of (car e))) (cadr n) (if rattle? (+ inst 2) inst) (caddr n))))
                                     notes (iota (length notes)))))
                            entries (iota (length entries)))))
              (total (* SLOT-ROWS (length entries)))
@@ -150,7 +157,7 @@
                                  (iota rows from)))
                      "    )\n")))))
         (string-append
-          "(tune version: 1 name: \"phantom sound bank\" tempo: 125 speed: 1 channels: 2\n"
+          "(tune version: 1 name: \"phantom sound bank\" tempo: 125 speed: 1 channels: 8\n"
           "  (instruments\n" (apply string-append (instruments)) "  )\n"
           "  (patterns\n" (apply string-append (map pattern (iota npat))) "  )\n"
           "  (order" (apply string-append (map (lambda (p) (string-append " " (num p))) (iota npat))) ")\n"

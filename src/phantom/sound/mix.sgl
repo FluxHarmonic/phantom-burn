@@ -13,6 +13,7 @@
 
 (define-library (phantom sound mix)
   (import (sigil core)
+          (sigil math)
           (phantom sound logic))
   (export make-mixer mixer-play! mixer-render! mixer-voices MAX-VOICES)
   (begin
