@@ -193,13 +193,22 @@
            (w (run (make-walker 0.0 0.0 0.0 EAST) c 300 FORWARD)))
       (assert-true (< (walker-x w) 3.0))
       (assert-true (near? (walker-z w) 0.0 1e-9))))
-  (test "no mantle when a soffit over the start stops the head rising (F2)"
-    (let* ((c (scene (ground) (box 1.5 -3.0 2.4 2.9 3.0 2.6) (box 3.0 -3.0 0.0 4.0 3.0 1.0)))
-           (w (run (make-walker 0.0 0.0 0.0 EAST) c 300 FORWARD)))
-      (assert-true (near? (walker-z w) 0.0 1e-9))
-      (assert-true (< (walker-x w) 3.0))))
+  (test "under a soffit over the start, a climb goes crouched: the head never rises through it (F2)"
+    (let* ((c (scene (ground) (box 1.5 -3.0 2.4 2.9 3.0 2.6) (box 3.0 -3.0 0.0 4.0 3.0 1.0))))
+      ;; step by step, the highest the head gets while under the soffit
+      ;; (it climbs, then walks on off the block's far side: what counts is
+      ;; that it got to the top and the head stayed under the soffit)
+      (let loop ((w (make-walker 0.0 0.0 0.0 EAST)) (n 0) (worst 0.0) (top 0.0))
+        (if (= n 300)
+            (begin
+              (assert-true (<= worst 2.4))
+              (assert-true (near? top 1.0 1e-6)))
+            (let* ((w2 (walker-step w FORWARD TICK c))
+                   (head (+ (walker-z w2) (walker-height w2)))
+                   (under (and (> (walker-x w2) (- 1.5 RADIUS)) (< (walker-x w2) (+ 2.9 RADIUS)))))
+              (loop w2 (+ n 1) (if under (max worst head) worst) (max top (walker-z w2))))))))
   (test "a riser of exactly STEP (as float32 stores it) is stepped onto (F3)"
-    (let* ((c (scene (ground) (box 3.0 -3.0 0.0 6.0 3.0 STEP)))
+    (let* ((c (scene (ground) (box 3.0 -3.0 0.0 15.0 3.0 STEP)))
            (w (run (make-walker 0.0 0.0 0.0 EAST) c 180 FORWARD)))
       (assert-true (> (walker-x w) 3.5))
       (assert-true (near? (walker-z w) STEP 1e-6))))

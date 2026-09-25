@@ -294,11 +294,14 @@
              (top (collide-floor c px py (+ z STEP STEP-TOL) (+ z MANTLE))))
         (when top
           (let* ((room (- (headroom c px py top (+ STAND 0.5)) 0.02))
-                 ;; the height the body climbs at: crouched when the top has
-                 ;; no standing room (the crouch happens as the climb starts)
-                 (ch (if (< room STAND) CROUCH h)))
-            (when (and (>= room CROUCH)
-                       (not (collide-ceiling c x y (+ z ch) (+ top ch 0.02))))
+                 ;; the room over the start once risen to the top: the climb
+                 ;; happens in place first, so the head must fit there too
+                 (rise (- (- (headroom c x y z (+ (- top z) STAND 0.5)) 0.02) (- top z)))
+                 ;; the height the body climbs at: its own, or less where the
+                 ;; top or the space over the start has less (then crouched;
+                 ;; the crouch happens as the climb starts)
+                 (ch (min h room rise)))
+            (when (and (>= room CROUCH) (>= rise CROUCH))
               (let* ((th (min room STAND))
                      (pushes (collide-resolve! c px py RADIUS (+ top 0.05) (+ top th)))
                      (tx (collide-x c)) (ty (collide-y c)))
@@ -308,9 +311,8 @@
                            (path-clear? c x y tx ty (+ top 0.1))
                            (path-clear? c x y tx ty (+ top (* 0.5 ch)))
                            (path-clear? c x y tx ty (+ top ch -0.05)))
-                  (when (< room STAND)
-                    (vector-set! w I-H CROUCH))
-                  (when (< room STAND)
+                  (when (< ch STAND)
+                    (vector-set! w I-H CROUCH)
                     (vector-set! w I-FORCED #t))
                   (vector-set! w I-MANTLE 0.0)
                   (vector-set! w I-MFX x) (vector-set! w I-MFY y) (vector-set! w I-MFZ z)
