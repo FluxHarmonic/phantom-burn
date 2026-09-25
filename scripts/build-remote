@@ -123,6 +123,14 @@ git -C checkout checkout --quiet "$FULL" || { echo "SETUP-FAILED: checkout $FULL
 [ "$(git -C checkout rev-parse HEAD)" = "$FULL" ] || { echo "SETUP-FAILED: checkout is not $FULL"; exit 125; }
 "$HOME/.sigil/bin/sigil" cli use "$SIGIL_V" >/dev/null 2>&1 || { echo "SETUP-FAILED: sigil cli use $SIGIL_V"; exit 125; }
 export PATH="$HOME/.sigil/bin:$PATH"
+# The runner's login environment carries the system profile's header paths;
+# zig's stdatomic.h include_next then finds the system C++ stdatomic.h and
+# every native C compile fails ('bits/c++config.h' file not found; measured
+# at 63cd7d3, every test and the release build). A local shell does not set
+# them. Build without them, as sigil's release-build.sh does for its android
+# cross build (scripts/dev sets CPATH itself).
+echo "remote: inherited include paths: C_INCLUDE_PATH='${C_INCLUDE_PATH:-}' CPLUS_INCLUDE_PATH='${CPLUS_INCLUDE_PATH:-}' CPATH='${CPATH:-}'"
+unset C_INCLUDE_PATH CPLUS_INCLUDE_PATH OBJC_INCLUDE_PATH CPATH
 echo "remote: sigil $(sigil --version 2>&1 | sed 's/\x1b\[[0-9;]*m//g')"
 cd checkout
 clean() {  # refuse when the checkout is no longer exactly the commit
