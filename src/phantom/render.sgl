@@ -107,15 +107,18 @@ void main() {
 }
 ")
 
-    ;; The compiled floor's vertex stage: baked light, no loop over lights
-    ;; (except, for emissive vertices only, the switchable fixtures: until
-    ;; the compiler tags a fixture's emissive vertices with its circuit, one
-    ;; within 0.9 m of a switchable light takes that light's on/off).
+    ;; The compiled floor's vertex stage: baked light, no loop over lights.
+    ;; An emissive vertex says which fixture it belongs to in emission's
+    ;; alpha (the compiler's tagging, 7aed50f): 0 not emissive, 128 + k a
+    ;; fixture on circuit k (it goes dark with k), 255 always lit.
+    ;;
+    ;; `circuit` is declared uvec4: sokol binds a ubyte4 attribute with
+    ;; glVertexAttribIPointer (an integer base type), so a vec4 input reads
+    ;; undefined values (0 here, which silently indexed every slot as c1).
     (define COMPILED-VERTEX
       "uniform mat4 view_proj;
 uniform vec4 eye;           // xyz camera, w fog distance
 uniform vec4 cl[8];         // per circuit index: rgb x level x on; a: on
-uniform vec4 fixtures[20];  // the switchable lights: xyz, w circuit (-1: none)
 uniform vec4 ambient;
 uniform vec4 retro;
 in vec3 position;
@@ -124,25 +127,18 @@ in vec3 normal;
 in vec4 color;
 in vec4 emission;
 in vec4 light;              // intensity per slot
-in vec4 circuit;            // circuit index per slot (unnormalized)
+in uvec4 circuit;           // circuit index per slot
 out vec2 v_uv;
 out vec3 v_uvw;
 out vec3 v_color;
 out float v_fog;
 void main() {
   vec3 lit = ambient.rgb
-    + light.x * cl[int(circuit.x + 0.5)].rgb + light.y * cl[int(circuit.y + 0.5)].rgb
-    + light.z * cl[int(circuit.z + 0.5)].rgb + light.w * cl[int(circuit.w + 0.5)].rgb;
-  float elevel = 1.0;
-  if (emission.a > 0.5) {
-    float enear = 0.9;
-    for (int i = 0; i < 20; i++) {
-      if (fixtures[i].w < 0.0) continue;
-      float d = distance(fixtures[i].xyz, position);
-      if (d < enear) { enear = d; elevel = cl[int(fixtures[i].w + 0.5)].a; }
-    }
-  }
-  v_color = mix(color.rgb * lit, emission.rgb, emission.a * elevel);
+    + light.x * cl[int(circuit.x)].rgb + light.y * cl[int(circuit.y)].rgb
+    + light.z * cl[int(circuit.z)].rgb + light.w * cl[int(circuit.w)].rgb;
+  int tag = int(emission.a * 255.0 + 0.5);
+  float glow = tag == 0 ? 0.0 : (tag >= 255 ? 1.0 : cl[clamp(tag - 128, 0, 7)].a);
+  v_color = mix(color.rgb * lit, emission.rgb, glow);
   v_uv = uv;
   v_fog = clamp(length(position - eye.xyz) / eye.w, 0.0, 1.0);
   vec4 clip = view_proj * vec4(position, 1.0);
@@ -456,12 +452,6 @@ void main() {
                                 tex))
                          (list-ref p 4)))
                  (cdr (assq 'parts info))))
-      (let* ((fx (cdr (assq 'fixtures info)))
-             (padded (let loop ((fs fx) (k 0) (acc '()))
-                       (cond ((>= k 20) (reverse acc))
-                             ((null? fs) (loop fs (+ k 1) (cons '(0.0 0.0 0.0 -1.0) acc)))
-                             (else (loop (cdr fs) (+ k 1) (cons (map (lambda (v) (* 1.0 v)) (car fs)) acc)))))))
-        (for-each (lambda (p) (set-pipeline-uniform! p 'fixtures padded)) (list *c-opaque* *c-glass*)))
       ;; the skyline takes no light but the ambient and its own glow
       (let ((zero (map (lambda (l) '(0.0 0.0 0.0 0.0)) (pad-lights '() NLIGHTS))))
         (both (lambda (p)
