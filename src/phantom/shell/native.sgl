@@ -5,6 +5,7 @@
 ;;;                [--bayer 4|8] [--palette NAME] [--fog M] [--card]
 ;;;                [--snap] [--affine] [--trace] [--auto] [--night N] [--no-lift] [--pools G]
 ;;;                [--on all|none|c1,c3]
+;;;                [--guard X,Y[,Z[,R]]] [--guard-speed V] [--guard-state S] [--guard-light L]
 ;;;   phantom-burn --title [--title-at T] [--freeze]   the title screen
 ;;;   phantom-burn --play [...]                        P1: the guard, the badge, the exit
 ;;;
@@ -24,11 +25,18 @@
 ;;; 2 office, then the dark rooms: 3 lobby-dark, 4 office-night, 5
 ;;; corridor-dark); --shot holds the camera exactly there, for floor shots.
 ;;;
+;;; --guard previews the guard's body (models/guard/guard.py, loaded from
+;;; assets/guard/guard.sgm) walking a circle of radius R (default 2) around
+;;; X,Y at floor height Z (default 0), 1.3 m/s (--guard-speed, 0 stands him),
+;;; visor S (0 calm to 3 hunting; default -1 steps through them), lit by grey
+;;; L (default 0.7). No AI: P1's play draws the real guard.
+;;;
 ;;; Click to capture the mouse for looking (sigil-desktop 0.12's cursor
 ;;; capture); Escape gives it back, and quits when it is not captured.
 
 (define-library (phantom shell native)
   (import (sigil core)
+          (sigil math)
           (sigil process)
           (sigil fs)
           (sigil desktop)
@@ -36,6 +44,7 @@
           (phantom soup)
           (phantom render)
           (phantom game)
+          (phantom guard body)
           (phantom title)
           (phantom play mode))
 
@@ -126,12 +135,43 @@
         (game-set-play! (vector play-hold? play-after-tick! play-frame! play-hud!))
         (unless (member "--hud" args) (game-set-hud! 0))))
 
+    ;; The guard's body, beside the floors (one for every floor).
+    (define GUARD-SGM "assets/guard/guard.sgm")
+    (define (load-guard!)
+      (when (file-exists? GUARD-SGM)
+        (render-load-guard! (lambda (layout) (load-mesh layout GUARD-SGM)))))
+
+    (define (numbers s)     ; "1,2.5,3" -> (1 2.5 3); #f for a word that is not one
+      (let loop ((i 0) (start 0) (acc '()))
+        (if (or (= i (string-length s)) (char=? (string-ref s i) #\,))
+            (let ((acc (cons (string->number (substring s start i)) acc)))
+              (if (= i (string-length s)) (reverse acc) (loop (+ i 1) (+ i 1) acc)))
+            (loop (+ i 1) start acc))))
+
+    (define (guard-preview! args)
+      (let ((g (arg-value args "--guard" #f)))
+        (when g
+          (let* ((ns (numbers g))
+                 (at (lambda (k d) (if (and (> (length ns) k) (list-ref ns k)) (* 1.0 (list-ref ns k)) d)))
+                 (num (lambda (flag d) (let ((v (string->number (arg-value args flag "none")))) (if v (* 1.0 v) d)))))
+            (if (render-guard-ready?)
+                (begin
+                  (guard-preview-set! (at 0 0.0) (at 1 0.0) (at 2 0.0) (at 3 2.0)
+                                      (num "--guard-speed" 1.3)
+                                      (exact (round (num "--guard-state" -1.0)))
+                                      (num "--guard-light" 0.7))
+                  (render-set-extra-draw! guard-preview-draw!))
+                (begin (display (string-append "phantom-burn: --guard: no " GUARD-SGM)) (newline)))))))
+
     (define (game-loop args frames seconds)
       (lambda ()
         (gfx-setup)
         (game-init! load-mesh* load-texture* (load-collision) (load-info))
+        (load-guard!)
         (apply-settings! args)
         (start-play! args (load-info))
+
+        (guard-preview! args)
         (let loop ((n 0) (seen (stamps)) (elapsed 0.0))
           (let* ((dt (wait-frame))
                  (elapsed (+ elapsed dt))

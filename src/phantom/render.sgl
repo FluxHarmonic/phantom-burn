@@ -44,6 +44,7 @@
           render-scene! render-make-world-mesh render-draw-world-mesh render-title-scene!
           render-draw-floor! render-floor-kind
           render-set-extra-draw! render-draw-object!
+          render-load-guard! render-guard-ready? render-guard-parts render-draw-guard!
           make-camera camera-set!)
 
   (begin
@@ -177,6 +178,57 @@ void main() {
   // below the palette's darkest colour still reads (the dark rooms, D26)
   if (lift.a > 0.5) c = lift.rgb + c * (vec3(1.0) - lift.rgb);
   frag_color = vec4(c, alpha);
+}
+")
+
+    ;; The guard's body (models/guard/guard.py): eight parts, part k the walk
+    ;; pose k with pose k+1, every vertex also carrying the rest pose, in the
+    ;; body's frame (x right, y forward, z up; positions in metres / 2).
+    ;; pose.x blends k -> k+1, pose.y the result toward rest. Lit by light
+    ;; (the light where the guard stands, as (phantom play mode) finds it),
+    ;; shaded a little by the normal so the smooth body reads round: from
+    ;; above, and toward the viewer. The visor's strip (colour alpha 0)
+    ;; glows the state's colour.
+    (define (guard-layout)
+      (make-vertex-layout '((pos_a short4n) (pos_b short4n) (pos_r short4n)
+                            (nrm_a byte4n) (nrm_b byte4n) (nrm_r byte4n) (color ubyte4n))))
+
+    (define GUARD-VERTEX
+      "uniform mat4 view_proj;
+uniform mat4 model;
+uniform vec4 eye;           // xyz camera, w fog distance
+uniform vec4 retro;
+uniform vec4 pose;          // x: pose k -> k+1, y: toward rest
+uniform vec4 light;         // rgb: the light where the guard stands
+uniform vec4 visor;         // rgb: the strip's glow
+in vec4 pos_a;
+in vec4 pos_b;
+in vec4 pos_r;
+in vec4 nrm_a;
+in vec4 nrm_b;
+in vec4 nrm_r;
+in vec4 color;
+out vec2 v_uv;
+out vec3 v_uvw;
+out vec3 v_color;
+out float v_fog;
+void main() {
+  vec3 p = mix(mix(pos_a.xyz, pos_b.xyz, pose.x), pos_r.xyz, pose.y) * 2.0;
+  vec3 n = mix(mix(nrm_a.xyz, nrm_b.xyz, pose.x), nrm_r.xyz, pose.y);
+  vec3 wp = (model * vec4(p, 1.0)).xyz;
+  vec3 wn = normalize(mat3(model) * n);
+  vec3 to_eye = normalize(eye.xyz - wp);
+  float shade = 0.5 + 0.3 * max(wn.z, 0.0) + 0.4 * max(dot(wn, to_eye), 0.0);
+  v_color = color.a < 0.5 ? visor.rgb : color.rgb * light.rgb * shade;
+  v_uv = vec2(0.5);
+  v_fog = clamp(length(wp - eye.xyz) / eye.w, 0.0, 1.0);
+  vec4 clip = view_proj * vec4(wp, 1.0);
+  if (retro.x > 0.0 && clip.w > 0.0) {
+    vec2 cells = vec2(240.0, 135.0) / retro.x;
+    clip.xy = floor(clip.xy / clip.w * cells + 0.5) / cells * clip.w;
+  }
+  v_uvw = vec3(0.5 * clip.w, 0.5 * clip.w, clip.w);
+  gl_Position = clip;
 }
 ")
 
@@ -385,6 +437,9 @@ void main() {
             (fs (string-append (glsl-header) WORLD-FRAGMENT)))
         (set! *c-opaque* (make-pipeline layout vs fs))
         (set! *c-glass* (make-pipeline layout vs fs '(blend normal depth-write #f cull none))))
+      (set! *g-pipe* (make-pipeline (guard-layout)
+                                    (string-append (glsl-header) GUARD-VERTEX)
+                                    (string-append (glsl-header) WORLD-FRAGMENT)))
       (let ((pl (make-vertex-layout '((position float2))))
             (tri (make-bytevector 24 0)))
         ;; one triangle covering the whole of clip space
@@ -571,6 +626,51 @@ void main() {
       (draw-mesh-range *opaque* mesh first count)
       (set-pipeline-uniform! *opaque* 'model *model*)
       (set-pipeline-uniform! *opaque* 'ambient *ambient-now*))
+
+    ;; --- the guard's body --------------------------------------------------------
+
+    (define *g-pipe* #f)
+    (define *g-mesh* #f)
+    (define *g-parts* #f)        ; vector: part k -> (first . count)
+    (define *g-pose* (make-bytevector 16 0))
+    (define *g-light* (make-bytevector 16 0))
+    (define *g-visor* (make-bytevector 16 0))
+    (define *g-fog* (make-bytevector 16 0))
+    (define *g-lift* (make-bytevector 16 0))
+
+    ;; (load layout) -> a mesh: the shell's loader for assets/guard/guard.sgm.
+    (define (render-load-guard! load)
+      (when *g-mesh* (mesh-free! *g-mesh*))
+      (set! *g-mesh* (load (guard-layout)))
+      (set! *g-parts* (list->vector (mesh-parts *g-mesh*))))
+    (define (render-guard-ready?) (and *g-mesh* #t))
+    (define (render-guard-parts) (if *g-parts* (vector-length *g-parts*) 0))
+
+    ;; Inside the extra draw: part k, blended t toward pose k+1 and rest
+    ;; toward the rest pose, through model (the body's frame in the world),
+    ;; lit by (r g b), the visor glowing (vr vg vb).
+    (define (render-draw-guard! model k t rest r g b vr vg vb)
+      (when *g-mesh*
+        (let ((p (vector-ref *g-parts* k)))
+          (f32! *eye* 3 *fog*)
+          (f32! *g-pose* 0 t) (f32! *g-pose* 1 rest)
+          (f32! *g-light* 0 r) (f32! *g-light* 1 g) (f32! *g-light* 2 b) (f32! *g-light* 3 1.0)
+          (f32! *g-visor* 0 vr) (f32! *g-visor* 1 vg) (f32! *g-visor* 2 vb) (f32! *g-visor* 3 1.0)
+          (f32! *g-fog* 0 (if *lift* 0.0 BG-R)) (f32! *g-fog* 1 (if *lift* 0.0 BG-G))
+          (f32! *g-fog* 2 (if *lift* 0.0 BG-B)) (f32! *g-fog* 3 1.0)
+          (f32! *g-lift* 0 BG-R) (f32! *g-lift* 1 BG-G) (f32! *g-lift* 2 BG-B)
+          (f32! *g-lift* 3 (if *lift* 1.0 0.0))
+          (set-pipeline-uniform! *g-pipe* 'view_proj *vp*)
+          (set-pipeline-uniform! *g-pipe* 'model model)
+          (set-pipeline-uniform! *g-pipe* 'eye *eye*)
+          (set-pipeline-uniform! *g-pipe* 'retro *retro*)
+          (set-pipeline-uniform! *g-pipe* 'pose *g-pose*)
+          (set-pipeline-uniform! *g-pipe* 'light *g-light*)
+          (set-pipeline-uniform! *g-pipe* 'visor *g-visor*)
+          (set-pipeline-uniform! *g-pipe* 'fog_color *g-fog*)
+          (set-pipeline-uniform! *g-pipe* 'lift *g-lift*)
+          (set-pipeline-uniform! *g-pipe* 'alpha 1.0)
+          (draw-mesh-range *g-pipe* *g-mesh* (car p) (cdr p)))))
 
     ;; The title's room: built in design coordinates (no model turn), lit
     ;; by its own lights, the switchable circuits off (so the ambient is
