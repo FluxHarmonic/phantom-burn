@@ -366,16 +366,16 @@
           (else
            ;; 1. with the tier: from start:, as the player arrives there
            (let ((r (route c anchors start near-exit? '() stats))
-                 (what (string-append "with " tier ", from start:")))
+                 (what (string-append "with " tier ", from the start")))
              (if (not r)
-                 (bad (floor-line fl) (string-append what " the exit is not reached"))
+                 (bad (floor-line fl) (string-append what ": the exit is not reached"))
                  (let* ((sx (px start-p)) (sy (py start-p)) (sz (+ start-z 0.01))
                         (wt (witness cf c (list sx sy sz (facing->yaw (floor-facing fl)) (low-at? c sx sy sz))
                                      (settle-prefix) r near-exit?)))
                    (set! witness-text (vector-ref wt 6))
                    (say (proof-line what r wt))
                    (unless (vector-ref wt 5)
-                     (bad (floor-line fl) (string-append what " the route to the exit does not replay from its witness"))))))
+                     (bad (floor-line fl) (string-append what ": the route to the exit does not replay from its witness"))))))
            ;; 2. with the tier: each declared route
            (for-each
              (lambda (rt)
