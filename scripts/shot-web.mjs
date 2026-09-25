@@ -3,7 +3,10 @@
 //
 //   node scripts/shot-web.mjs BUILD OUT.png --query "shot=0&hud=0"
 //                             [--scale N] [--port N] [--cdp N] [--wait MS]
-//                             [--console FILE] [--requests FILE]
+//                             [--console FILE] [--requests FILE] [--eval JS]
+//
+// --eval JS runs in the page once the game is ready, before the wait (e.g.
+// clicking the lab panel's buttons: a behavioural check of the page).
 //
 // Serves BUILD on loopback, boots headless Chrome (SwiftShader), opens
 // index.html?QUERY, waits for "phantom-burn: ready", sets the viewport to
@@ -23,7 +26,7 @@ import { spawn } from "node:child_process";
 
 const args = process.argv.slice(2);
 const opt = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : dflt; };
-const VALUED = ["--query", "--scale", "--port", "--cdp", "--wait", "--console", "--requests"];
+const VALUED = ["--query", "--scale", "--port", "--cdp", "--wait", "--console", "--requests", "--eval"];
 const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && VALUED.includes(args[i - 1])));
 const ROOT = path.resolve(positional[0] || "build/web");
 const OUT = positional[1] || "/tmp/phantom-shot.png";
@@ -126,6 +129,7 @@ for (let attempt = 0; attempt < 3 && !ready; attempt++) {
   } else break;
 }
 if (!ready) { console.log("SETUP-FAILED: no ready line in 60 s; console: " + JSON.stringify(lines.slice(0, 20))); shutdown(2); await new Promise(() => {}); }
+if (opt("--eval")) console.log("eval: " + JSON.stringify(await evalJS(opt("--eval"))));
 await sleep(parseInt(opt("--wait", "1500"), 10));
 const data = await evalJS(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => {
   const c = document.getElementById("stage"); resolve([c.width, c.height, c.toDataURL("image/png")]);
