@@ -1,0 +1,14 @@
+;; props/root-console.prop - the air-gapped root key console on its plinth
+;; (design section 2: the one machine the Net cannot reach). Its screen and
+;; the key slot glow in C-GIBSON violet; the screen lights the room around
+;; it (a lamp on the screens circuit). Front (-y) is where you stand.
+(prop root-console
+  parts: ((box    size: (1.5 1.1 0.25)   at: (0 0 0.125)       material: steel)    ; the plinth
+          (box    size: (1.1 0.7 0.75)   at: (0 0.05 0.625)    material: dark)     ; the body
+          (wedge  size: (1.1 0.45 0.16)  at: (0 -0.1 1.08)     material: plastic)  ; the sloped desk
+          (box    size: (0.9 0.08 0.6)   at: (0 0.33 1.4)      material: plastic)  ; the screen's housing
+          (box    size: (0.8 0.02 0.5)   at: (0 0.285 1.4)     material: gibson)   ; the screen
+          (box    size: (0.14 0.03 0.05) at: (0.38 -0.33 1.02) material: gibson)   ; the key slot
+          (box    size: (0.5 0.2 0.02)   at: (-0.15 -0.15 1.17) material: dark))   ; the keyboard
+  lamps: ((at: (0 -0.35 1.35)  colour: "#B36BFF"  radius: 3.8  strength: 0.9  circuit: screens))
+  hides: crouched)

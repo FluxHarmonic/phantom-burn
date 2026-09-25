@@ -36,7 +36,7 @@ In-process: `(compile-floor "floors/NAME.floor" read-text)` from `(phantom floor
   lights: ((CIRCUIT level: L [panel: (x y)] [needs: TIER]) ...)
   things: ((lifts in: ROOM along: ((x y) (x y)) count: N [kind: PROP])
            (guard kind: patrol|post route: ((x y) ...) [waits: (s ...)])
-           (desk|cabinet|prop at: (x y) kind: PROP [facing: DEGREES] [z: Z])
+           (desk|cabinet|prop kind: PROP PLACEMENT [facing: DEGREES] [z: Z])
            (badge on-desk: (x y) tier: TIER)
            (rail along: ((x y) (x y)) [in: ROOM]) ...)
   views: ((NAME at: (x y z) look: (x y z) [lens: MM]) ...)
@@ -54,6 +54,8 @@ Openings are placed on the wall the two rooms share (or, for `window` and `exit`
 - `glass` and `window` take their `along:` stretch; `window` runs `sill:` to `head:` above the floor, and both get a pane.
 - `exit` takes the `exit-door` prop's `opening:` and places the door.
 - `hatch` is a square (`size:`, 0.64 m by default) at a point inside both rooms, turned square to the upper room's nearest wall, through the slab between them.
+
+A thing's PLACEMENT is `at: (x y)`, or `in: ROOM` with `against: WALL from: (END M)`, `from: (corner N (dx dy))` or `from: (centre (dx dy))` (see the growth plan, item 1). `z:` is an absolute height. `facing:` and the start's `facing:` are degrees anticlockwise from east (0 east, 90 north). Note that the shell's walker counts yaw from north.
 
 The circuits `emergency`, `screens` and `city` are reserved: lamps in props and the compiler's rules use them, and nothing switches them.
 
@@ -102,11 +104,26 @@ Render surfaces are split at a half-metre grid so the vertex light holds up; col
   - Layout: `position float3, uv float2, normal float3, color ubyte4n, emission ubyte4n, light float4, circuit ubyte4`.
   - Parts (index ranges), in order: one per texture, then `solid` (colour per vertex), then `glass` (blended, cull none).
   - Front faces are CCW from the side they face.
-- **`light` and `circuit`:** four (circuit index, intensity) slots per vertex. The shader multiplies each by its circuit's level and colour, so switching a circuit is one uniform.
+- **`light` and `circuit`:** four (circuit index, intensity) slots per vertex. The shader multiplies each by its circuit's level and colour, so switching a circuit is one uniform. **Declare `circuit` as `in uvec4 circuit;`**: sokol binds UBYTE4 as an integer attribute (`glVertexAttribIPointer`), and a `vec4` input reads undefined (the shell measured every slot reading circuit 0).
 - **Emission alpha:** 0 is not emissive; `128 + k` is a fixture on circuit `k` (it goes dark with it); 255 is always on.
 - **Circuits:** the floor's, in order, then `emergency`, `screens` and `city`.
 - **Collision soup** (`.collide`): `"PBC1"`, a u32 count, then count x 9 float32, count x u8 surface tag, count x u8 room (255 none). Each triangle is CCW from its open side; glass and rails are two-sided.
 - **The JSON sidecar:** layout, parts, textures, `ambient`, circuits (with `switchable`), `lights` (every emitter), surfaces (the tag table), rooms, edges (the sector graph: kind, rooms, where, how wide, and walk, sight and sound factors), views, start, exit, guards, and problems.
+
+
+## Format growth plan
+
+Agreed 2026-09-25 (David asked whether `.floor` scales to larger maps). P0's slice stays as it is. Each piece is built when P1 and P2's floors need it, and new work is designed so these fit without rework.
+
+1. **Room-relative placement for things. Built in P0** (the root room uses it). A thing names its room (`in: ROOM`) and is placed from one of three anchors. It compiles to world coordinates, so nothing downstream changes. Every placement goes through one resolver, `resolve-placement` in `dress.sgl`, so a new anchor is one more case there.
+   - `against: WALL from: (END M)`: its back against one of the room's walls (`north`, `south`, `east`, `west`: the wall whose outward normal is nearest that direction), its centre `M` metres along the wall from that wall's `END`, facing into the room. This is the preferred anchor because it survives reshaping the room.
+   - `from: (corner N (dx dy))`: offset from the room's Nth corner (0-based, in the order written).
+   - `from: (centre (dx dy))`: offset from the room's centroid, for things that belong in the middle.
+2. **Shared edges and named points,** so rooms that meet don't repeat corners and drift apart. The first step is a check that the walls either side of every opening coincide. The plan already treats corners closer than 0.1 mm as one; a corner off by 5 cm makes a sliver wall, which the check will name.
+3. **Prefab groups:** a named cluster (a desk pod: desk, chair, monitor, lamp), placed once like a prop, and a declarative repeat (`repeat: N step: (dx dy)`).
+4. **Includes or zones** once a floor passes about 50 rooms: a floor file that includes zone files, each checked on its own and then together at the seams.
+5. **Guard waypoints named or attached to rooms** (`(at: ROOM from: centre (dx dy))`), so moving a room moves its route.
+6. **Incremental, per-room checks:** the plan, the heights and the walls are already per face and per edge. Caching them by room lets live reload recheck only the rooms an edit touched and their neighbours.
 
 ## Gates (design section 8)
 

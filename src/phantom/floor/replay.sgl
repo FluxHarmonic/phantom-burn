@@ -1,0 +1,89 @@
+;;; (phantom floor replay) - Gate 5, determinism (design section 8, Harkfell
+;;; A0's gate): a recorded input script replays to identical positions on
+;;; native and web. This module is the part both targets share: a script's
+;;; text, parsed, stepped through the real walker at its fixed TICK over a
+;;; floor's collision, one trace line per tick.
+;;;
+;;; A SCRIPT is text: the first line `start X Y Z YAW [crouched]`, then one
+;;; line per tick, `MX MY LOOK-YAW LOOK-PITCH SNEAK RUN CROUCH LEAN`, the flags
+;;; 0 or 1. Numbers are written in full (number->string), so the text carries
+;;; the exact doubles.
+;;;
+;;; A TRACE line is `K X Y Z YAW HEIGHT`, also in full. Two targets agree when
+;;; their traces are byte for byte the same.
+;;;
+;;; Gate 3's witnesses are scripts: a route found through the real walker is
+;;; exactly what gate 5 replays.
+;;;
+;;; Pure: no platform.
+
+(define-library (phantom floor replay)
+  (import (sigil core)
+          (sigil list)
+          (sigil string)
+          (phantom walker))
+
+  (export script->string parse-script replay-trace replay-walker)
+
+  (begin
+    (define (flag b) (if b "1" "0"))
+
+    ;; start: (x y z yaw crouched?). inputs: a list of walker inputs.
+    (define (script->string start inputs)
+      (string-append
+        "start " (number->string (list-ref start 0)) " " (number->string (list-ref start 1)) " "
+        (number->string (list-ref start 2)) " " (number->string (list-ref start 3))
+        (if (list-ref start 4) " crouched" "") "\n"
+        (apply string-append
+               (map (lambda (in)
+                      (string-append (number->string (input-move-x in)) " " (number->string (input-move-y in)) " "
+                                     (number->string (input-look-yaw in)) " " (number->string (input-look-pitch in)) " "
+                                     (flag (input-sneak? in)) " " (flag (input-run? in)) " "
+                                     (flag (input-crouch? in)) " " (number->string (input-lean in)) "\n"))
+                    inputs))))
+
+    (define (words line) (filter (lambda (w) (not (string=? w ""))) (string-split line " ")))
+
+    ;; (start . inputs), or #f when the text is not a script.
+    (define (parse-script text)
+      (let* ((lines (filter (lambda (l) (not (string=? l ""))) (string-split text "\n"))))
+        (and (pair? lines)
+             (let ((head (words (car lines))))
+               (and (>= (length head) 5) (string=? (car head) "start")
+                    (let ((start (list (string->number (list-ref head 1)) (string->number (list-ref head 2))
+                                       (string->number (list-ref head 3)) (string->number (list-ref head 4))
+                                       (and (> (length head) 5) (string=? (list-ref head 5) "crouched"))))
+                          (ins (map (lambda (l)
+                                      (let ((w (words l)))
+                                        (and (= (length w) 8)
+                                             (make-input (string->number (list-ref w 0)) (string->number (list-ref w 1))
+                                                         (string->number (list-ref w 2)) (string->number (list-ref w 3))
+                                                         (string=? (list-ref w 4) "1") (string=? (list-ref w 5) "1")
+                                                         (string=? (list-ref w 6) "1") (string->number (list-ref w 7))))))
+                                    (cdr lines))))
+                      (and (every (lambda (x) x) (take start 4)) (every (lambda (x) x) ins)
+                           (cons start ins))))))))
+
+    ;; The walker a script starts from. A crouched start sets the walker's
+    ;; slots directly (see (phantom floor reach)'s crouched-walker: the same
+    ;; stopgap until (phantom walker) has a crouched constructor).
+    (define (replay-walker start)
+      (let ((w (make-walker (list-ref start 0) (list-ref start 1) (list-ref start 2) (list-ref start 3))))
+        (if (list-ref start 4)
+            (let ((w (walker-copy w)))
+              (vector-set! w 9 CROUCH)
+              (vector-set! w 10 #t)
+              (vector-set! w 22 (+ (list-ref start 2) (- CROUCH EYE-DROP)))
+              w)
+            w)))
+
+    ;; The trace of a parsed script over collision c, stepped at dt (TICK
+    ;; for the gate; any other dt is outside the determinism claim).
+    (define (replay-trace c script dt)
+      (let loop ((w (replay-walker (car script))) (ins (cdr script)) (k 0) (acc '()))
+        (let ((line (string-append (number->string k) " " (number->string (walker-x w)) " " (number->string (walker-y w)) " "
+                                   (number->string (walker-z w)) " " (number->string (walker-yaw w)) " "
+                                   (number->string (walker-height w)))))
+          (if (null? ins)
+              (reverse (cons line acc))
+              (loop (walker-step w (car ins) dt c) (cdr ins) (+ k 1) (cons line acc))))))))

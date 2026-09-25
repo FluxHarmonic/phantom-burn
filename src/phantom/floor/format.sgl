@@ -204,6 +204,16 @@
         ((nodes)
          (let ((xs (items-of v)))
            (if xs (ok v) (bad "a list"))))
+        ((anchor)
+         ;; (END M) with END a compass side; (corner N (dx dy)); (centre (dx dy))
+         (let ((xs (items-of v)))
+           (cond ((and xs (= (length xs) 2) (memq (car xs) (quote (north south east west))) (num? (cadr xs)))
+                  (ok (list (car xs) (fl (cadr xs)))))
+                 ((and xs (= (length xs) 3) (eq? (car xs) (quote corner)) (integer? (cadr xs)) (point2 (caddr xs)))
+                  (ok (list (quote corner) (cadr xs) (point2 (caddr xs)))))
+                 ((and xs (= (length xs) 2) (eq? (car xs) (quote centre)) (point2 (cadr xs)))
+                  (ok (list (quote centre) (point2 (cadr xs)))))
+                 (else (bad "(SIDE M), (corner N (dx dy)) or (centre (dx dy))")))))
         ((any) (ok v))
         (else (bad "(unknown shape)"))))
 
@@ -349,9 +359,9 @@
     (define THING-SPECS
       '((lifts (in symbol #t) (along segment #t) (count count #t) (kind symbol #f))
         (guard (kind symbol #t) (route points #t) (waits numbers #f))
-        (desk (at point2 #t) (kind symbol #t) (facing number #f))
-        (cabinet (at point2 #t) (kind symbol #t) (facing number #f))
-        (prop (at point2 #t) (kind symbol #t) (facing number #f) (z number #f))
+        (desk (at point2 #f) (in symbol #f) (against symbol #f) (from anchor #f) (kind symbol #t) (facing number #f))
+        (cabinet (at point2 #f) (in symbol #f) (against symbol #f) (from anchor #f) (kind symbol #t) (facing number #f))
+        (prop (at point2 #f) (in symbol #f) (against symbol #f) (from anchor #f) (kind symbol #t) (facing number #f) (z number #f))
         (badge (on-desk point2 #t) (tier symbol #t))
         (rail (along segment #t) (in symbol #f))))
 
@@ -675,6 +685,15 @@
     ;; floor: a floor record. lg: the legend. props: ((kind . prop) ...), the
     ;; props that exist. textures: ((name . texture) ...).
 
+    ;; Everything a floor names, in one table: ((name kind line) ...), kind
+    ;; room, circuit or view (the reserved circuits included, line #f). Named
+    ;; points and things will join it (the format's growth plan).
+    (define (name-table fl)
+      (append (map (lambda (n) (list n 'circuit #f)) RESERVED-CIRCUITS)
+              (map (lambda (r) (list (room-name r) 'room (room-line r))) (floor-rooms fl))
+              (map (lambda (c) (list (circuit-name c) 'circuit (circuit-line c))) (floor-circuits fl))
+              (map (lambda (v) (list (view-name v) 'view (view-line v))) (floor-views fl))))
+
     (define (check-references fl lg props textures)
       (let* ((path (floor-path fl))
              (rooms (floor-rooms fl))
@@ -689,6 +708,17 @@
           (if (memq name room-names) '()
               (list (bad line (string-append what ": " (symbol->string name) " is not a room")))))
         (append
+          ;; one name table for everything a floor names (rooms, circuits,
+          ;; views, and the reserved circuits): a name means one thing
+          (let loop ((ns (name-table fl)) (seen '()) (acc '()))
+            (if (null? ns) (reverse acc)
+                (let* ((n (car ns)) (prev (assq (car n) seen)))
+                  (loop (cdr ns) (cons n seen)
+                        (if (and prev (not (eq? (cadr prev) (cadr n))))
+                            (cons (bad (caddr n) (string-append (symbol->string (car n)) " names a " (symbol->string (cadr n))
+                                                                " and a " (symbol->string (cadr prev))))
+                                  acc)
+                            acc)))))
           ;; rooms: unique names, declared surfaces and circuits, known edges
           (let loop ((rs rooms) (seen '()) (acc '()))
             (if (null? rs) (reverse acc)

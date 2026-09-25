@@ -50,7 +50,8 @@
    (led      colour: "#4DF2D9"  emits: #t)
    (amber    colour: "#FF9F1A"  emits: #t)
    (lamp     colour: "#F2731A"  emits: #t)
-   (badge    colour: "#4DF2D9"  emits: #t))
+   (badge    colour: "#4DF2D9"  emits: #t)
+   (gibson   colour: "#B36BFF"  emits: #t))   ; C-GIBSON violet: the top floor, the root console
   walls: wall
   ceilings: ceiling
   trim: steel

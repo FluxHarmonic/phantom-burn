@@ -10,6 +10,12 @@
 ;;;   phantom-burn --floor-sheet FLOOR [OUT.svg]
 ;;;                                           the plan from above
 ;;;   phantom-burn --floor-time FLOOR [N]     compile N times, print the times
+;;;   phantom-burn --floor-replay FILE.collide SCRIPT
+;;;                                           gate 5's native leg: the trace, one line a tick
+;;;   phantom-burn --floor-reach FLOOR [--save-witness PATH]
+;;;                                           gate 3: the exit reached both ways with
+;;;                                           the tier, and not without it (witnesses
+;;;                                           replayed through the real walker)
 ;;;
 ;;; Exit status: 0 clean, 1 problems, 2 a usage or file error.
 
@@ -25,7 +31,11 @@
           (phantom floor sources)
           (phantom floor compile)
           (phantom floor sheet)
-          (phantom floor png))
+          (phantom floor png)
+          (phantom floor reach)
+          (phantom floor replay)
+          (phantom walker)
+          (phantom soup))
 
   (export floor-command? floor-main read-text-file)
 
@@ -121,6 +131,39 @@
               (say "min " (number->string (fold-left min 1e30 acc)) " ms over " (number->string n) " runs")
               0))))
 
+    ;; save: #f, or a path for the lobby route's witness script (gate 5's input).
+    (define (reach floor save)
+      (let* ((t0 (current-jiffy))
+             (cf (compile-floor floor read-text-file)))
+        (if (not (null? (compiled-floor-problems cf)))
+            (begin (report cf) (say "gate 3 not run: the floor has problems") 1)
+            (let* ((r (reach-check cf))
+                   (t1 (current-jiffy))
+                   (ps (cadr r)))
+              (for-each say (car r))
+              (for-each (lambda (p) (say (problem->string p))) ps)
+              (when (and save (caddr r))
+                (write-file-string save (caddr r))
+                (say "wrote the witness to " save))
+              (say floor ": gate 3 " (if (null? ps) "OK" (string-append (number->string (length ps)) " problems"))
+                   " in " (number->string (ms t0 t1)) " ms")
+              (if (null? ps) 0 1)))))
+
+    ;; Gate 5's native leg: a script replayed through the walker over the
+    ;; floor's PBC1 collision file (the bytes the page ships), one line per
+    ;; tick, as the web leg prints them.
+    (define (replay collide-path script-path)
+      (let* ((bytes (and (file-exists? collide-path) (read-file-bytes collide-path)))
+             (text (read-text-file script-path))
+             (script (and text (parse-script text))))
+        (cond ((not bytes) (say "SETUP-FAILED: no collision file " collide-path) 2)
+              ((not script) (say "SETUP-FAILED: " script-path " is not a replay script") 2)
+              (else
+               (let ((lines (replay-trace (pbc1->collision bytes) script TICK)))
+                 (for-each (lambda (l) (say "replay " l)) lines)
+                 (say "replay-done " (number->string (length lines)))
+                 0)))))
+
     (define (usage)
       (say "usage: phantom-burn --floor-check FLOOR... | --floor-compile FLOOR [--out DIR] |")
       (say "       --floor-sheet FLOOR [OUT.svg] | --floor-time FLOOR [N]")
@@ -136,6 +179,13 @@
                       (compile-to (car pos) (arg-after (cdr a) "--out" "build/floors")))
                      ((and (string=? cmd "--floor-sheet") (pair? pos))
                       (sheet (car pos) (and (pair? (cdr pos)) (cadr pos))))
+                     ((and (string=? cmd "--floor-reach") (member "--probe" a))
+                      (let* ((m (member "--probe" a)) (n (lambda (i) (string->number (list-ref m i)))))
+                        (for-each say (reach-probe (compile-floor (car pos) read-text-file) (n 1) (n 2) (n 3)))
+                        0))
+                     ((and (string=? cmd "--floor-reach") (pair? pos))
+                      (reach (car pos) (let ((m (member "--save-witness" a))) (and m (pair? (cdr m)) (cadr m)))))
+                     ((and (string=? cmd "--floor-replay") (= (length pos) 2)) (replay (car pos) (cadr pos)))
                      ((and (string=? cmd "--floor-time") (pair? pos))
                       (timing (car pos) (or (and (pair? (cdr pos)) (string->number (cadr pos))) 3)))
                      (else (usage)))))

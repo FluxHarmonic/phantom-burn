@@ -130,18 +130,13 @@
         (for-each
           (lambda (t)
             (when (memq (thing-kind t) '(desk cabinet prop))
-              (let* ((p (thing-field t 'at))
-                     (pr (prop-of c (thing-field t 'kind)))
-                     (rs (rooms-at c p)))
-                (cond ((not pr) #f)          ; reported by gate 1's references
-                      ((null? rs)
-                       (add-problem! c 1 (thing-line t) (string-append "the " (symbol->string (thing-kind t)) " at "
-                                                                       (fmt-pt p) " is in no room")))
-                      (else
-                       (let* ((r (car rs))
-                              (z (or (thing-field t 'z) (room-floor r))))
-                         (place-prop! c pr (floor-xform (px p) (py p) z (or (thing-field t 'facing) 0.0))
-                                      (room-index r) (thing-kind t) #t)))))))
+              (let ((pr (prop-of c (thing-field t 'kind))))
+                (when pr                     ; a missing prop is gate 1's references
+                  (let ((pl (resolve-placement c t pr)))
+                    (if (string? pl)
+                        (add-problem! c 1 (thing-line t) (string-append "the " (symbol->string (thing-kind t)) " " pl))
+                        (place-prop! c pr (floor-xform (car pl) (cadr pl) (caddr pl) (cadddr pl))
+                                     (list-ref pl 4) (thing-kind t) #t)))))))
           (floor-things fl))
         (for-each
           (lambda (t)
@@ -206,6 +201,80 @@
           (floor-circuits fl))))
 
     (define (growable->list g) (vector->list (growable-data g) 0 (growable-count g)))
+
+    ;; --- where a thing goes: the one position resolver ------------------------------
+    ;;
+    ;; Every floor prop's placement goes through here, so a new kind of anchor
+    ;; is one more case (the format's growth plan, src/phantom/floor/README.md).
+    ;; Returns (x y z facing room-index), or a string saying what is wrong.
+    ;;
+    ;;   at: (x y)                              world coordinates
+    ;;   in: ROOM against: WALL from: (END M)   back to the room's WALL (the edge
+    ;;                                          whose outward normal is nearest that
+    ;;                                          compass direction), its centre M
+    ;;                                          metres from the wall's END, facing
+    ;;                                          into the room
+    ;;   in: ROOM from: (corner N (dx dy))      from the room's Nth corner (0-based)
+    ;;   in: ROOM from: (centre (dx dy))        from the room's centroid
+    (define COMPASS '((north 0.0 1.0) (south 0.0 -1.0) (east 1.0 0.0) (west -1.0 0.0)))
+
+    (define (resolve-placement c t pr)
+      (let* ((at (thing-field t 'at))
+             (rname (thing-field t 'in))
+             (against (thing-field t 'against))
+             (from (thing-field t 'from))
+             (r (and rname (room-by-name c rname)))
+             (facing (thing-field t 'facing))
+             (z-of (lambda (room) (or (thing-field t 'z) (room-floor room)))))
+        (cond
+          ((and at (or rname against from)) "has at: and a room anchor; give one of them")
+          (at
+           (let ((rs (rooms-at c at)))
+             (if (null? rs)
+                 (string-append "at " (fmt-pt at) " is in no room")
+                 (list (px at) (py at) (z-of (car rs)) (or facing 0.0) (room-index (car rs))))))
+          ((not r) (if rname "names no room" "needs at:, or in: ROOM and from:"))
+          ((not from) "needs from: with in:")
+          (against
+           (let ((dir (assq against COMPASS)))
+             (cond ((not dir) "against: is north, south, east or west")
+                   ((not (assq (car from) COMPASS)) "against: needs from: (END M), END a compass side")
+                   (else (against-wall c r pr (cons (cadr dir) (caddr dir)) (car from) (cadr from) (z-of r))))))
+          ((eq? (car from) 'corner)
+           (let ((cs (room-corners r)) (k (cadr from)) (d (caddr from)))
+             (if (or (< k 0) (>= k (length cs)))
+                 (string-append "from: corner " (number->string k) " is not one of the room's "
+                                (number->string (length cs)) " corners")
+                 (let ((p (pt+ (list-ref cs k) d)))
+                   (list (px p) (py p) (z-of r) (or facing 0.0) (room-index r))))))
+          ((eq? (car from) 'centre)
+           (let ((p (pt+ (poly-centroid (room-corners r)) (cadr from))))
+             (list (px p) (py p) (z-of r) (or facing 0.0) (room-index r))))
+          (else "from: (END M) needs against: WALL"))))
+
+    ;; Back to the wall of room r whose outward normal is nearest dir, M metres
+    ;; from the wall's END (its end lying further toward END), facing in.
+    (define (against-wall c r pr dir end m z)
+      (let* ((cs (poly-ccw (room-corners r)))
+             (n (length cs))
+             (edges (map (lambda (i) (cons (list-ref cs i) (list-ref cs (modulo (+ i 1) n)))) (iota n)))
+             (outward (lambda (e) (let ((d (pt-norm (pt- (cdr e) (car e))))) (cons (py d) (- (px d))))))
+             (wall (fold-left (lambda (best e) (if (> (pt-dot (outward e) dir) (pt-dot (outward best) dir)) e best))
+                              (car edges) edges))
+             (ed (cdr (assq end COMPASS)))
+             (ev (cons (car ed) (cadr ed)))
+             (a (if (>= (pt-dot (car wall) ev) (pt-dot (cdr wall) ev)) (car wall) (cdr wall)))
+             (b (if (eq? a (car wall)) (cdr wall) (car wall)))
+             (len (pt-dist a b))
+             (out (outward wall))
+             (back (fold-left max 0.0 (map (lambda (pt) (cadddr (part-extent pt))) (prop-parts pr)))))
+        (if (or (< m 0.0) (> m len))
+            (string-append "from: " (num->str m) " m is off the " (num->str len) " m wall")
+            (let* ((p (pt- (pt+ a (pt* (pt- b a) (/ m len))) (pt* out (+ back 0.01))))
+                   ;; the prop's back (+y) points out of the room; whole degrees
+                   ;; stay exact (floor-xform's quarter turns use no libm)
+                   (deg (/ (round (* 1e6 (/ (* (atan (- (px out)) (py out)) 180.0) 3.141592653589793))) 1e6)))
+              (list (px p) (py p) z deg (room-index r))))))
 
     ;; --- ceiling panels ---------------------------------------------------------------------------
 

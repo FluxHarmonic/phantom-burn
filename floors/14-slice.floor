@@ -33,14 +33,14 @@
   lights: ((c1 level: 0.6) (c2 level: 0.8 panel: (16 10) needs: facilities) (c3 level: 0.3))
   things: ((lifts   in: lobby  along: ((0 1) (0 6))  count: 3)
            (guard   kind: patrol  route: ((2 2) (12.5 1.5) (20 16) (18 20))  waits: (3 0 2 0))
-           (desk    at: (18 18)  kind: office-desk)
-           (desk    at: (24 19)  kind: office-desk)
-           (cabinet at: (22.2 13.7)  kind: filing-cabinet  facing: 180)   ; under the hatch, to climb back up
+           (desk    in: office     from: (corner 0 (2 5))  kind: office-desk)     ; (18 18)
+           (desk    in: fm-office  from: (centre (0 0))    kind: office-desk)     ; (24 19)
+           (cabinet in: office     from: (corner 0 (6.2 0.7))  kind: filing-cabinet  facing: 180)   ; (22.2 13.7), under the hatch
            (badge   on-desk: (24 19)  tier: facilities))
   views: ((establishing  at: (1 1 1.6)      look: (14 10 3))
           (from-the-duct at: (19 10.5 3.4)  look: (22.2 13.7 2.7))
           ;; the Blender export's three views (floor-14-export/README.txt), for floor-shot
           (arrival       at: (1.3 1.3 1.6)  look: (10.0 7.2 2.2)   lens: 17)
           (overlook      at: (4.2 9.3 4.6)  look: (7.0 -26.0 1.0)  lens: 19)
-          (office        at: (20.5 12.2 1.6) look: (19.4 18.8 1.0) lens: 17))
+          (into-office   at: (20.5 12.2 1.6) look: (19.4 18.8 1.0) lens: 17))   ; the export's "office"
   start: (1 3))
