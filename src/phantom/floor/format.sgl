@@ -39,7 +39,7 @@
           opening opening? opening-kind opening-a opening-b opening-at opening-along
           opening-width opening-height opening-sill opening-head opening-reader opening-size
           opening-line
-          stair stair? stair-from stair-to stair-start stair-end stair-width stair-surface stair-line
+          stair stair? stair-from stair-to stair-start stair-end stair-width stair-surface stair-style stair-line
           circuit circuit? circuit-name circuit-level circuit-panel circuit-needs circuit-line
           thing thing? thing-kind thing-fields thing-line thing-field
           view view? view-name view-at view-look view-lens view-line
@@ -84,7 +84,7 @@
 
     (define-struct stair
       (from default: #f) (to default: #f) (start default: #f) (end default: #f)
-      (width default: 1.2) (surface default: #f) (line default: #f))
+      (width default: 1.2) (surface default: #f) (style default: 'solid) (line default: #f))
 
     (define-struct circuit
       (name default: #f) (level default: 1.0) (panel default: #f)
@@ -357,7 +357,7 @@
 
     (define STAIR-SPECS
       '((from symbol #t) (to symbol #t) (start point2 #t) (end point2 #t)
-        (width number #f) (surface symbol #f)))
+        (width number #f) (surface symbol #f) (style symbol #f)))
 
     (define CIRCUIT-SPECS
       '((level number #t) (panel point2 #f) (needs symbol #f)))
@@ -408,6 +408,7 @@
                                                      start: (get (car r) 'start) end: (get (car r) 'end)
                                                      width: (get (car r) 'width 1.2)
                                                      surface: (get (car r) 'surface)
+                                                     style: (get (car r) 'style 'solid)
                                                      line: line)
                                               (cdr r))))))
                    (circuits (entries (get al 'lights) path "lights:" #t
@@ -817,7 +818,10 @@
                                 (if (or (not (stair-surface s)) (memq (stair-surface s) surface-names)) '()
                                     (list (bad (stair-line s) (string-append "the stair: surface "
                                                                              (symbol->string (stair-surface s))
-                                                                             " is not declared"))))))
+                                                                             " is not declared"))))
+                                (if (memq (stair-style s) '(solid open)) '()
+                                    (list (bad (stair-line s) (string-append "the stair: style is solid or open, not "
+                                                                             (symbol->string (stair-style s))))))))
                       (floor-stairs fl)))
           ;; circuits: unique
           (let loop ((cs circuits) (seen '()) (acc '()))

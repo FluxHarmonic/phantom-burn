@@ -1,14 +1,16 @@
 #!/bin/sh
-# floor-shot [--web BUILD] [--src DIR] FLOOR [K...] - in-game shots of a
-# compiled floor's views, beside the Blender export's renders of the same
-# views (design section 7, "Review surfaces"; P0: "each floor-shot sits beside
-# the export's render").
+# floor-shot [--web BUILD] [--src DIR] [--query K=V&...] [--tag TAG] FLOOR [K...]
+# - in-game shots of a compiled floor's views, beside the Blender export's
+# renders of the same views (design section 7, "Review surfaces"; P0: "each
+# floor-shot sits beside the export's render").
 #
 #   scripts/floor-shot 14-slice            the three export views (0 1 2), native
 #   scripts/floor-shot 14-slice 0 3 6      views by the game's index
 #   scripts/floor-shot --web build/remote-web-SHA --src build/remote-out-SHA/build/floors 14-slice
 #                                          the same through the web build (headless
 #                                          Chrome), with a runner's compile
+#   ... --query dither=off --tag raw 14-slice   the page's query too (--web only);
+#                                          TAG goes into the file names
 #
 # Needs DIR/FLOOR.{sgm,sgm.json,collide} and textures (phantom-burn
 # --floor-compile floors/FLOOR.floor; DIR defaults to build/floors). The shots
@@ -32,11 +34,15 @@
 set -eu
 cd "$(dirname "$0")/.."
 WEB=""
+EXTRA=""
+TAG=""
 SRC=build/floors
 while [ $# -gt 0 ]; do
   case "$1" in
     --web) [ $# -ge 2 ] || { echo "SETUP-FAILED: --web needs a web build's directory"; exit 2; }; WEB="$2"; shift 2 ;;
     --src) [ $# -ge 2 ] || { echo "SETUP-FAILED: --src needs a directory"; exit 2; }; SRC="$2"; shift 2 ;;
+    --query) [ $# -ge 2 ] || { echo "SETUP-FAILED: --query needs k=v&..."; exit 2; }; EXTRA="&$2"; shift 2 ;;
+    --tag) [ $# -ge 2 ] || { echo "SETUP-FAILED: --tag needs a name"; exit 2; }; TAG="-$2"; shift 2 ;;
     *) break ;;
   esac
 done
@@ -46,6 +52,8 @@ FLOOR="$1"; shift
 case "$FLOOR" in
   ''|*[!a-z0-9-]*) echo "SETUP-FAILED: FLOOR is a floor's name (a-z, 0-9, -), not '$FLOOR'"; exit 2 ;;
 esac
+case "$TAG" in *[!a-z0-9.-]*) echo "SETUP-FAILED: --tag is a-z, 0-9, . and -"; exit 2 ;; esac
+[ -z "$EXTRA" ] || [ -n "$WEB" ] || { echo "SETUP-FAILED: --query needs --web (shot-native takes no query)"; exit 2; }
 [ $# -gt 0 ] || set -- 0 1 2
 for k in "$@"; do
   case "$k" in ''|*[!0-9]*) echo "SETUP-FAILED: K is a view's index (0, 1, ...), not '$k'"; exit 2 ;; esac
@@ -82,15 +90,15 @@ DIR="$ROOT/assets/floors/$FLOOR"
 mkdir -p build/floors/shots
 for k in "$@"; do
   if [ -z "$WEB" ]; then
-    out="build/floors/shots/$FLOOR-$k.png"
+    out="build/floors/shots/$FLOOR-$k$TAG.png"
     rm -f "$out"
     scripts/shot-native "$out" --floor "$DIR" --shot "$k" --hud 0 || { echo "SETUP-FAILED: shot-native failed on view $k"; exit 2; }
     scale="-filter point -resize 200%"
   else
-    out="build/floors/shots/$FLOOR-$k-web.png"
+    out="build/floors/shots/$FLOOR-$k-web$TAG.png"
     rm -f "$out"
     # ports of our own, so another worker's shot-web on the defaults cannot answer
-    node scripts/shot-web.mjs "$ROOT" "$out" --query "floor=$FLOOR&shot=$k&hud=0" --scale 2 --wait 2500 \
+    node scripts/shot-web.mjs "$ROOT" "$out" --query "floor=$FLOOR&shot=$k&hud=0$EXTRA" --scale 2 --wait 2500 \
       --port $((20000 + $$ % 10000)) --cdp $((30000 + $$ % 10000)) \
       || { echo "SETUP-FAILED: shot-web failed on view $k"; exit 2; }
     scale=""

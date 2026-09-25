@@ -29,7 +29,7 @@
    (hatch   between: (duct office)       at: (22.2 13.7))   ; 0.64 m square, square to the duct
    (window  in: lobby  along: ((1 0) (11 0))  sill: 0.2  head: 5.8)
    (exit    in: lobby  at: (3 10)  reader: facilities))       ; the stairwell door, under the mezzanine
-  stairs: ((from: lobby  to: mezzanine  start: (11 2)  end: (11 7)  width: 1.6))
+  stairs: ((from: lobby  to: mezzanine  start: (11 2)  end: (11 7)  width: 1.6  style: open))   ; treads between stringers, open underneath (the export's)
   lights: ((c1 level: 0.6) (c2 level: 0.8 panel: (16 10) needs: facilities) (c3 level: 0.3))
   things: ((lifts   in: lobby  along: ((0 1) (0 6))  count: 3)
            (guard   kind: patrol  route: ((2 2) (12.5 1.5) (20 16) (18 20))  waits: (3 0 2 0))

@@ -8,9 +8,11 @@ Coordinates everywhere are metres, **x east, y north, z up**, the output mesh in
 
 ```
 phantom-burn --floor-check FLOOR...          gates 1, 2 and 6; problems as FILE:LINE: message [gate N]
-phantom-burn --floor-compile FLOOR [--out DIR]
+phantom-burn --floor-compile FLOOR [--out DIR] [--city S R] [--ambient R G B]
                                               DIR/NAME.sgm, NAME.sgm.json, NAME.collide, tex-*.png
-                                              (DIR defaults to build/floors)
+                                              (DIR defaults to build/floors); the look lab:
+                                              --city STRENGTH RADIUS (default 0.55 9; 0 off)
+                                              and --ambient R G B (default 0.2 0.14 0.34)
 phantom-burn --floor-sheet FLOOR [OUT.svg]   the plan from above
 phantom-burn --floor-time FLOOR [N]          compile N times, print the stage times
 ```
@@ -68,7 +70,8 @@ In-process: `(compile-floor "floors/NAME.floor" read-text)` from `(phantom floor
                 [width: W] [height: H] [size: S]) 
              (window in: ROOM along: ((x y) (x y)) [sill: Z] [head: Z])
              (exit in: ROOM at: (x y) [reader: TIER]) ...)
-  stairs: ((from: LOWER to: UPPER start: (x y) end: (x y) [width: W] [surface: S]) ...)
+  stairs: ((from: LOWER to: UPPER start: (x y) end: (x y) [width: W] [surface: S]
+            [style: solid | open]) ...)
   lights: ((CIRCUIT level: L [panel: (x y)] [needs: TIER]) ...)
   things: ((lifts in: ROOM along: ((x y) (x y)) count: N [kind: PROP])
            (guard kind: patrol|post route: ((x y) ...) [waits: (s ...)])
@@ -132,7 +135,7 @@ A texture is 16 by 16 cells per half metre: `(texture NAME legend: (("c" "#RRGGB
 3. **Openings** become holes in the edges their rooms share.
 4. **Walls:** on each side of each edge, whatever air does not continue across the edge (into a linked room, or through a hole) is wall.
 5. **Floors and ceilings:** the bottom and top of each column.
-6. **Stairs** are flat steps of at most 0.17 m rise. **Rails** run along an open room's open edges, left open where a stair lands. **Frames** go round doors, arches, the exit and grates; windows get mullions, a sill and a head; walls get skirting.
+6. **Stairs** are flat steps of at most 0.17 m rise. A `solid` stair (the default) is a block per step, down to the floor. An `open` stair is the export's: 5 cm treads, 10 cm narrower than the stair with a 2 cm nosing and open risers, between two 12 cm steel stringers that start 0.3 m before the foot and end 0.1 m above the landing; the space under it is air (a crouched body fits under the treads above 0.95 m, a standing one above 1.8 m). **Rails** run along an open room's open edges, left open where a stair lands. **Frames** go round doors, arches, the exit and grates; windows get mullions, a sill and a head; walls get skirting.
 7. **Dressing:** the things' props, the lifts along their wall, the exit door, each circuit's switch panel, and ceiling light panels. Panels are the most interior spots of each lit ceiling, 3.5 m apart (4 m under ceilings over 4 m), 0.9 m from its edge. The city shines through windows.
 8. **Light:** per vertex, each circuit's light from its panels and lamps, occluded by the opaque collision triangles; the four strongest circuits are kept. A vertex only takes light from emitters in rooms its room can see (itself, rooms of one volume, rooms an opening joins), and each ray starts 2 cm off the vertex along its normal and 2 cm into its room off any wall line it sits on (walls have no thickness). An emitter belongs to the room with the highest floor whose air holds it.
 

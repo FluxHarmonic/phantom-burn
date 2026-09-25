@@ -38,7 +38,7 @@
   (export make-ctx build-architecture!
           ctx? ctx-floor ctx-legend ctx-props ctx-mats ctx-soup ctx-plan ctx-owners ctx-groups
           ctx-ivs ctx-cols ctx-problems ctx-emitters ctx-gedges ctx-holes ctx-landings ctx-rails
-          ctx-footprints ctx-placed ctx-tags ctx-stair-boxes
+          ctx-footprints ctx-placed ctx-tags ctx-stair-boxes ctx-look look-city CITY-DEFAULT
           ctx-batches add-problem! batch-for mat tag-of room-by-name room-id
           face-ivs side-normal side-right side-faces iv-of edge-point
           edges-at-point pair-side owner-room-of fmt-pt num->str
@@ -49,6 +49,9 @@
     (define DOOR-W 1.0)
     (define DOOR-H 2.1)
     (define STEP-MAX 0.17)       ; the tallest riser a stair may have
+    (define TREAD 0.05)          ; an open stair's tread thickness (the export's)
+    (define NOSING 0.02)         ; how far a tread runs over the next one's front
+    (define STRINGER-IN 0.05)    ; treads stop this far inside the stair's width each side
     (define RAIL-H 1.0)
     (define LANDING-TOL 0.06)    ; gate 6 lands a stair within 5 cm of an open edge; its rail gives way within this
     (define FRAME-W 0.08)
@@ -66,12 +69,13 @@
       (rails default: #f)            ; growable of #(p q z line) rails, generated and declared
       (footprints default: #f)       ; growable of (label poly) for props and stairs
       (placed default: #f)           ; growable of #(prop xform top-z room)
-      (stair-boxes default: #f)      ; growable of (poly ztop) per step, for gate checks
-      (tags default: '()))           ; ((name noise sight) ...), a surface tag's index is its position
+      (stair-boxes default: #f)      ; growable of (poly ztop zbottom) per step or tread, for gate checks
+      (tags default: '())            ; ((name noise sight) ...), a surface tag's index is its position
+      (look default: '()))           ; look-lab settings: ((city STRENGTH RADIUS) (ambient R G B)), each optional
 
     ;; --- the context --------------------------------------------------------------------
 
-    (define (make-ctx fl lg props)
+    (define (make-ctx fl lg props . opt)
       (let* ((mats (map (lambda (m) (cons (material-name m) (make-matinfo m))) (legend-materials lg)))
              (tags (append (map (lambda (s) (list (surface-name s) (surface-noise s) 'blocks)) (legend-surfaces lg))
                            (list (list 'wall #f 'blocks) (list 'ceiling #f 'blocks) (list 'glass #f 'passes)
@@ -80,7 +84,8 @@
              batches: (vector '()) soup: (make-soup)
              problems: (make-growable 16) emitters: (make-growable 32) gedges: (make-growable 16)
              landings: (make-growable 4) rails: (make-growable 8) footprints: (make-growable 16)
-             placed: (make-growable 16) stair-boxes: (make-growable 32) tags: tags)))
+             placed: (make-growable 16) stair-boxes: (make-growable 32) tags: tags
+             look: (if (pair? opt) (car opt) (quote ())))))
 
     (define (add-problem! c gate line msg)
       (growable-push! (ctx-problems c)
@@ -431,17 +436,25 @@
     (define CITY-OUT 1.5)
     (define CITY-RGB (list (/ 255 255.0) (/ 89 255.0) (/ 217 255.0)))   ; #FF59D9
 
+    (define CITY-DEFAULT '(0.55 9.0))   ; (strength radius)
+
+    ;; The city light's (strength radius): the look-lab setting, or the default.
+    (define (look-city c)
+      (let ((l (assq 'city (ctx-look c)))) (if l (cdr l) CITY-DEFAULT)))
+
     (define (city-light! c e side t0 t1 z0 z1)
       (let* ((n (side-normal e side))
              (len (- t1 t0))
              (k (max 1 (exact (round (/ len CITY-STEP)))))
-             (z (+ z0 (* 0.6 (- z1 z0)))))
-        (for-each (lambda (i)
-                    (let ((p (pt- (edge-point e (+ t0 (* len (/ (+ i 0.5) k)))) (pt* n CITY-OUT))))
-                      (growable-push! (ctx-emitters c)
-                                      (vector (px p) (py p) z 9.0 0.55 'city
-                                              (car CITY-RGB) (cadr CITY-RGB) (caddr CITY-RGB) #f))))
-                  (iota k))))
+             (z (+ z0 (* 0.6 (- z1 z0))))
+             (strength (car (look-city c))) (radius (cadr (look-city c))))
+        (when (> strength 0.0)
+          (for-each (lambda (i)
+                      (let ((p (pt- (edge-point e (+ t0 (* len (/ (+ i 0.5) k)))) (pt* n CITY-OUT))))
+                        (growable-push! (ctx-emitters c)
+                                        (vector (px p) (py p) z radius strength 'city
+                                                (car CITY-RGB) (cadr CITY-RGB) (caddr CITY-RGB) #f))))
+                    (iota k)))))
 
     ;; Along the line: the local frame for trim at s, on the line, facing
     ;; line-side's normal.
@@ -735,6 +748,25 @@
                    (add-problem! c 6 line (string-append "the stair from " (symbol->string (room-name lower)) " to "
                                                          (symbol->string (room-name upper)) " does not rise")))
                   ((< len 0.5) (add-problem! c 6 line "the stair is shorter than half a metre"))
+                  ((eq? (stair-style s) 'open)
+                   ;; the export's stair: treads with open risers between two
+                   ;; sloped steel stringers, open underneath
+                   (let ((tw (- w (* 2 STRINGER-IN))))
+                     (let loop ((k 1))
+                       (when (<= k n)
+                         (let* ((y0 (* run (- k 1)))
+                                (y1 (if (= k n) len (+ (* run k) NOSING)))
+                                (h (* rise (/ k n)))
+                                (cc (v3 0 (* 0.5 (+ y0 y1)) (+ z0 (- h (* 0.5 TREAD)))))
+                                (sz (v3 tw (- y1 y0) TREAD)))
+                           (emit-box! b mi xf cc sz id)
+                           (emit-box-soup! so xf cc sz tag id)
+                           (growable-push! (ctx-stair-boxes c)
+                                           (list (list (corner (* -0.5 tw) y0) (corner (* 0.5 tw) y0)
+                                                       (corner (* 0.5 tw) y1) (corner (* -0.5 tw) y1))
+                                                 (+ z0 h) (+ z0 (- h TREAD)))))
+                         (loop (+ k 1))))
+                     (emit-stringers! c s p d side w len rise z0 id)))
                   (else
                    ;; step k (1..n): its box from the floor to its tread, full width
                    (let loop ((k 1))
@@ -748,15 +780,49 @@
                          (growable-push! (ctx-stair-boxes c)
                                          (list (list (corner (* -0.5 w) y0) (corner (* 0.5 w) y0)
                                                      (corner (* 0.5 w) y1) (corner (* -0.5 w) y1))
-                                               (+ z0 h))))
-                       (loop (+ k 1))))
+                                               (+ z0 h) z0)))
+                       (loop (+ k 1))))))
+            (when (and (> rise 0.0) (>= len 0.5))
                    (growable-push! (ctx-footprints c)
                                    (list "the stairs" (list (corner (* -0.5 w) 0.0) (corner (* 0.5 w) 0.0)
                                                             (corner (* 0.5 w) len) (corner (* -0.5 w) len))))
                    (growable-push! (ctx-landings c) (list (corner (* -0.5 w) len) (corner (* 0.5 w) len) line
                                                           (room-index upper) (room-index lower) d))
                    (add-gedge! c 'stairs (room-name lower) (room-name upper) (pt* (pt+ p q) 0.5) w
-                               z0 (room-floor upper) #f line)))))))
+                               z0 (room-floor upper) #f line))))))
+
+    ;; An open stair's two stringers, as the export builds them: steel boards
+    ;; 12 cm thick straddling the stair's sides, their profile in (along, up)
+    ;; from 0.3 m before the stair's start to its landing: on the floor
+    ;; there, 0.2 m tall at the foot, and 0.25 m deep along the slope, ending
+    ;; 0.1 m above the upper floor.
+    (define (emit-stringers! c s p d side w len rise z0 id)
+      (let* ((m (legend-default (ctx-legend c) 'frames))
+             (bt (batch-for c m)) (mi (mat c m))
+             (so (ctx-soup c)) (tag (tag-of c 'trim))
+             (profile (list (cons -0.3 0.0) (cons 0.2 0.0) (cons len (- rise 0.15))
+                            (cons len (+ rise 0.1)) (cons -0.3 0.2)))   ; counter-clockwise in (along, up)
+             (P (lambda (x yz) (let ((q (pt+ p (pt+ (pt* side x) (pt* d (car yz))))))
+                                 (v3 (px q) (py q) (+ z0 (cdr yz))))))
+             (emit (lambda (ps n) (emit-poly! bt mi ps n id) (emit-poly-soup! so ps n tag id #f))))
+        (for-each
+          (lambda (xs)
+            (let ((x0 (car xs)) (x1 (cdr xs)))
+              ;; the two flat sides
+              (emit (map (lambda (yz) (P x0 yz)) profile) (v3 (- (px side)) (- (py side)) 0))
+              (emit (map (lambda (yz) (P x1 yz)) profile) (v3 (px side) (py side) 0))
+              ;; the edges: each outward normal is (dz, -dy) in (along, up)
+              (let loop ((a profile))
+                (when (pair? a)
+                  (let* ((i (car a)) (j (if (null? (cdr a)) (car profile) (cadr a)))
+                         (dy (- (car j) (car i))) (dz (- (cdr j) (cdr i)))
+                         (l (sqrt (+ (* dy dy) (* dz dz))))
+                         (ny (/ dz l)) (nz (/ (- dy) l)))
+                    (emit (list (P x0 i) (P x1 i) (P x1 j) (P x0 j))
+                          (v3 (* (px d) ny) (* (py d) ny) nz))
+                    (loop (cdr a)))))))
+          (list (cons (- (* -0.5 w) 0.08) (+ (* -0.5 w) 0.04))
+                (cons (- (* 0.5 w) 0.04) (+ (* 0.5 w) 0.08))))))
 
     ;; --- rails --------------------------------------------------------------------------------------------
 
