@@ -1,0 +1,29 @@
+;;; (phantom shell web) - The browser shell: one frame per
+;;; requestAnimationFrame dispatch.
+
+(define-library (phantom shell web)
+  (import (sigil core)
+          (sigil graphics)
+          (sigil browser gles3))
+
+  (export web-main web-dispatch)
+
+  (begin
+
+    (define (web-main)
+      (unless (gles3-use-canvas "#stage")
+        (error "phantom-burn: no WebGL2 context for #stage"))
+      (gles3-resize-to-display)
+      (gfx-setup)
+      (gles3-start-loop "phantom-burn-tick")
+      (display "phantom-burn: ready") (newline)
+      0)
+
+    (define (web-dispatch type payload)
+      (when (string=? type "frame")
+        (gles3-resize-to-display)
+        (begin-frame)
+        ;; C-BG, Crash's violet-black
+        (clear-screen (/ 13 255) (/ 10 255) (/ 26 255))
+        (end-frame))
+      0)))

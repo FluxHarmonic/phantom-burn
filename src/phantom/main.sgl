@@ -1,0 +1,24 @@
+;;; (phantom main) - The entry, and the seam between the two targets:
+;;; (phantom shell web) on the web config, (phantom shell native) otherwise.
+;;; (sigil core) is imported here so a wasm build boots (t-8ddc01).
+
+(define-library (phantom main)
+  (import (sigil core))
+  (cond-expand
+    (wasm (import (phantom shell web)))
+    (else (import (phantom shell native))))
+
+  (export main sigil-web-dispatch-event)
+
+  (begin
+    (cond-expand
+      (wasm
+       (define (main . args)
+         (web-main))
+       (define (sigil-web-dispatch-event type payload)
+         (web-dispatch type payload)))
+      (else
+       (define (main . args)
+         (apply native-main args))
+       (define (sigil-web-dispatch-event type payload)
+         0)))))

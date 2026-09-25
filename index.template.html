@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#000000">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Phantom Burn</title>
+  <link rel="icon" href="data:,">
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+                 overscroll-behavior: none; -webkit-text-size-adjust: 100%; }
+    #stage { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh;
+             display: block; touch-action: none; user-select: none;
+             -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
+    #status { position: fixed; left: 8px; bottom: 8px; color: #aab; font: 13px ui-monospace, monospace; }
+    #status:empty, #status [data-sigil-booting] { display: none; }
+  </style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+  <div id="status"></div>
+  <!--sigil:app-->
+</body>
+</html>

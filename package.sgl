@@ -1,0 +1,85 @@
+;;; Phantom Burn - a first-person stealth and hacking game in Crash The
+;;; Stack's world: one runner, one corporate tower, climbed floor by floor.
+;;;
+;;; One source tree, two targets, Harkfell's shape: (phantom main) is the
+;;; seam that picks the shell, (phantom shell native) over sigil-desktop for
+;;; the dev/release configs and (phantom shell web) over the browser's
+;;; requestAnimationFrame for the web config. The 3D path is sigil-graphics'
+;;; (0.12), the maths sigil-geometry's.
+;;;
+;;; Who owns what (P0): src/phantom/floor/, floors/ and props/ are the floor
+;;; compiler's; the rest of src/phantom/ is the game shell's; sketchbook/ is
+;;; the S0 sound sketchbook, a package of its own.
+;;;
+;;;   scripts/dev sigil deps install
+;;;   scripts/dev sigil build                       native (dev: bytecode)
+;;;   scripts/dev sigil build --config release      native, what you play
+;;;   scripts/dev sigil build --config web          browser (manifest has binaryen)
+
+(define sigil-repo "codeberg:sigil/sigil")
+
+(package
+  name: "phantom-burn"
+  version: "0.0.1"
+  sigil: "0.22.7"
+  description: "A first-person stealth and hacking game in Crash The Stack's world"
+  license: "GPL-3.0-or-later"
+  authors: (list "David Wilson <david@daviwil.com>")
+
+  entry: '(phantom main)
+  bundle-name: "phantom-burn"
+
+  configs: (list
+    (config
+      name: 'dev
+      output-dir: "build/dev"
+      debug?: #t
+      optimize: 0
+      bundle?: #t)
+    (config
+      name: 'release
+      output-dir: "build/release"
+      debug?: #f
+      optimize: 2
+      backend: 'native
+      bundle?: #t)
+    ;; wasm32-wasi through zig, native codegen; the shell drives one frame
+    ;; per requestAnimationFrame dispatch (Harkfell's web config).
+    (config
+      name: 'web
+      output-dir: "build/web"
+      toolchain: 'zig
+      target: "wasm32-wasi"
+      backend: 'native
+      debug?: #f
+      optimize: 2
+      bundle?: #t
+      features: '(web wasm graphics)))
+
+  dependencies: (list
+    ;; Window, keyboard and cursor capture (GLFW); native only.
+    (from-git url: "codeberg:sigil/sigil-app" name: "sigil-desktop" version: "^0.12.0" configs: '(dev release))
+    ;; Drawing, 2D and the 3D path, both targets.
+    (from-git url: "codeberg:sigil/sigil-graphics" version: "^0.12.0")
+    ;; vec/mat/quat as float32 bytevectors, the camera, rays.
+    (from-git url: "codeberg:sigil/sigil-geometry" version: "^0.1.0")
+    ;; Web only: the wasm runtime and loader, the WebGL2 bridge and app
+    ;; shell, and the browser helpers.
+    (from-git url: sigil-repo package: "sigil-wasm-runtime" version: ">=0.22.7" configs: '(web))
+    (from-git url: sigil-repo package: "sigil-wasm-gles3" version: ">=0.22.7" configs: '(web))
+    (from-git url: sigil-repo package: "sigil-browser" version: ">=0.22.7" configs: '(web)))
+
+  dev-dependencies: (list
+    (from-git url: sigil-repo package: "sigil-test" version: ">=0.22.7")
+    (from-git url: sigil-repo package: "sigil-test-runner" version: ">=0.22.7"))
+
+  tasks: (list
+    (task
+      name: 'build
+      description: "Compile the game (and, on the web config, link the browser app)"
+      steps: (list
+        (compile-sigil-modules sources: "src/**/*.sgl")
+        (lambda (ctx)
+          (if (memq (target-os ctx) '(wasm wasi))
+              ((link-web-application name: "phantom-burn" html-mount-id: "status") ctx)
+              ctx))))))

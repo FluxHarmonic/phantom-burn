@@ -1,0 +1,40 @@
+;;; (phantom shell native) - The desktop window.
+;;;
+;;;   phantom-burn [--size WxH] [--frames N]
+
+(define-library (phantom shell native)
+  (import (sigil core)
+          (sigil process)
+          (sigil desktop)
+          (sigil graphics))
+
+  (export native-main)
+
+  (begin
+
+    (define (arg-value args flag default)
+      (cond ((null? args) default)
+            ((and (string=? (car args) flag) (pair? (cdr args))) (cadr args))
+            (else (arg-value (cdr args) flag default))))
+
+    (define (game-loop frames)
+      (lambda ()
+        (gfx-setup)
+        (display "phantom-burn: ready") (newline)
+        (let loop ((n 0))
+          (wait-frame)
+          (begin-frame)
+          ;; C-BG, Crash's violet-black
+          (clear-screen (/ 13 255) (/ 10 255) (/ 26 255))
+          (end-frame)
+          (cond ((key-pressed? 'escape) (request-quit))
+                ((quit-requested?) #t)
+                ((and frames (>= n frames)) (request-quit))
+                (else (loop (+ n 1)))))
+        (gfx-shutdown)))
+
+    (define (native-main . _args)
+      (let* ((args (cdr (command-line)))
+             (frames (string->number (arg-value args "--frames" "none"))))
+        (run-game "Phantom Burn" 1440 810 (game-loop frames))
+        0))))
