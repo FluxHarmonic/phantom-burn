@@ -1,0 +1,214 @@
+;;; S1's sound (tasks/phantom-burn-s1-sound): (phantom sound) and its parts,
+;;; headless. Run from the repo root (it reads assets/tunes/track-low-embers.cts).
+;;;
+;;; The acceptance: a step event produces the right sample; the music's
+;;; section follows the guards' awareness; a session renders byte-identically
+;;; twice. And the pure parts exactly: the step tracker, the space, the rule,
+;;; the stings, the mixer.
+
+(import (sigil test)
+        (sigil math)
+        (sigil fs)
+        (phantom sound logic)
+        (phantom sound bank)
+        (phantom sound mix)
+        (phantom sound))
+
+(define RATE 32000)
+(define (loader name)
+  (and (string=? name MUSIC-TUNE) (read-file-string "assets/tunes/track-low-embers.cts")))
+
+(define (f32 bv i) (bytevector-ieee-single-ref bv (* 4 i) 'little))
+(define (f32! bv i x) (bytevector-ieee-single-set! bv (* 4 i) x 'little))
+(define (near? a b eps) (< (abs (- a b)) eps))
+
+(define (rendered-bank)
+  (let ((b (make-bank RATE)))
+    (let loop () (unless (bank-render! b 65536) (loop)))
+    b))
+
+(define (rms bv)
+  (let ((n (quotient (bytevector-length bv) 4)))
+    (let loop ((i 0) (acc 0.0))
+      (if (>= i n) (sqrt (/ acc (max 1 n))) (loop (+ i 1) (+ acc (* (f32 bv i) (f32 bv i))))))))
+
+;; --- the pure parts --------------------------------------------------------------
+
+(test-group "steps"
+  (test "the gait comes from speed and crouch"
+    (assert-equal 'sneak (gait-for 1.1 #f))
+    (assert-equal 'walk (gait-for 2.4 #f))
+    (assert-equal 'run (gait-for 4.4 #f))
+    (assert-equal 'sneak (gait-for 4.4 #t)))
+  (test "starting to walk, the first heel comes after 40% of a stride, its toe 80 ms later"
+    (let ((st (make-steps)))
+      (assert-equal '() (steps-advance! st 0.45 (/ 1 60.0) 'tile 'walk))
+      (assert-equal '((heel tile walk left)) (steps-advance! st 0.1 (/ 1 60.0) 'tile 'walk))
+      (assert-equal '() (steps-advance! st 0.04 0.05 'tile 'walk))
+      (assert-equal '((toe tile walk left)) (steps-advance! st 0.04 0.05 'tile 'walk))))
+  (test "a stride later, the other foot"
+    (let ((st (make-steps)))
+      (steps-advance! st 0.6 (/ 1 60.0) 'tile 'walk)
+      (steps-advance! st 0.0 0.1 'tile 'walk)
+      (assert-equal '((heel carpet walk right)) (steps-advance! st 1.248 (/ 1 60.0) 'carpet 'walk))))
+  (test "standing still makes no steps, and a pending toe still lands"
+    (let ((st (make-steps)))
+      (steps-advance! st 0.6 (/ 1 60.0) 'tile 'sneak)
+      (assert-equal '() (steps-advance! st 0.0 0.1 'tile 'sneak))
+      (assert-equal '((toe tile sneak left)) (steps-advance! st 0.0 0.1 'tile 'sneak))
+      (assert-equal '() (steps-advance! st 0.0 1.0 'tile 'sneak)))))
+
+(test-group "space"
+  (test "a guard 4 m to your right: half the gain, panned 0.6 right"
+    (let ((sp (sound-space 0.0 -4.0 0.0 0.0 0.0)))
+      (assert-true (near? (car sp) 0.5 1e-9))
+      (assert-true (near? (cdr sp) 0.6 1e-9))))
+  (test "to your left, panned left; ahead, centred; within 2 m, full gain"
+    (assert-true (near? (cdr (sound-space 0.0 4.0 0.0 0.0 0.0)) -0.6 1e-9))
+    (assert-true (near? (cdr (sound-space 5.0 0.0 0.0 0.0 0.0)) 0.0 1e-9))
+    (assert-true (near? (car (sound-space 1.0 1.0 0.0 0.0 0.0)) 1.0 1e-9)))
+  (test "equal power: centre is 1 a side, hard right is 0 left"
+    (let ((c (pan-gains 0.0)) (r (pan-gains 1.0)))
+      (assert-true (near? (car c) 1.0 1e-9))
+      (assert-true (near? (cdr c) 1.0 1e-9))
+      (assert-true (near? (car r) 0.0 1e-9)))))
+
+(test-group "the music rule"
+  (test "tense while a guard searches, calm CALM-AFTER-S after the last one stops"
+    (let ((r (make-music-rule)))
+      (assert-equal 'calm (music-rule-want! r '(0 1) 0.1))
+      (assert-equal 'tense (music-rule-want! r '(0 2) 0.1))
+      (assert-equal 'tense (music-rule-want! r '(1 0) 3.9))
+      (assert-equal 'tense (music-rule-want! r '(3) 0.1))
+      (assert-equal 'tense (music-rule-want! r '(0) 3.9))
+      (assert-equal 'calm (music-rule-want! r '(0) 0.2)))))
+
+(test-group "stings"
+  (test "? on first notice, THERE on reaching the hunt, nothing on the way down"
+    (assert-equal '? (stings-for 0 1))
+    (assert-equal '? (stings-for 0 2))
+    (assert-equal 'there (stings-for 2 3))
+    (assert-equal 'there (stings-for 0 3))
+    (assert-equal #f (stings-for 2 1))
+    (assert-equal #f (stings-for 1 2))))
+
+(test-group "the mixer"
+  (test "a voice at gain 0.5, centred, is its sample times 0.5 on both sides, then ends"
+    (let ((m (make-mixer)) (s (make-bytevector 16 0)) (out (make-bytevector (* 8 8) 0)))
+      (for-each (lambda (i x) (f32! s i x)) '(0 1 2 3) '(0.5 -0.25 1.0 0.125))
+      (mixer-play! m s 0.5 0.0)
+      (mixer-render! m out 8)
+      (assert-true (near? (f32 out 0) 0.25 1e-7))
+      (assert-true (near? (f32 out 1) 0.25 1e-7))
+      (assert-true (near? (f32 out 4) 0.5 1e-7))
+      (assert-true (near? (f32 out 8) 0.0 1e-9))
+      (assert-equal 0 (mixer-voices m))))
+  (test "two voices sum; past MAX-VOICES the oldest is replaced"
+    (let ((m (make-mixer)) (s (make-bytevector 4 0)) (out (make-bytevector 8 0)))
+      (f32! s 0 0.25)
+      (mixer-play! m s 1.0 0.0) (mixer-play! m s 1.0 0.0)
+      (mixer-render! m out 1)
+      (assert-true (near? (f32 out 0) 0.5 1e-7))
+      (let loop ((i 0)) (when (< i (+ MAX-VOICES 3)) (mixer-play! m s 1.0 0.0) (loop (+ i 1))))
+      (assert-equal MAX-VOICES (mixer-voices m)))))
+
+;; --- the bank ------------------------------------------------------------------------
+
+(define BANK-A (rendered-bank))
+
+(test-group "the bank"
+  (test "renders byte-identically twice"
+    (let ((b (rendered-bank)))
+      (assert-true (equal? (bank-sample BANK-A '(step tile heel 0)) (bank-sample b '(step tile heel 0))))
+      (assert-true (equal? (vector-ref BANK-A 2) (vector-ref b 2)))))
+  (test "every sample sounds (its level is above -50 dBFS)"
+    (for-each (lambda (slot)
+                (let ((r (rms (bank-sample BANK-A (car slot)))))
+                  (unless (> r 0.00316) (display (car slot)) (display " is silent\n"))
+                  (assert-true (> r 0.00316))))
+              (bank-slots)))
+  (test "a muffled guard step is darker than a clear one (less of it changes sample to sample)"
+    (let* ((diff (lambda (bv) (let ((n (quotient (bytevector-length bv) 4)))
+                                (let loop ((i 1) (acc 0.0) (all 0.0))
+                                  (if (>= i n) (/ acc (max all 1e-12))
+                                      (loop (+ i 1) (+ acc (let ((d (- (f32 bv i) (f32 bv (- i 1))))) (* d d)))
+                                            (+ all (* (f32 bv i) (f32 bv i)))))))))
+           (clear (diff (bank-sample BANK-A '(guard clear 0))))
+           (muffled (diff (bank-sample BANK-A '(guard muffled 0)))))
+      (assert-true (< muffled (* 0.3 clear))))))
+
+;; --- the facade, headless --------------------------------------------------------------
+
+(define (ready-sound)
+  (let ((s (make-sound RATE loader #t)))
+    (let loop () (unless (bank-ready? (sound-bank s)) (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0 0.0 'tile 0.0 #f) '()) (loop)))
+    (sound-start! s)
+    s))
+
+(test-group "a step event"
+  (test "walking on tile, a heel plays that bank sample, at its gain, centred"
+    (let* ((s (ready-sound))
+           (_ (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0 0.6 'tile 2.4 #f) '()))
+           (ev (sound-last-events s)))
+      (assert-equal 1 (length ev))
+      (let* ((e (car ev)) (key (car e)) (gain (cadr e))
+             (sample (bank-sample (sound-bank s) key))
+             (out (make-bytevector (* 8 512) 0)))
+        (assert-equal '(step tile heel) (list (car key) (cadr key) (caddr key)))
+        (assert-true (< 0.4 gain 0.6))
+        (mixer-render! (sound-mixer s) out 512)
+        (let ((want (make-bytevector 4 0)) (ok #t))
+          (let loop ((i 0))
+            (when (< i 512)
+              ;; the mixer's own steps: (gain x the centre's pan gain) x the sample
+              (f32! want 0 (* (* gain (car (pan-gains 0.0))) (f32 sample i)))
+              (unless (and (= (f32 out (* 2 i)) (f32 want 0)) (= (f32 out (+ 1 (* 2 i))) (f32 want 0))) (set! ok #f))
+              (loop (+ i 1))))
+          (assert-true ok)))))
+  (test "on the duct, the grate's metal at half gain; a guard through a wall, the muffled step, panned"
+    (let* ((s (ready-sound))
+           (_ (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0 0.6 'duct 1.1 #t) '()))
+           (duct (car (sound-last-events s)))
+           (_ (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0 0.0 'tile 0.0 #f) (list (list 0.0 -4.0 0.5 0 #t))))
+           (g (car (sound-last-events s))))
+      (assert-equal 'grate (cadr (car duct)))
+      (assert-true (< (cadr duct) 0.12))
+      (assert-equal '(guard muffled) (list (car (car g)) (cadr (car g))))
+      (assert-true (near? (caddr g) 0.6 1e-9)))))
+
+(test-group "the music follows the guards"
+  (test "a guard searching runs the fill into tense; 4 s after he stops, calm again"
+    (let* ((s (ready-sound)) (out (make-bytevector (* 8 533) 0))
+           (frames (lambda (k states)
+                     (let loop ((i 0))
+                       (when (< i k)
+                         (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0 0.0 'tile 0.0 #f)
+                                       (map (lambda (st) (list 20.0 20.0 0.0 st #f)) states))
+                         (sound-render! s out 533)
+                         (loop (+ i 1)))))))
+      (frames 120 '(0))
+      (assert-equal 'calm (sound-section s))
+      (frames 240 '(2))
+      (assert-true (memq (sound-section s) '(fill tense)))
+      (frames 900 '(2))
+      (assert-equal 'tense (sound-section s))
+      (frames 180 '(0))
+      (assert-equal 'tense (sound-section s))
+      (frames 300 '(0))
+      (assert-equal 'calm (sound-section s)))))
+
+(test-group "byte-identical"
+  (test "a scripted session renders the same bytes twice"
+    (let* ((run (lambda ()
+                  (let* ((s (ready-sound)) (out (make-bytevector (* 8 533) 0)) (acc '()))
+                    (let loop ((i 0))
+                      (when (< i 360)
+                        (sound-frame! s (/ 1 60.0) (list 0.0 0.0 (* 0.01 i) 0.04 (if (< i 180) 'carpet 'marble) 2.4 #f)
+                                      (list (list 6.0 (- 3.0 (* 0.02 i)) 0.022 (if (< i 200) 1 3) (< i 120))))
+                        (sound-render! s out 533)
+                        (set! acc (cons (bytevector-copy out) acc))
+                        (loop (+ i 1))))
+                    (apply bytevector-append (reverse acc)))))
+           (a (run)) (b (run)))
+      (assert-true (> (rms a) 0.001))
+      (assert-true (equal? a b)))))

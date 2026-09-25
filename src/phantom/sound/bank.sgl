@@ -1,0 +1,207 @@
+;;; (phantom sound bank) - Every short sound the game plays, rendered once
+;;;
+;;; S1. David's phone (S0 bench, 2026-09-25) pays ~2 ms a frame for each motif
+;;; player even when it is silent, so the game does not play a footstep on a
+;;; player: it renders every short sound ONCE, on one player, into a bank of
+;;; mono samples, and a small mixer plays them. The bank is one generated tune
+;;; with a slot per sample (SLOT-S seconds each); rendering it and cutting it
+;;; at the slot boundaries gives the samples, the same bytes every time.
+;;;
+;;; What is in it (the patches COPIED from Phantom Burn's sketchbook,
+;;; sketchbook/src/sketchbook/compose.sgl, the second version David heard:
+;;; copy now, centralize later):
+;;;   (step SURFACE heel K) K = 0 1 2   (step SURFACE toe K) K = 0 1
+;;;     SURFACE: carpet tile marble grate raised (the grate's heel carries its rattle)
+;;;   (guard clear K) (guard muffled K)  K = 0 1 2   the guard's boots, the first tile
+;;;     patch David liked, and through a wall
+;;;   (sting ?) (sting there)                           a guard noticing, a guard hunting
+;;; Dry (no bus reverb): David asked for dry and close.
+;;;
+;;;   (bank-tune-text)       the bank's tune, as text
+;;;   (bank-slots)           ((key . slot) ...)
+;;;   (make-bank rate)       a bank being rendered; (bank-render! b frames) renders up
+;;;                          to that many frames and answers #t when complete
+;;;   (bank-sample b key)    the key's mono f32 bytevector, or #f until rendered
+;;;   (bank-ready? b)
+
+(define-library (phantom sound bank)
+  (import (sigil core)
+          (only (sigil list) list-sort)
+          (sigil math)
+          (sigil string)
+          (motif tune)
+          (motif tune player))
+  (export bank-tune-text bank-slots make-bank bank-render! bank-sample bank-ready? bank-rate
+          SLOT-S BANK-SURFACES)
+  (begin
+    (define SLOT-S 0.6)
+    (define SLOT-ROWS 30)                 ; tempo 125, speed 1: a row is 20 ms
+    (define BANK-SURFACES '(carpet tile marble grate raised))
+
+    ;; (surface heel-patch heel-layers toe-patch toe-layers rattle-patch heel-notes)
+    (define SURFACES
+      '((carpet "(chip-noise osc-amp: 0.6 cutoff: 1500 hp: 300 attack: 0.008 decay: 0.08 sustain: 0 release: 0.05)"
+                "((chip-noise osc-amp: 0.5 cutoff: 4000 hp: 1800 attack: 0.004 decay: 0.035 sustain: 0 release: 0.03 octave: 0 volume: 0.3))"
+                #f #f #f ("C-5" "C-5" "C-5"))
+        (tile "(chip-noise osc-amp: 0.6 cutoff: 6500 hp: 900 attack: 0.003 decay: 0.03 sustain: 0 release: 0.03)"
+              "((chip-noise osc-amp: 0.5 cutoff: 1600 hp: 350 attack: 0.004 decay: 0.045 sustain: 0 release: 0.03 octave: 0 volume: 0.5))"
+              "(chip-noise osc-amp: 0.4 cutoff: 9000 hp: 2500 attack: 0.008 decay: 0.06 sustain: 0 release: 0.05)" #f #f ("C-5" "C-5" "C-5"))
+        (marble "(chip-noise osc-amp: 0.7 cutoff: 10000 hp: 1600 attack: 0.002 decay: 0.022 sustain: 0 release: 0.025)"
+                "((chip-noise osc-amp: 0.5 cutoff: 3000 hp: 700 attack: 0.003 decay: 0.035 sustain: 0 release: 0.03 octave: 0 volume: 0.45))"
+                "(chip-noise osc-amp: 0.35 cutoff: 11000 hp: 3000 attack: 0.006 decay: 0.05 sustain: 0 release: 0.04)" #f #f ("C-5" "C-5" "C-5"))
+        (grate "(chip-hat decay: 0.12 hp: 500 metal: 0.8 noise: 0.35 crush-bits: 12)"
+               "((chip-noise osc-amp: 0.6 cutoff: 900 hp: 280 attack: 0.002 decay: 0.05 sustain: 0 release: 0.03 octave: 0 volume: 0.4))"
+               #f #f "(chip-hat decay: 0.035 hp: 700 metal: 0.6 noise: 0.5 crush-bits: 10)" ("G-4" "A-4" "F-4"))
+        (raised "(karplus-strong decay: 0.12 excite-gain: 0.7 amp: 0.8)"
+                "((karplus-strong decay: 0.08 excite-gain: 0.6 amp: 0.6 octave: 1 volume: 0.35) (chip-noise osc-amp: 0.6 cutoff: 1400 hp: 250 attack: 0.002 decay: 0.04 sustain: 0 release: 0.03 octave: 0 volume: 0.6))"
+                "(chip-noise osc-amp: 0.5 cutoff: 2500 hp: 500 attack: 0.003 decay: 0.03 sustain: 0 release: 0.03)" #f #f ("F#4" "G#4" "F-4"))))
+    ;; the surfaces' loudness (the sketchbook's instrument gains)
+    (define GAINS '((carpet . 1.0) (tile . 1.0) (marble . 1.2) (grate . 2.0) (raised . 1.3)))
+
+    (define GUARD-CLEAR "(chip-noise osc-amp: 0.6 cutoff: 8000 hp: 1800 attack: 0.001 decay: 0.022 sustain: 0 release: 0.02)")
+    (define GUARD-CLEAR-LAYERS "((chip-kick sweep: 1.2 sweep-decay: 0.008 index: 1.2 decay: 0.05 drive: 0.6 octave: 0 volume: 0.55))")
+    (define GUARD-MUFFLED "(chip-noise osc-amp: 0.7 cutoff: 850 hp: 280 attack: 0.004 decay: 0.06 sustain: 0 release: 0.04)")
+    (define GUARD-MUFFLED-LAYERS "((chip-kick sweep: 1.0 sweep-decay: 0.01 index: 0.6 decay: 0.07 drive: 0.3 octave: 0 volume: 0.6))")
+    (define STING-Q "(fm4-stab cutoff: 1200 decay: 0.35 index: 0.5 release: 0.2)")
+    (define STING-THERE "(fm4-stab cutoff: 1500 decay: 0.18 index: 0.9 release: 0.06)")
+
+    ;; --- the plan: which instrument plays what in which slot -------------------------------
+    ;; an entry: (key inst notes) where notes are (row-in-slot note vol)
+    (define (plan)
+      (append
+        (apply append
+               (map (lambda (s i)
+                      (let* ((id (car s)) (heel-inst (+ 1 (* 3 i))) (toe-inst (if (list-ref s 3) (+ 2 (* 3 i)) heel-inst))
+                             (rattle-inst (+ 3 (* 3 i))) (notes (list-ref s 6)))
+                        (append
+                          (map (lambda (k)
+                                 (list (list 'step id 'heel k) heel-inst
+                                       (append (list (list 0 (list-ref notes k) (- 48 (* 4 k))))
+                                               (if (list-ref s 5)
+                                                   (map (lambda (r v) (list r (list-ref '("A-4" "C-5" "D-5") (modulo (+ k r) 3)) v))
+                                                        '(1 2 3) '(26 17 10))
+                                                   '()))))
+                               '(0 1 2))
+                          (map (lambda (k) (list (list 'step id 'toe k) toe-inst (list (list 0 "C-5" (- 44 (* 6 k))))))
+                               '(0 1)))))
+                    SURFACES '(0 1 2 3 4)))
+        (map (lambda (k) (list (list 'guard 'clear k) 16 (list (list 0 (list-ref '("E-4" "F-4" "D-4") k) 48)))) '(0 1 2))
+        (map (lambda (k) (list (list 'guard 'muffled k) 17 (list (list 0 (list-ref '("F-4" "G-4" "F#4") k) 48)))) '(0 1 2))
+        (list (list '(sting ?) 18 '((0 "A-4" 36) (4 "C-5" 40)))
+              (list '(sting there) 19 '((0 "C-5" 48) (2 "C#5" 44) (5 "C-5" 48) (7 "C#5" 44))))))
+
+    (define (bank-slots)
+      (let loop ((es (plan)) (i 0) (acc '()))
+        (if (null? es) (reverse acc) (loop (cdr es) (+ i 1) (cons (cons (car (car es)) i) acc)))))
+
+    (define (num x) (number->string x))
+
+    (define (instrument-text id name patch layers gain)
+      (string-append "    (instrument id: " (num id) " name: \"" name "\" patch: " patch
+                     " volume: 64 gain: " (num gain)
+                     (if layers (string-append " layers: " layers) "") ")\n"))
+
+    (define (instruments)
+      (append
+        (apply append
+               (map (lambda (s i)
+                      (let ((id (symbol->string (car s))) (g (cdr (assq (car s) GAINS))))
+                        (append (list (instrument-text (+ 1 (* 3 i)) (string-append id " heel") (list-ref s 1) (list-ref s 2) g))
+                                (if (list-ref s 3) (list (instrument-text (+ 2 (* 3 i)) (string-append id " toe") (list-ref s 3) (list-ref s 4) g)) '())
+                                (if (list-ref s 5) (list (instrument-text (+ 3 (* 3 i)) (string-append id " rattle") (list-ref s 5) #f g)) '()))))
+                    SURFACES '(0 1 2 3 4)))
+        (list (instrument-text 16 "guard, clear" GUARD-CLEAR GUARD-CLEAR-LAYERS 0.75)
+              (instrument-text 17 "guard, through the wall" GUARD-MUFFLED GUARD-MUFFLED-LAYERS 0.26)
+              (instrument-text 18 "sting ?" STING-Q #f 0.8)
+              (instrument-text 19 "sting there" STING-THERE #f 0.9))))
+
+    ;; Channels: a slot's main notes on channel 1; a rattle on channel 2 (a
+    ;; tracker channel is monophonic, and the heel's tail must not be cut).
+    ;; Each slot starts with a note-off on both, so nothing rings into the next.
+    (define (bank-tune-text)
+      (let* ((entries (plan))
+             (events
+               (apply append
+                      (map (lambda (e i)
+                             (let ((base (* i SLOT-ROWS)) (inst (cadr e)) (notes (caddr e)))
+                               (map (lambda (n k)
+                                      ;; a grate heel's later notes are its rattle, on channel 2
+                                      (let ((rattle? (and (> k 0) (eq? (car (car e)) 'step)
+                                                          (eq? (list-ref (car e) 2) 'heel) (eq? (cadr (car e)) 'grate))))
+                                        (list (+ base (car n)) (if rattle? 2 1) (cadr n) (if rattle? (+ inst 2) inst) (caddr n))))
+                                    notes (iota (length notes)))))
+                           entries (iota (length entries)))))
+             (total (* SLOT-ROWS (length entries)))
+             (npat (quotient (+ total 255) 256))
+             (cell (lambda (e) (string-append " (" (num (list-ref e 1)) " \"" (list-ref e 2) "\" "
+                                              (num (list-ref e 3)) " " (num (list-ref e 4)) " \"000\")")))
+             (pattern
+               (lambda (p)
+                 (let* ((from (* p 256)) (rows (min 256 (- total from)))
+                        (mine (filter (lambda (e) (and (>= (car e) from) (< (car e) (+ from rows)))) events)))
+                   (string-append
+                     "    (pattern id: " (num p) " rows: " (num rows) "\n"
+                     (apply string-append
+                            (map (lambda (r)
+                                   (let ((cells (list-sort (lambda (a b) (< (cadr a) (cadr b)))
+                                                           (filter (lambda (e) (= (car e) r)) mine))))
+                                     (if (null? cells) ""
+                                         (string-append "      (row " (num (- r from)) (apply string-append (map cell cells)) ")\n"))))
+                                 (iota rows from)))
+                     "    )\n")))))
+        (string-append
+          "(tune version: 1 name: \"phantom sound bank\" tempo: 125 speed: 1 channels: 2\n"
+          "  (instruments\n" (apply string-append (instruments)) "  )\n"
+          "  (patterns\n" (apply string-append (map pattern (iota npat))) "  )\n"
+          "  (order" (apply string-append (map (lambda (p) (string-append " " (num p))) (iota npat))) ")\n"
+          "  (history (\"claude\" \"2026-09-25\" \"S1: the game's sample bank (phantom sound bank)\")))\n")))
+
+    ;; --- rendering -------------------------------------------------------------------------------
+    ;; #(player rate mono-bytevector frames-done total-frames samples-alist)
+    (define (make-bank rate)
+      (let* ((t (read-tune-string (bank-tune-text)))
+             (slots (length (plan)))
+             (slot-frames (exact (round (* SLOT-S rate))))
+             (total (* slots slot-frames)))
+        (vector (open-tune-player t rate) rate (make-bytevector (* 4 total) 0) 0 total '() slot-frames)))
+
+    (define (bank-rate b) (vector-ref b 1))
+    (define (bank-ready? b) (>= (vector-ref b 3) (vector-ref b 4)))
+
+    (define BLOCK 1024)
+    (define *buf* (make-bytevector (* 8 BLOCK) 0))
+
+    ;; render up to `frames` more frames (in 1024-frame pulls); #t once complete
+    (define (bank-render! b frames)
+      (let ((p (vector-ref b 0)) (mono (vector-ref b 2)) (total (vector-ref b 4)))
+        (let loop ((left frames))
+          (let ((done (vector-ref b 3)))
+            (when (and (> left 0) (< done total))
+              (let ((n (min BLOCK (- total done))))
+                (player-pull! p *buf* 0 n)
+                (let fill ((i 0))
+                  (when (< i n)
+                    (bytevector-ieee-single-set! mono (* 4 (+ done i))
+                                                 (* 0.5 (+ (bytevector-ieee-single-ref *buf* (* 8 i) 'little)
+                                                           (bytevector-ieee-single-ref *buf* (+ 4 (* 8 i)) 'little)))
+                                                 'little)
+                    (fill (+ i 1))))
+                (vector-set! b 3 (+ done n))
+                (loop (- left n))))))
+        (when (and (bank-ready? b) (vector-ref b 0))
+          (player-close! (vector-ref b 0))
+          (vector-set! b 0 #f))
+        (bank-ready? b)))
+
+    ;; the key's samples, cut from the rendered bank on first use
+    (define (bank-sample b key)
+      (and (bank-ready? b)
+           (let ((hit (assoc key (vector-ref b 5))))
+             (if hit (cdr hit)
+                 (let ((slot (assoc key (bank-slots))))
+                   (and slot
+                        (let* ((sf (vector-ref b 6))
+                               (s (make-bytevector (* 4 sf) 0)))
+                          (bytevector-copy! s 0 (vector-ref b 2) (* 4 sf (cdr slot)) (* 4 sf (+ 1 (cdr slot))))
+                          (vector-set! b 5 (cons (cons key s) (vector-ref b 5)))
+                          s)))))))))

@@ -1,0 +1,81 @@
+;;; (phantom sound sections) - A track's calm/fill/tense sections on a live player
+;;;
+;;; COPIED from Phantom Burn's sketchbook (sketchbook/src/sketchbook/sections.sgl,
+;;; 2026-09-25), unchanged but for its name: copy now, centralize later.
+;;;
+;;; The model of Crash's (crash music live), cut to what a stealth floor needs
+;;; (design §6: "a floor's calm section is an ambient bed with no drums... the
+;;; way back to calm ... needs building"): a tune with marks calm, fill and
+;;; tense plays its calm region on a loop; asked for TENSE it jumps to the fill
+;;; at the next bar and lets the fill run on into tense, which then loops;
+;;; asked for CALM it jumps back to calm at the next bar with a short dip
+;;; (player-dip!: every channel down to 0.35 and back). Asking again for the
+;;; section already asked for does nothing, so a caller can ask every frame.
+;;;
+;;;   (make-sections player)        starts looping calm; #f if the tune has no calm/fill/tense marks
+;;;   (sections-want! s 'calm|'tense)
+;;;   (sections-tick! s)            once a frame (or a pull): keeps the region right
+;;;   (sections-playing s)          'calm | 'fill | 'tense, from the walk's position
+;;;   (sections-wanted s)
+;;;
+;;; motif's player-jump-to-mark! sets the region to the mark's own when it
+;;; lands, which for the fill would loop the fill; the tick widens it to run
+;;; from the fill to tense's end until the walk is in tense, then narrows it to
+;;; tense's region (the reason Crash re-applies its region every frame).
+
+(define-library (phantom sound sections)
+  (import (sigil core)
+          (sigil struct)
+          (motif tune)
+          (motif tune player))
+  (export make-sections sections-want! sections-tick! sections-playing sections-wanted
+          sections-player DIP-MS)
+  (begin
+    (define DIP-MS 700)
+
+    (define-struct sections
+      (player)
+      (calm) (fill) (tense)          ; (from . to) order positions
+      (wanted mutable: #t))
+
+    (define (region t name)
+      (let ((r (assq name (tune-mark-regions t)))) (and r (cdr r))))
+
+    (define (make-sections p)
+      (let* ((t (player-tune p))
+             (c (region t 'calm)) (f (region t 'fill)) (n (region t 'tense)))
+        (and c f n
+             (begin
+               (player-set-region! p (car c) (cdr c))
+               (sections player: p calm: c fill: f tense: n wanted: 'calm)))))
+
+    (define (sections-want! s section)
+      (unless (eq? section (sections-wanted s))
+        (set-sections-wanted! s section)
+        (let ((p (sections-player s)))
+          (case section
+            ((tense) (player-jump-to-mark! p 'fill))
+            ((calm) (player-jump-to-mark! p 'calm) (player-dip! p DIP-MS))
+            (else (error "sections-want!: calm or tense" section))))))
+
+    (define (walk-pos s)
+      (let ((pp (player-position (sections-player s) 0))) (and pp (car pp))))
+
+    (define (sections-tick! s)
+      (let ((p (sections-player s)) (pos (walk-pos s)))
+        ;; a jump waiting for its bar row owns the region until it lands
+        (when (and pos (not (player-pending-mark p)))
+          (case (sections-wanted s)
+            ((tense)
+             (if (>= pos (car (sections-tense s)))
+                 (player-set-region! p (car (sections-tense s)) (cdr (sections-tense s)))
+                 (player-set-region! p (car (sections-fill s)) (cdr (sections-tense s)))))
+            (else
+             (player-set-region! p (car (sections-calm s)) (cdr (sections-calm s))))))))
+
+    (define (sections-playing s)
+      (let ((pos (walk-pos s)))
+        (cond ((not pos) 'calm)
+              ((>= pos (car (sections-tense s))) 'tense)
+              ((>= pos (car (sections-fill s))) 'fill)
+              (else 'calm))))))
