@@ -82,7 +82,7 @@
       (set! *sound-frames* (+ *sound-frames* 1))
       (when (and (param "trace") (= 0 (modulo *sound-frames* 120)))
         (let ((t (sound-game-trace)))
-          (when t (display "phantom-burn: sound ") (write t) (newline)))))
+          (when t (display (string-append "phantom-burn: sound " t)) (newline)))))
 
     (define (param key) (let ((p (assoc key *params*))) (and p (cdr p))))
 

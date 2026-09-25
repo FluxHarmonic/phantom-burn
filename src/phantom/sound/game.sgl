@@ -25,6 +25,7 @@
 
 (define-library (phantom sound game)
   (import (sigil core)
+          (sigil math)
           (phantom sound)
           (phantom sound bank)
           (phantom play mode))
@@ -40,9 +41,25 @@
     (define *s* #f)
     (define (sound-game) *s*)
 
-    ;; the costs since the last call (sound-trace), and whether the bank is done
+    ;; since the last call, as one plain line (?trace): whether the bank is
+    ;; done, the ms each part spent, the frames the steps' sink was given, and
+    ;; how many steps and events the feed handed over, and the guards seen
+    (define *steps-n* 0) (define *events-n* 0) (define *guards-n* 0)
+    (define (fixed x) (number->string (/ (round (* 100.0 x)) 100.0)))
     (define (sound-game-trace)
-      (and *s* (cons (cons (quote bank-ready) (bank-ready? (sound-bank *s*))) (sound-trace *s*))))
+      (and *s*
+           (let ((t (sound-trace *s*)))
+             (let ((line (string-append
+                           "bank-ready " (if (bank-ready? (sound-bank *s*)) "yes" "no")
+                           (apply string-append
+                                  (map (lambda (e) (string-append " " (symbol->string (car e)) " "
+                                                                  (if (exact? (cdr e)) (number->string (cdr e)) (fixed (cdr e)))))
+                                       t))
+                           " steps " (number->string *steps-n*) " events " (number->string *events-n*)
+                           " guards " (number->string *guards-n*)
+                           " started " (if (sound-started? *s*) "yes" "no"))))
+               (set! *steps-n* 0) (set! *events-n* 0)
+               line))))
 
     (define (sound-game-init! loader)
       (unless *s* (set! *s* (make-sound SOUND-RATE loader))))
@@ -56,6 +73,9 @@
     (define (sound-game-frame! dt walker)
       (when *s*
         (let ((feed (play-mode-sound-feed walker)))
+          (set! *steps-n* (+ *steps-n* (length (caddr feed))))
+          (set! *events-n* (+ *events-n* (length (cadddr feed))))
+          (set! *guards-n* (length (cadr feed)))
           (for-each (lambda (st) (sound-step! *s* (car st) (cadr st) (caddr st)))
                     (caddr feed))
           (for-each (lambda (e) (sound-event! *s* (list-ref e 0) (list-ref e 1) (list-ref e 2) (list-ref e 3) (list-ref e 4)))
