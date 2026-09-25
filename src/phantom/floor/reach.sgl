@@ -431,8 +431,35 @@
                                              (num->str (vector-ref e 1)) " " (num->str (vector-ref e 2)) "), bypassing the reader")))
                        (say (string-append "without " tier ": none of the " (number->string (length behind))
                                            " anchors behind the exit is reached"))))))
+           ;; 4. the space under each open stair is real space now: what a
+           ;; body finds there (a report, not a check: P1 decides what sight
+           ;; makes of it)
+           (for-each (lambda (s) (when (eq? (stair-style s) 'open) (say (under-stair-line c anchors start s fl stats))))
+                     (floor-stairs fl))
            (say (string-append "edges tried " (number->string (vector-ref stats 0)) ", found " (number->string (vector-ref stats 1))))))
         (list (reverse lines) (reverse ps) (reverse witnesses))))
+
+    ;; "under the stair to UPPER: N anchors on the floor (K only crouched),
+    ;; reached from the start ...": the anchors inside stair s's plan on its
+    ;; lower room's floor, and whether the start reaches them.
+    (define (under-stair-line c anchors start s fl stats)
+      (let* ((p (stair-start s)) (q (stair-end s))
+             (d (pt-norm (pt- q p))) (side (cons (- (py d)) (px d))) (w (stair-width s))
+             (poly (list (pt+ p (pt* side (* -0.5 w))) (pt+ p (pt* side (* 0.5 w)))
+                         (pt+ q (pt* side (* 0.5 w))) (pt+ q (pt* side (* -0.5 w)))))
+             (lower (find (lambda (r) (eq? (room-name r) (stair-from s))) (floor-rooms fl)))
+             (z0 (if lower (room-floor lower) 0.0))
+             (under (filter (lambda (a) (and (point-in-poly? (cons (vector-ref a 1) (vector-ref a 2)) poly)
+                                             (< (vector-ref a 3) (+ z0 0.1))))
+                            (vector->list anchors)))
+             (crouched (filter (lambda (a) (walker-crouching? (vector-ref a 4))) under))
+             (r (and (pair? under) (route c anchors start (lambda (a) (and (memq a under) #t)) '() stats))))
+        (string-append "  under the stair to " (symbol->string (stair-to s)) ": "
+                       (number->string (length under)) " anchors on the floor ("
+                       (number->string (length crouched)) " only crouched), "
+                       (cond ((null? under) "none to reach")
+                             (r (string-append "reached from the start (" (number->string (length r)) " anchors)"))
+                             (else "not reached from the start")))))
 
     (define (reach-report-lines r) (car r))
 
