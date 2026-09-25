@@ -48,8 +48,23 @@
     ;; --- sight --------------------------------------------------------------
 
     ;; Whether the segment from (ox oy oz) to (tx ty tz) is clear of
-    ;; everything but glass.
+    ;; everything but glass. collide-ray visits every grid cell in its
+    ;; segment's bounding rectangle, so a long diagonal would test hundreds
+    ;; of cells' triangles; the segment is cast in pieces of at most PIECE
+    ;; metres, which keeps the cost in proportion to its length.
+    (define PIECE 1.5)
     (define (sight-clear? coll glass ox oy oz tx ty tz)
+      (let* ((dx (- tx ox)) (dy (- ty oy)) (dz (- tz oz))
+             (len (sqrt (+ (* dx dx) (* dy dy) (* dz dz))))
+             (n (max 1 (exact (ceiling (/ len PIECE))))))
+        (let piece ((i 0))
+          (or (>= i n)
+              (and (piece-clear? coll glass
+                                 (+ ox (* dx (/ i n))) (+ oy (* dy (/ i n))) (+ oz (* dz (/ i n)))
+                                 (+ ox (* dx (/ (+ i 1) n))) (+ oy (* dy (/ (+ i 1) n))) (+ oz (* dz (/ (+ i 1) n))))
+                   (piece (+ i 1)))))))
+
+    (define (piece-clear? coll glass ox oy oz tx ty tz)
       (let loop ((ox ox) (oy oy) (oz oz) (tries 0))
         (let* ((dx (- tx ox)) (dy (- ty oy)) (dz (- tz oz))
                (t (collide-ray coll ox oy oz dx dy dz)))

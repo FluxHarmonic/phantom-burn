@@ -40,7 +40,7 @@
           (phantom guard sense))
 
   (export make-guard-world guard-world-nav make-guard guard-reset!
-          guard-step! guard-caught?
+          guard-step! guard-caught? guard-hold!
           guard-x guard-y guard-z guard-fx guard-fy
           guard-prev-x guard-prev-y guard-prev-fx guard-prev-fy
           guard-state guard-state-name guard-awareness guard-sees? guard-rate
@@ -73,7 +73,8 @@
     (define HUNT-SPEED 3.5)                 ; your walk is 2.4 and your run 4.4
     (define CATCH-REACH 0.8)
     (define ARRIVE 0.3)
-    (define REFIELD-TICKS 15)
+    (define REFIELD-TICKS 30)
+    (define PERCEIVE-EVERY 3)                 ; sight at 20 Hz: the rays are the cost
 
     ;; turn steps per tick (1/60 s) at three rates, as cos and sin
     (define TICK (/ 1.0 60.0))
@@ -120,7 +121,8 @@
     (define S-SEARCH 18) (define S-EDGE 19) (define S-SEEN 20) (define S-CAUGHT 21)
     (define S-FTX 22) (define S-FTY 23) (define S-FAGE 24) (define S-PHASE 25)
     (define S-BFX 26) (define S-BFY 27) (define S-RATE 28) (define S-ARRIVED 29)
-    (define SLOTS 30)
+    (define S-TICK 30)
+    (define SLOTS 31)
 
     (define (make-guard gw leg)
       (let ((g (make-vector SLOTS 0.0)))
@@ -149,9 +151,14 @@
         (vector-set! g S-CAUGHT #f)
         (vector-set! g S-FTX 1e9) (vector-set! g S-FTY 1e9) (vector-set! g S-FAGE 0)
         (vector-set! g S-PHASE 0.0) (vector-set! g S-RATE 0.0) (vector-set! g S-ARRIVED #f)
+        (vector-set! g S-TICK 0)
         (vector-set! g S-BFX (vector-ref g S-FX)) (vector-set! g S-BFY (vector-ref g S-FY))
         (save-prev! g)
         g))
+
+    ;; A tick where the guard does not step (a fade, the win card): its
+    ;; drawn pose stops between ticks too.
+    (define (guard-hold! g) (save-prev! g))
 
     (define (save-prev! g)
       (vector-set! g S-PX (vector-ref g S-X)) (vector-set! g S-PY (vector-ref g S-Y))
@@ -182,7 +189,9 @@
     ;; (make-target).
     (define (guard-step! g gw t dt)
       (save-prev! g)
-      (perceive! g gw t dt)
+      (vector-set! g S-TICK (+ 1 (vector-ref g S-TICK)))
+      (when (= 0 (remainder (vector-ref g S-TICK) PERCEIVE-EVERY))
+        (perceive! g gw t (* dt PERCEIVE-EVERY)))
       (think! g t dt)
       (act! g gw t dt)
       (catch! g t))
@@ -252,8 +261,10 @@
           ((and (>= a 0.6) (< s SEARCHING)) (enter! g SEARCHING))
           ((and (>= a 0.3) (= s CALM)) (enter! g SUSPICIOUS))
           (else
-           (unless seen
-             (vector-set! g S-AWARE (max 0.0 (- a (* dt (if (= s SEARCHING) SEARCH-DECAY DECAY))))))
+           ;; decay runs while it sees you too, so a glimpse fainter than
+           ;; the decay never builds up (a guard does not stare at a shadow
+           ;; for minutes)
+           (vector-set! g S-AWARE (max 0.0 (- a (* dt (if (= s SEARCHING) SEARCH-DECAY DECAY)))))
            (cond ((and (= s SUSPICIOUS) (< (vector-ref g S-AWARE) 0.2))
                   (enter! g CALM))
                  ((and (= s SEARCHING) (vector-ref g S-ARRIVED) (> (vector-ref g S-SEARCH) SEARCH-LOOK))
@@ -316,13 +327,25 @@
     ;; when the target has moved. Returns #t when within reach of it (or
     ;; when it cannot be reached: nothing more to walk).
     (define (go-to! g gw tx ty speed reach dt)
+      (let ((nav (vector-ref gw 3)))
+        (if (and (nav-walkable? nav tx ty)
+                 (nav-line-clear? nav (vector-ref g S-X) (vector-ref g S-Y) tx ty))
+            ;; in the open, straight there: no field to build (a field is
+            ;; a search over thousands of cells; most chases need none)
+            (let* ((ex (- tx (vector-ref g S-X))) (ey (- ty (vector-ref g S-Y))))
+              (if (< (+ (* ex ex) (* ey ey)) (* (max reach ARRIVE) (max reach ARRIVE)))
+                  #t
+                  (begin (step-to! g nav tx ty speed dt) #f)))
+            (go-by-field! g gw tx ty speed reach dt))))
+
+    (define (go-by-field! g gw tx ty speed reach dt)
       (let* ((nav (vector-ref gw 3))
              (f (vector-ref gw 5))
              (mx (- tx (vector-ref g S-FTX))) (my (- ty (vector-ref g S-FTY))))
         (vector-set! g S-FAGE (+ (vector-ref g S-FAGE) 1))
         (when (and (> (+ (* mx mx) (* my my)) 0.25)
                    (or (> (vector-ref g S-FAGE) REFIELD-TICKS) (> (vector-ref g S-FTX) 1e8)))
-          (nav-field! nav f tx ty)
+          (nav-field! nav f tx ty (vector-ref g S-X) (vector-ref g S-Y))
           (vector-set! g S-FTX tx) (vector-set! g S-FTY ty) (vector-set! g S-FAGE 0))
         (let* ((ex (- tx (vector-ref g S-X))) (ey (- ty (vector-ref g S-Y)))
                (close (< (+ (* ex ex) (* ey ey)) (* (max reach ARRIVE) (max reach ARRIVE))))
@@ -330,10 +353,12 @@
           (cond
             ((or close (not steps)) #t)
             ((= steps 0)
-             ;; in the target's own cell (or the nearest one it can stand
-             ;; in): straight at it, if the ground allows
+             ;; in the target's own cell, or the nearest one it can stand
+             ;; in: straight at it, if the ground allows. A search has
+             ;; arrived here (the target may be where a guard cannot stand:
+             ;; on the stairs, the cabinet); a hunt keeps closing in.
              (step-to! g nav tx ty speed dt)
-             (< reach 0.01))
+             (> reach 0.01))
             (else (step-to! g nav (nav-steer-x nav) (nav-steer-y nav) speed dt) #f)))))
 
     ;; Move toward (tx, ty) at speed, sliding along what is not walkable,

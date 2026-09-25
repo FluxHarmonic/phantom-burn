@@ -38,7 +38,8 @@
     ;; The nav: a vector
     ;;  0 tag  1 x0  2 y0  3 w  4 h  5 walk (bytevector w*h, 1 walkable)
     ;;  6 queue (vector w*h)  7 steer x  8 steer y  9 walkable count
-    (define (nav? n) (and (vector? n) (= (vector-length n) 10) (eq? (vector-ref n 0) 'nav)))
+    ;;  10 the steering's chain of cells (vector LOOKAHEAD)
+    (define (nav? n) (and (vector? n) (= (vector-length n) 11) (eq? (vector-ref n 0) 'nav)))
     (define (nav-cell n) NAV-CELL)
     (define (nav-w n) (vector-ref n 3))
     (define (nav-h n) (vector-ref n 4))
@@ -61,7 +62,8 @@
                       (when ok (bytevector-u8-set! walk (+ (* r w) c) 1))
                       (cols (+ c 1) (if ok (+ count 1) count)))
                     (rows (+ r 1) count)))
-              (vector 'nav (* 1.0 x0) (* 1.0 y0) w h walk (make-vector (* w h) 0) 0.0 0.0 count)))))
+              (vector 'nav (* 1.0 x0) (* 1.0 y0) w h walk (make-vector (* w h) 0) 0.0 0.0 count
+                      (make-vector LOOKAHEAD 0))))))
 
     (define (cell-walkable? coll x y)
       (let ((f (collide-floor coll x y -0.3 STEP-H)))
@@ -123,19 +125,28 @@
 
     ;; Fill f with the distance (in steps) from the walkable cell nearest
     ;; (x, y); returns that cell, or -1 when there is none (f is then empty).
-    (define (nav-field! n f x y)
-      (let ((dist (vector-ref f 2))
-            (q (vector-ref n 6))
-            (w (vector-ref n 3))
-            (h (vector-ref n 4))
-            (t (nav-nearest-walkable n x y)))
+    ;; With (fx, fy) (a guard's place; #f for the whole floor) the search
+    ;; stops FIELD-MARGIN steps past that place's cell: a chase needs only
+    ;; the cells between the guard and its target, and the whole floor is
+    ;; ten thousand cells.
+    (define FIELD-MARGIN 16)
+    (define (nav-field! n f x y . from)
+      (let* ((dist (vector-ref f 2))
+             (q (vector-ref n 6))
+             (w (vector-ref n 3))
+             (h (vector-ref n 4))
+             (t (nav-nearest-walkable n x y))
+             (stop-cell (if (pair? from) (nav-nearest-walkable n (car from) (cadr from)) -1)))
         (vector-fill! dist -1)
         (vector-set! f 1 t)
         (when (>= t 0)
           (vector-set! dist t 0)
           (vector-set! q 0 t)
           (let loop ((head 0) (tail 1))
-            (when (< head tail)
+            (when (and (< head tail)
+                       (or (< stop-cell 0)
+                           (< (vector-ref dist stop-cell) 0)
+                           (<= (vector-ref dist (vector-ref q head)) (+ (vector-ref dist stop-cell) FIELD-MARGIN))))
               (let* ((k (vector-ref q head))
                      (r (quotient k w)) (c (remainder k w))
                      (d (+ 1 (vector-ref dist k)))
@@ -183,14 +194,22 @@
            (vector-set! n 8 (nav-cell-y n k0))
            0)
           (else
-           ;; aim at the first step, then at any later one that is in line
-           (let walk ((k (downhill n dist k0)) (i 0))
-             (when (and (>= k 0) (< i LOOKAHEAD))
-               (when (or (= i 0) (nav-line-clear? n x y (nav-cell-x n k) (nav-cell-y n k)))
-                 (vector-set! n 7 (nav-cell-x n k))
-                 (vector-set! n 8 (nav-cell-y n k)))
-               (unless (= (vector-ref dist k) 0)
-                 (walk (downhill n dist k) (+ i 1)))))
+           ;; the next LOOKAHEAD cells downhill, then the farthest of them
+           ;; on a clear line (tried from the far end, so usually one test);
+           ;; the first step when none is
+           (let* ((chain (vector-ref n 10))
+                  (m (let walk ((k (downhill n dist k0)) (i 0))
+                       (if (and (>= k 0) (< i LOOKAHEAD))
+                           (begin
+                             (vector-set! chain i k)
+                             (if (= (vector-ref dist k) 0) (+ i 1) (walk (downhill n dist k) (+ i 1))))
+                           i))))
+             (let pick ((i (- m 1)))
+               (when (>= i 0)
+                 (let ((k (vector-ref chain i)))
+                   (if (or (= i 0) (nav-line-clear? n x y (nav-cell-x n k) (nav-cell-y n k)))
+                       (begin (vector-set! n 7 (nav-cell-x n k)) (vector-set! n 8 (nav-cell-y n k)))
+                       (pick (- i 1)))))))
            (vector-ref dist k0)))))
 
     ;; The neighbour of k with the smallest distance below k's (the fixed

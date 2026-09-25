@@ -83,7 +83,8 @@
       (set! *phase* 'play)
       (set! *timer* 0.0)
       (set! *fade-in* FADE-IN)
-      (set! *place* #t)
+      (set! *badge-flash* 0.0)
+      (set! *place* #f)
       (play-start-walker *core* *coll*))
 
     (define (play-hold?) (not (eq? *phase* 'play)))
@@ -93,11 +94,16 @@
       (set! *fade-in* (max 0.0 (- *fade-in* TICK)))
       (set! *badge-flash* (max 0.0 (- *badge-flash* TICK)))
       (cond
-        ((eq? *phase* 'caught) (if (>= *timer* FADE-OUT) (restart-walker) #f))
-        ((eq? *phase* 'won) (if (>= *timer* WIN-HOLD) (restart-walker) #f))
-        ((and *place* (= (play-ticks *core*) 0))
-         ;; the first tick of an attempt: put the runner at the arrival spot
-         (play-tick! *core* w render-circuit-on? (render-night) (render-pools))
+        ((eq? *phase* 'caught)
+         (guard-hold! (play-guard *core*))
+         (if (>= *timer* FADE-OUT) (restart-walker) #f))
+        ((eq? *phase* 'won)
+         (guard-hold! (play-guard *core*))
+         (if (>= *timer* WIN-HOLD) (restart-walker) #f))
+        (*place*
+         ;; the first tick of the first attempt: put the runner at the
+         ;; arrival spot; the rules start on the next tick, from there
+         (set! *place* #f)
          (play-start-walker *core* *coll*))
         (else
          (let ((o (play-tick! *core* w render-circuit-on? (render-night) (render-pools))))
@@ -213,17 +219,17 @@
     ;; A column-major model matrix: the body's frame at (x y z) facing
     ;; (fx fy), offset ox along its right, and turned by angle a about its
     ;; right axis at height h (a leg swinging from the hip).
+    (define (f32 m i v) (bytevector-ieee-single-set! m (* 4 i) v 'little))
     (define (pose! m x y z fx fy ox a h)
       (let* ((c (cos a)) (s (sin a))
-             (rx fy) (ry (- fx))
-             (f32 (lambda (i v) (bytevector-ieee-single-set! m (* 4 i) v 'little))))
-        (f32 0 rx) (f32 1 ry) (f32 2 0.0) (f32 3 0.0)
-        (f32 4 (* c fx)) (f32 5 (* c fy)) (f32 6 s) (f32 7 0.0)
-        (f32 8 (* (- s) fx)) (f32 9 (* (- s) fy)) (f32 10 c) (f32 11 0.0)
-        (f32 12 (+ x (* ox rx) (* s h fx)))
-        (f32 13 (+ y (* ox ry) (* s h fy)))
-        (f32 14 (+ z (* h (- 1.0 c))))
-        (f32 15 1.0)))
+             (rx fy) (ry (- fx)))
+        (f32 m 0 rx) (f32 m 1 ry) (f32 m 2 0.0) (f32 m 3 0.0)
+        (f32 m 4 (* c fx)) (f32 m 5 (* c fy)) (f32 m 6 s) (f32 m 7 0.0)
+        (f32 m 8 (* (- s) fx)) (f32 m 9 (* (- s) fy)) (f32 m 10 c) (f32 m 11 0.0)
+        (f32 m 12 (+ x (* ox rx) (* s h fx)))
+        (f32 m 13 (+ y (* ox ry) (* s h fy)))
+        (f32 m 14 (+ z (* h (- 1.0 c))))
+        (f32 m 15 1.0)))
 
     ;; Inside the world pass ((phantom render)'s extra draw).
     (define (draw-guard!)
@@ -311,7 +317,12 @@
              (s (guard-state g))
              (a (guard-awareness g))
              (p (and *cam* (project *cam* *pose-x* *pose-y* (+ (guard-z g) 2.05) w h k))))
-        (when (and p (or (> a 0.02) (> s CALM)))
+        ;; only when you could see the guard's head from here: the caption
+        ;; must not show where a guard is through a wall
+        (when (and p (or (> a 0.02) (> s CALM))
+                   (sight-clear? *coll* (play-glass (play-data *core*))
+                                 (vector-ref *cam* 0) (vector-ref *cam* 1) (vector-ref *cam* 2)
+                                 *pose-x* *pose-y* (+ (guard-z g) 1.7)))
           (let* ((word (vector-ref WORDS s))
                  (col (list-ref VISORS s))
                  (bw (* 24 ts)) (x (- (car p) (/ bw 2))) (y (cdr p)))

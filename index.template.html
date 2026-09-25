@@ -160,7 +160,10 @@
         var info = floor === "stand-in" ? Promise.resolve(null) : text("floor.sexp");
         return info.then(function (t) {
           if (t !== null) app.dispatch("floorinfo", t);
-          return playing && floor !== "stand-in" ? text("play.sexp") : null;
+          // optional: a floor without play data still loads, as the walk
+          return playing && floor !== "stand-in"
+            ? text("play.sexp").catch(function (e) { console.log("phantom-burn: no play data: " + e.message); return null; })
+            : null;
         }).then(function (t) {
           if (t !== null) app.dispatch("playinfo", t);
           return text(collideFile);
