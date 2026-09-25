@@ -29,7 +29,7 @@
 ;;;   ROUTES     breadth-first over edges from a start anchor to any target
 ;;;              anchor, optionally forbidding anchors in some rooms; a
 ;;;              route from a plan point starts at the lowest anchor within
-;;;              PLACE-R of it;
+;;;              PLACE-R of it where a body stands;
 ;;;   WITNESS    the route is REALIZED from the real start (the controller run
 ;;;              along it from where the body really is, every input
 ;;;              recorded), the recording written as a script (the replay
@@ -247,16 +247,20 @@
         (and (pair? rs) (fold-left min 1e30 (map room-floor rs)))))
 
     ;; The anchor a route from plan point p starts at: of the anchors within
-    ;; PLACE-R of p in plan, the lowest (to 10 cm), then the nearest. #f when
-    ;; there is none.
+    ;; PLACE-R of p in plan where a body stands (crouched ones only when none
+    ;; stands there: the duct), the lowest (to 10 cm), then the nearest. #f
+    ;; when there is none. Standing first, because the nearest low spot to a
+    ;; desk's badge is under the desk, where a crouched body is boxed in.
     (define PLACE-R 1.5)
 
     (define (anchor-near anchors p)
       (let* ((d (lambda (a) (sqrt (+ (square (- (vector-ref a 1) (px p))) (square (- (vector-ref a 2) (py p)))))))
-             (near (filter (lambda (a) (<= (d a) PLACE-R)) (vector->list anchors))))
-        (and (pair? near)
-             (let* ((zmin (fold-left min 1e30 (map (lambda (a) (vector-ref a 3)) near)))
-                    (low (filter (lambda (a) (< (vector-ref a 3) (+ zmin 0.1))) near)))
+             (near (filter (lambda (a) (<= (d a) PLACE-R)) (vector->list anchors)))
+             (standing (filter (lambda (a) (not (walker-crouching? (vector-ref a 4)))) near))
+             (pool (if (pair? standing) standing near)))
+        (and (pair? pool)
+             (let* ((zmin (fold-left min 1e30 (map (lambda (a) (vector-ref a 3)) pool)))
+                    (low (filter (lambda (a) (< (vector-ref a 3) (+ zmin 0.1))) pool)))
                (fold-left (lambda (b a) (if (< (d a) (d b)) a b)) (car low) low)))))
 
     ;; --- witnesses -----------------------------------------------------------------------------
