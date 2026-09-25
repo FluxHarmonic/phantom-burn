@@ -98,6 +98,26 @@
                                                 (/ (car rgb) 255.0) (/ (cadr rgb) 255.0) (/ (caddr rgb) 255.0) #f))))
                     (prop-lamps pr)))))
 
+    ;; The top of a placed prop's parts under the world point p (2D): the
+    ;; surface a thing laid there rests on, the desk's top board and not its
+    ;; monitor (P2: the badge floated at the monitor's height, 1.2 m, since
+    ;; placed-top is the tallest part's). The prop's top when no part is
+    ;; under p.
+    (define (surface-top-at placed p)
+      (let* ((pr (vector-ref placed 0)) (xf (vector-ref placed 1))
+             (o (xform-origin xf)) (ax (xform-ax xf)) (ay (xform-ay xf))
+             (dx (- (px p) (v3x o))) (dy (- (py p) (v3y o)))
+             (lx (+ (* dx (px ax)) (* dy (py ax))))
+             (ly (+ (* dx (px ay)) (* dy (py ay)))))
+        (let loop ((parts (prop-parts pr)) (best #f))
+          (if (null? parts)
+              (if best (+ (v3z o) best) (vector-ref placed 2))
+              (let ((e (part-extent (car parts))))
+                (loop (cdr parts)
+                      (if (and (<= (car e) lx) (<= lx (caddr e)) (<= (cadr e) ly) (<= ly (cadddr e)))
+                          (let ((t (part-top (car parts)))) (if (or (not best) (> t best)) t best))
+                          best)))))))
+
     ;; --- walls to mount on ------------------------------------------------------------------
 
     ;; The side of a plan edge through p (within tol) that faces into room r
@@ -151,7 +171,7 @@
                         (add-problem! c 1 (thing-line t) (string-append "the badge on-desk: " (fmt-pt p) " is on no desk")))
                        (pr
                         (let ((xf (placed-xform desk)))
-                          (place-prop! c pr (xform origin: (v3 (px p) (py p) (placed-top desk))
+                          (place-prop! c pr (xform origin: (v3 (px p) (py p) (surface-top-at desk p))
                                                    ax: (xform-ax xf) ay: (xform-ay xf))
                                        (placed-room desk) 'badge #f))))))
               ((lifts)

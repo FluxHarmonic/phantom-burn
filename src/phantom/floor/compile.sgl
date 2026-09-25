@@ -10,7 +10,9 @@
 ;;;
 ;;; Render: one vertex buffer and one index buffer, drawn per PART (an index
 ;;; range): each textured material's part, then one untextured opaque part
-;;; (colour per vertex), then one glass part (blended, cull none). The layout
+;;; (colour per vertex), then a part for each material in SPLIT-PARTS (P2:
+;;; the badge, so play mode can hide it once taken), then one glass part
+;;; (blended, cull none). The layout
 ;;; (stride 60):
 ;;;
 ;;;   position float3 | uv float2 | normal float3 | color ubyte4n |
@@ -186,6 +188,9 @@
     ;;
     ;; -> #(vertex-bytes index-bytes index-type vertex-count index-count parts tests)
 
+    ;; Materials that are a part of their own, named after the material.
+    (define SPLIT-PARTS '(badge))
+
     (define (assemble c emitters)
       (let* ((batches (vector-ref (ctx-batches c) 0))
              (mats (ctx-mats c))
@@ -195,15 +200,23 @@
                           (cond ((null? bs) (reverse acc))
                                 ((memq (matinfo-texture (mi-of (car bs))) acc) (loop (cdr bs) acc))
                                 (else (loop (cdr bs) (cons (matinfo-texture (mi-of (car bs))) acc))))))
+             ;; a material in SPLIT-PARTS is a part of its own (P2: the badge,
+             ;; which play mode hides once it is taken), after the untextured
+             ;; opaque part and before the glass
+             (split? (lambda (b) (memq (car b) SPLIT-PARTS)))
              (groups (append
                        (map (lambda (tn) (list (symbol->string tn) tn 'opaque
-                                               (filter (lambda (b) (eq? (matinfo-texture (mi-of b)) tn)) textured)))
+                                               (filter (lambda (b) (and (not (split? b)) (eq? (matinfo-texture (mi-of b)) tn))) textured)))
                             tex-names)
                        (list (list "solid" #f 'opaque
-                                   (filter (lambda (b) (let ((mi (mi-of b))) (and mi (not (matinfo-texture mi)) (not (matinfo-glass? mi)))))
-                                           batches))
-                             (list "glass" #f 'glass
-                                   (filter (lambda (b) (let ((mi (mi-of b))) (and mi (matinfo-glass? mi)))) batches)))))
+                                   (filter (lambda (b) (let ((mi (mi-of b))) (and mi (not (split? b)) (not (matinfo-texture mi)) (not (matinfo-glass? mi)))))
+                                           batches)))
+                       (map (lambda (name)
+                              (list (symbol->string name) #f 'opaque
+                                    (filter (lambda (b) (eq? (car b) name)) batches)))
+                            SPLIT-PARTS)
+                       (list (list "glass" #f 'glass
+                                   (filter (lambda (b) (let ((mi (mi-of b))) (and mi (not (split? b)) (matinfo-glass? mi)))) batches)))))
              (groups (filter (lambda (g) (pair? (cadddr g))) groups))
              (nv (fold-left + 0 (map (lambda (b) (batch-vertex-count (cdr b))) batches)))
              (ni (fold-left + 0 (map (lambda (b) (batch-index-count (cdr b))) batches)))

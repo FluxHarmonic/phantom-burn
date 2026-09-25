@@ -69,6 +69,7 @@
         (set! *place* place?)
         (set! *core* (play-reset! (make-play coll data (cdr (assq 'circuits info)))))
         (render-set-extra-draw! draw-guard!)
+        (render-hide-part! 'badge #f)
         (set! *phase* 'play)
         (set! *timer* 0.0)
         (set! *fade-in* FADE-IN)))
@@ -84,6 +85,7 @@
       (set! *fade-in* FADE-IN)
       (set! *badge-flash* 0.0)
       (set! *place* #f)
+      (render-hide-part! 'badge #f)
       (play-start-walker *core* *coll*))
 
     (define (play-hold?) (not (eq? *phase* 'play)))
@@ -106,6 +108,7 @@
       (set! *fade-in* FADE-IN)
       (set! *badge-flash* 0.0)
       (set! *place* #t)
+      (render-hide-part! 'badge #f)
       ;; the title cleared the guard's draw (its room is not this floor)
       (render-set-extra-draw! draw-guard!))
 
@@ -135,7 +138,9 @@
            (cond ((eq? o 'caught) (set! *phase* 'caught) (set! *timer* 0.0))
                  ((eq? o 'won) (set! *phase* 'won) (set! *timer* 0.0)
                   (set! *ticks-at-win* (play-ticks *core*)))
-                 ((eq? o 'badge) (set! *badge-flash* 2.5)))
+                 ((eq? o 'badge) (set! *badge-flash* 2.5)
+                  ;; taken: gone from the desk (the compiler's badge part)
+                  (render-hide-part! 'badge #t)))
            #f))))
 
     ;; --- the guard's body ------------------------------------------------------
