@@ -9,7 +9,7 @@
 ;;;
 ;;; The page's events, besides the loader's keydown and keyup:
 ;;;   ("params", "k=v&...")  the page's query: floor, view, shot, hud,
-;;;                          dither, spread, bayer, palette, fog (before start)
+;;;                          dither, spread, bayer, palette, fog, card (before start)
 ;;;   ("look", "dx,dy")      pointer-locked mouse motion, CSS pixels
 ;;;   ("move", "x,y")        the left stick, -1..1, y down
 ;;;   ("lookstick", "x,y")   the right stick
@@ -36,6 +36,7 @@
     (define *fetches* '())       ; (name . handle)
     (define *collide* #f)        ; the base64 text, once the page sends it
     (define *started* #f)        ; #f, #t, or 'failed
+    (define *said-ready* #f)
     (define *last-ms* #f)
     (define *keys* '())
     (define *pressed* '())
@@ -105,6 +106,7 @@
             (v (and (param "view") (string->number (param "view"))))
             (shot (and (param "shot") (string->number (param "shot")))))
         (when d (render-dither! (not (string=? d "off"))))
+        (when (param "card") (render-card! #t))
         (when s (render-spread! s))
         (when b (render-bayer! b))
         (when p (render-palette! (string->symbol p)))
@@ -119,8 +121,7 @@
       (game-init! load-mesh* load-texture* (pbc1->collision (base64->bytevector *collide*)))
       (set! *collide* #f)
       (apply-params!)
-      (set! *started* #t)
-      (display "phantom-burn: ready ") (display *floor*) (newline))
+      (set! *started* #t))
 
     (define (web-tick payload)
       (when (and *params-seen* (null? *fetches*))
@@ -133,7 +134,11 @@
                  (set! *look-y* 0)
                  (set! *pressed* '())
                  (game-frame! dt (gles3-canvas-width) (gles3-canvas-height)
-                              (make-controls held? pressed dx dy *move-x* *move-y* *stick-x* *stick-y*))))
+                              (make-controls held? pressed dx dy *move-x* *move-y* *stick-x* *stick-y*))
+                 ;; ready once the first frame is drawn (shots wait for this line)
+                 (unless *said-ready*
+                   (set! *said-ready* #t)
+                   (display "phantom-burn: ready ") (display *floor*) (newline))))
               ((eq? *started* 'failed) #f)
               ((all-ready?) (start!))
               (else

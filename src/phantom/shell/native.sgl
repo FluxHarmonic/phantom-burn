@@ -2,12 +2,14 @@
 ;;;
 ;;;   phantom-burn [--floor DIR] [--size WxH] [--frames N] [--seconds S] [--view K]
 ;;;                [--shot K] [--hud 0|1|2] [--dither on|off] [--spread S]
-;;;                [--bayer 4|8] [--palette NAME] [--fog M]
+;;;                [--bayer 4|8] [--palette NAME] [--fog M] [--card]
 ;;;
 ;;; --floor names the floor's directory (default assets/stand-in, the G0
 ;;; export: floor14.sgm, city.sgm, the textures, floor14.collide). The
 ;;; floor reloads by itself when floor14.sgm or floor14.collide changes
 ;;; (checked twice a second), with the walker where it stands.
+;;; --card shows the test card (a sweep of the colour cube) instead of the
+;;; world, through the same post pass (scripts/gate-dither's fourth frame).
 ;;; --frames and --seconds quit after that many frames or seconds of play.
 ;;; --view starts at one of the floor's views (0 arrival, 1 overlook,
 ;;; 2 office); --shot holds the camera exactly there, for floor shots.
@@ -81,6 +83,7 @@
             (v (string->number (arg-value args "--view" "none")))
             (shot (string->number (arg-value args "--shot" "none"))))
         (when d (render-dither! (string=? d "on")))
+        (when (member "--card" args) (render-card! #t))
         (when s (render-spread! s))
         (when b (render-bayer! b))
         (when p (render-palette! (string->symbol p)))
@@ -94,7 +97,6 @@
         (gfx-setup)
         (game-init! load-mesh* load-texture* (load-collision))
         (apply-settings! args)
-        (display "phantom-burn: ready") (newline)
         (let loop ((n 0) (seen (stamps)) (elapsed 0.0))
           (let* ((dt (wait-frame))
                  (elapsed (+ elapsed dt))
@@ -105,6 +107,8 @@
                          (make-controls key-down? (pressed-keys)
                                         (if captured? (mouse-dx) 0) (if captured? (mouse-dy) 0)
                                         0.0 0.0 0.0 0.0))
+            ;; ready once the first frame is drawn (shots wait for this line)
+            (when (= n 0) (display "phantom-burn: ready") (newline))
             (let ((seen (if (= 0 (modulo n 30))
                             (let ((now (stamps)))
                               (unless (equal? now seen)

@@ -27,7 +27,7 @@
           render-world! render-post! render-composite!
           render-dither? render-dither! render-spread render-spread!
           render-bayer render-bayer! render-palette render-palette!
-          render-fog render-fog!
+          render-fog render-fog! render-card? render-card!
           render-world-ms render-post-ms
           make-camera camera-set!)
 
@@ -112,6 +112,9 @@ void main() {
     (define *palette* 'embers)
     (define *fog* 45.0)
     (define *flip* 1.0)       ; see POST-FRAGMENT's opts.x
+    (define *card* #f)        ; the test card instead of the world
+    (define *card-tex* #f)
+    (define *opts-copy* (make-bytevector 16 0))
     (define *world-ms* 0.0)
     (define *post-ms* 0.0)
 
@@ -144,6 +147,12 @@ void main() {
         (sync-post!)))
     (define (render-fog) *fog*)
     (define (render-fog! d) (set! *fog* (max 1.0 (* 1.0 d))))
+    (define (render-card?) *card*)
+    ;; The card is made here, not in a frame, so a shot never waits on it.
+    (define (render-card! on?)
+      (set! *card* on?)
+      (when (and on? (not *card-tex*))
+        (set! *card-tex* (card-texture))))
     (define (render-world-ms) *world-ms*)
     (define (render-post-ms) *post-ms*)
 
@@ -155,6 +164,8 @@ void main() {
         (f32! *params* 3 (* 1.0 VIEW-H))
         (f32! *opts* 0 *flip*)
         (f32! *opts* 1 1.0)
+        (f32! *opts-copy* 0 *flip*)
+        (f32! *opts-copy* 1 0.0)
         (set-pipeline-uniform! *post-pipe* 'params *params*)
         (set-pipeline-uniform! *post-pipe* 'opts *opts*)))
 
@@ -237,7 +248,32 @@ void main() {
     (define (ms-since t0)
       (/ (* 1000.0 (- (current-jiffy) t0)) (jiffies-per-second)))
 
+    ;; The test card: 16 tiles across, blue rising tile by tile; in each
+    ;; tile red rises left to right and green top to bottom, so the frame
+    ;; sweeps the colour cube, its dark warm corner included (the gate's
+    ;; views never reach the palette's warm near-blacks; the card does).
+    (define (card-texture)
+      (let ((px (make-bytevector (* VIEW-W VIEW-H 4) 255)))
+        (let rows ((y 0))
+          (when (< y VIEW-H)
+            (let cols ((x 0))
+              (when (< x VIEW-W)
+                (let ((o (* 4 (+ (* y VIEW-W) x)))
+                      (tile (exact (floor (/ x 30))))
+                      (col (modulo x 30)))
+                  (bytevector-u8-set! px o (exact (round (/ (* col 255) 29))))
+                  (bytevector-u8-set! px (+ o 1) (exact (round (/ (* y 255) (- VIEW-H 1)))))
+                  (bytevector-u8-set! px (+ o 2) (* tile 17)))
+                (cols (+ x 1))))
+            (rows (+ y 1))))
+        (make-texture-from-pixels VIEW-W VIEW-H px 'nearest)))
+
     (define (render-world! cam)
+      (if *card*
+          (set! *world-ms* 0.0)
+          (render-world*! cam)))
+
+    (define (render-world*! cam)
       (let* ((t0 (current-jiffy))
              (x (vector-ref cam 0)) (y (vector-ref cam 1)) (z (vector-ref cam 2))
              (yaw (vector-ref cam 3)) (pitch (vector-ref cam 4)) (roll (vector-ref cam 5))
@@ -279,9 +315,16 @@ void main() {
 
     (define (render-post!)
       (let ((t0 (current-jiffy)))
-        (when *dither*
-          (with-3d-pass *post* #f
-            (draw-mesh *post-pipe* *tri* *view-tex*)))
+        (cond (*card*
+               ;; the card goes through the pass either way: dithered, or
+               ;; copied untouched when the dither is off
+               (set-pipeline-uniform! *post-pipe* 'opts (if *dither* *opts* *opts-copy*))
+               (with-3d-pass *post* #f
+                 (draw-mesh *post-pipe* *tri* *card-tex*))
+               (set-pipeline-uniform! *post-pipe* 'opts *opts*))
+              (*dither*
+               (with-3d-pass *post* #f
+                 (draw-mesh *post-pipe* *tri* *view-tex*))))
         (set! *post-ms* (ms-since t0))))
 
     ;; Put the frame on a w x h window at the largest whole scale that
@@ -290,5 +333,5 @@ void main() {
       (let* ((k (max 1 (exact (floor (min (/ w VIEW-W) (/ h VIEW-H))))))
              (ox (exact (floor (/ (- w (* VIEW-W k)) 2))))
              (oy (exact (floor (/ (- h (* VIEW-H k)) 2)))))
-        (draw-render-target (if *dither* *post* *view*) ox oy (* VIEW-W k) (* VIEW-H k))
+        (draw-render-target (if (or *dither* *card*) *post* *view*) ox oy (* VIEW-W k) (* VIEW-H k))
         k))))

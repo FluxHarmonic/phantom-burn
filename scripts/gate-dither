@@ -5,6 +5,9 @@
 # of the floor's three views, on each target:
 #   raw   the frame with the dither off (--dither off)
 #   dith  the same frame with the dither on (Bayer 4x4, spread 40, embers)
+# and a fourth frame, the test card (--card / ?card=1: a sweep of the colour
+# cube; the views never reach the palette's warm near-blacks, so without it
+# a regression in the ember ramp would pass)
 #   want  scripts/art/bayer.sh applied to raw, against
 #         scripts/art/palette-embers.png (Crash's algorithm, not the game's)
 # and dith must equal want in every pixel. Presence checks come first, so a
@@ -41,17 +44,18 @@ colours() { convert "$1" -unique-colors txt:- | sed -n 's/.*\(#[0-9A-F]\{6\}\).*
 differ() { compare -metric AE "$1" "$2" null: 2>&1 || true; }
 
 for t in $TARGETS; do
-  for v in 0 1 2; do
+  for v in 0 1 2 card; do
+    if [ "$v" = card ]; then NA="--card"; WQ="card=1"; else NA="--shot $v"; WQ="shot=$v"; fi
     raw="$OUT/$t-$v-raw.png"; dith="$OUT/$t-$v-dith.png"; want="$OUT/$t-$v-want.png"
     if [ "$t" = native ]; then
-      scripts/shot-native "$raw" --shot "$v" --hud 0 --dither off > "$OUT/$t-$v-raw.log" 2>&1 \
+      scripts/shot-native "$raw" $NA --hud 0 --dither off > "$OUT/$t-$v-raw.log" 2>&1 \
         || { cat "$OUT/$t-$v-raw.log"; echo "SETUP-FAILED: native shot $v raw"; exit 2; }
-      scripts/shot-native "$dith" --shot "$v" --hud 0 --dither on --spread 40 --bayer 4 --palette embers > "$OUT/$t-$v-dith.log" 2>&1 \
+      scripts/shot-native "$dith" $NA --hud 0 --dither on --spread 40 --bayer 4 --palette embers > "$OUT/$t-$v-dith.log" 2>&1 \
         || { cat "$OUT/$t-$v-dith.log"; echo "SETUP-FAILED: native shot $v dith"; exit 2; }
     else
-      node scripts/shot-web.mjs build/web "$raw" --query "shot=$v&hud=0&dither=off" > "$OUT/$t-$v-raw.log" 2>&1 \
+      node scripts/shot-web.mjs build/web "$raw" --query "$WQ&hud=0&dither=off" > "$OUT/$t-$v-raw.log" 2>&1 \
         || { cat "$OUT/$t-$v-raw.log"; echo "SETUP-FAILED: web shot $v raw"; exit 2; }
-      node scripts/shot-web.mjs build/web "$dith" --query "shot=$v&hud=0&dither=on&spread=40&bayer=4&palette=embers" > "$OUT/$t-$v-dith.log" 2>&1 \
+      node scripts/shot-web.mjs build/web "$dith" --query "$WQ&hud=0&dither=on&spread=40&bayer=4&palette=embers" > "$OUT/$t-$v-dith.log" 2>&1 \
         || { cat "$OUT/$t-$v-dith.log"; echo "SETUP-FAILED: web shot $v dith"; exit 2; }
     fi
     nraw="$(colours "$raw" | wc -l)"

@@ -3,7 +3,7 @@
 //
 //   node scripts/shot-web.mjs BUILD OUT.png --query "shot=0&hud=0"
 //                             [--scale N] [--port N] [--cdp N] [--wait MS]
-//                             [--console FILE]
+//                             [--console FILE] [--requests FILE]
 //
 // Serves BUILD on loopback, boots headless Chrome (SwiftShader), opens
 // index.html?QUERY, waits for "phantom-burn: ready", sets the viewport to
@@ -23,7 +23,7 @@ import { spawn } from "node:child_process";
 
 const args = process.argv.slice(2);
 const opt = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : dflt; };
-const VALUED = ["--query", "--scale", "--port", "--cdp", "--wait", "--console"];
+const VALUED = ["--query", "--scale", "--port", "--cdp", "--wait", "--console", "--requests"];
 const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && VALUED.includes(args[i - 1])));
 const ROOT = path.resolve(positional[0] || "build/web");
 const OUT = positional[1] || "/tmp/phantom-shot.png";
@@ -37,7 +37,10 @@ if (!fs.existsSync(path.join(ROOT, "index.html"))) { console.log(`SETUP-FAILED: 
 
 const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".wasm": "application/wasm", ".json": "application/json",
   ".css": "text/css", ".png": "image/png", ".b64": "text/plain", ".sgm": "application/octet-stream" };
+const requests = [];
 const server = http.createServer((req, res) => {
+  res.on("finish", () => requests.push(`${res.statusCode} ${req.url}`));
+  res.on("close", () => { if (!res.writableFinished) requests.push(`CLOSED ${req.url}`); });
   const urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
   const fp = path.join(ROOT, urlPath === "/" ? "/index.html" : urlPath);
   if (fp !== ROOT && !fp.startsWith(ROOT + path.sep)) { res.writeHead(403).end(); return; }
@@ -63,6 +66,7 @@ const lines = [];
 function shutdown(code) {
   if (exiting) return; exiting = true;
   if (opt("--console")) fs.writeFileSync(opt("--console"), lines.join("\n") + "\n");
+  if (opt("--requests")) fs.writeFileSync(opt("--requests"), requests.join("\n") + "\n");
   try { server.close(); } catch { /* not listening */ }
   killChromeGroup("SIGTERM");
   setTimeout(() => { killChromeGroup("SIGKILL"); try { fs.rmSync(udd, { recursive: true, force: true }); } catch { /* scratch */ } process.exit(code); }, 800);
@@ -106,8 +110,21 @@ async function waitLine(re, ms) {
   return null;
 }
 
-await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?${QUERY}` });
-const ready = await waitLine(/phantom-burn: ready/, 60000);
+// Under heavy load (load 40-50 on this box, 2026-09-25) headless Chrome
+// sometimes fails every fetch after the wasm with "Failed to fetch" and none
+// of them reaches this server. That is the harness, not the game, and only
+// in that exact case is the page reloaded, at most twice, each time said.
+let ready = null;
+for (let attempt = 0; attempt < 3 && !ready; attempt++) {
+  lines.length = 0;
+  const before = requests.length;
+  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?${QUERY}` });
+  ready = await waitLine(/phantom-burn: ready/, 60000);
+  const assetsServed = requests.slice(before).some((r) => r.includes("/assets/stand-in/") || r.includes(".b64"));
+  if (!ready && !assetsServed && lines.some((l) => l.includes("Failed to fetch"))) {
+    console.log(`retry: attempt ${attempt + 1}: every asset fetch failed before reaching the server`);
+  } else break;
+}
 if (!ready) { console.log("SETUP-FAILED: no ready line in 60 s; console: " + JSON.stringify(lines.slice(0, 20))); shutdown(2); await new Promise(() => {}); }
 await sleep(parseInt(opt("--wait", "1500"), 10));
 const data = await evalJS(`new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => {
