@@ -105,7 +105,7 @@
       (vector-set! p 9 0)
       (vector-set! p 14 #f)
       (vector-set! p 16 (make-steps))
-      (vector-set! p 17 #f) (vector-set! p 18 #f)
+      (vector-set! p 17 #f) (vector-set! p 18 #f) (vector-set! p 22 -1)
       (vector-set! p 19 '())
       (vector-set! p 21 0.0)
       (vector-set! p 24 '())
@@ -120,8 +120,10 @@
     (define (play-guard-path! p)
       (let* ((g (vector-ref p 3)) (d (vector-ref p 1))
              (rg (room-at d (guard-x g) (guard-y g) (guard-z g))))
+        ;; before an attempt's first tick you are nowhere yet: nothing reaches you
         (hear-path! (vector-ref p 15) rg (guard-x g) (guard-y g)
-                    (vector-ref p 22) (vector-ref p 17) (vector-ref p 18))))
+                    (if (vector-ref p 17) (vector-ref p 22) -1)
+                    (or (vector-ref p 17) (guard-x g)) (or (vector-ref p 18) (guard-y g)))))
 
     ;; Your steps this tick: timed by (phantom sound logic) from how far you
     ;; moved, on the surface under you at your gait. Each heel strike is a
@@ -210,9 +212,11 @@
       (let* ((g (vector-ref p 3)) (data (vector-ref p 1))
              (state (guard-state g)) (was (vector-ref p 25))
              (groom (room-at data (guard-x g) (guard-y g) (guard-z g))))
-        ;; you: the moment he turns suspicious or worse
+        ;; you: the moment he turns suspicious or worse, when it was you he
+        ;; sensed (a rise from something else, the dark room, is not you)
         (when (and (>= state SUSPICIOUS) (< was SUSPICIOUS))
-          (incident! p (if (guard-sees? g) 'you-seen 'you-heard) (vector-ref p 22)))
+          (cond ((guard-sees? g) (incident! p 'you-seen (vector-ref p 22)))
+                ((guard-heard? g) (incident! p 'you-heard (vector-ref p 22)))))
         ;; a dark room: his room's light is a switchable circuit that is off
         (when (>= groom 0)
           (let* ((c (room-circuit (vector-ref (play-rooms data) groom)))

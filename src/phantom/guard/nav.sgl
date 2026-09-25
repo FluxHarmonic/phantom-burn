@@ -144,9 +144,15 @@
              (begin (vector-set! n 14 (nav-node-z n node)) #t))))
 
     ;; The walkable node nearest (x y z) (within NEAR-Z of height, 2 m
-    ;; across, by rings of cells), or -1.
+    ;; across, by rings of cells); failing that, the nearest across on any
+    ;; floor under or over it within 3.5 m of height (a raised spot no guard
+    ;; stands on: the cabinet top, a desk: the ground beside it), or -1.
     (define (nav-nearest-walkable n x y z)
-      (let ((here (node-near n (cell-of n x y) z NEAR-Z)))
+      (let ((near (nearest-within n x y z NEAR-Z)))
+        (if (>= near 0) near (nearest-within n x y z 3.5))))
+
+    (define (nearest-within n x y z limit)
+      (let ((here (node-near n (cell-of n x y) z limit)))
         (if (>= here 0)
             here
             (let* ((w (vector-ref n 3)) (h (vector-ref n 4))
@@ -164,7 +170,7 @@
                                 (let ((r (+ r0 dr)) (c (+ c0 dc)))
                                   (if (and (or (= (abs dr) d) (= (abs dc) d))
                                            (>= r 0) (< r h) (>= c 0) (< c w))
-                                      (let ((node (node-near n (+ (* r w) c) z NEAR-Z)))
+                                      (let ((node (node-near n (+ (* r w) c) z limit)))
                                         (if (>= node 0)
                                             (let* ((dx (- (nav-node-x n node) x)) (dy (- (nav-node-y n node) y))
                                                    (d2 (+ (* dx dx) (* dy dy))))

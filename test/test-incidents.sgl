@@ -96,9 +96,14 @@
         (let loop ((i 0))
           (unless (or (>= i (* 60 60)) (pair? (play-incidents p)))
             (play-tick! p gone on? 1.0 2.0)
-            (loop (+ i 1)))))
+            (loop (+ i 1))))
+        ;; and three seconds on: the unit coming to check is not "you"
+        ;; (review H1: its rise in awareness once logged a you-heard)
+        (let loop ((i 0)) (when (< i 180) (play-tick! p gone on? 1.0 2.0) (loop (+ i 1)))))
       (display (list 'loud 'incidents (play-incidents p) 'patches (play-patches p) 'guard-awareness (guard-awareness g))) (newline)
       (assert-true (assq 'dark-room (play-incidents p)))
+      (assert-false (assq 'you-heard (play-incidents p)))
+      (assert-false (assq 'you-seen (play-incidents p)))
       (assert-true (pair? (play-patches p)))
       (assert-true (let ((s (car (car (play-patches p))))) (and (>= (string-length s) 18) (string=? (substring s 0 18) "EMERGENCY LIGHTING"))))
       ;; and he comes to check it

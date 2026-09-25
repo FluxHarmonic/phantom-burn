@@ -87,6 +87,8 @@
       (set! *fade-in* FADE-IN)
       (set! *badge-flash* 0.0)
       (set! *place* #f)
+      (set! *use* #f)
+      (set! *feed-gx* #f)
       (render-hide-part! 'badge #f)
       (play-start-walker *core* *coll*))
 
@@ -105,10 +107,12 @@
     (define (play-mode-set-dev! on?) (set! *dev* on?))
     (define (play-press! k)
       (cond ((not *core*) #f)
-            ((memq k '(f use)) (set! *use* #t) #t)
+            ((memq k '(f use)) (unless (play-hold?) (set! *use* #t)) #t)
             ((and (not *dev*) (memq k LIGHT-KEYS)) #t)
             (else #f)))
-    (define LIGHT-KEYS (map string->symbol '("1" "2" "3" "0")))
+    ;; the lab's light and view keys: they switch circuits and move you
+    ;; (a view), which play leaves to ?dev
+    (define LIGHT-KEYS (map string->symbol '("1" "2" "3" "0" "4" "5" "6" "7" "8" "9" "j" "k" "l")))
 
     (define (say! line) (set! *message* line) (set! *message-t* 2.5))
 
@@ -170,6 +174,8 @@
       (set! *fade-in* FADE-IN)
       (set! *badge-flash* 0.0)
       (set! *place* #t)
+      (set! *use* #f)
+      (set! *feed-gx* #f)
       (render-hide-part! 'badge #f)
       ;; the title cleared the guard's draw (its room is not this floor)
       (render-set-extra-draw! draw-guard!))
