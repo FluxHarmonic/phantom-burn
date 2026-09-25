@@ -1,0 +1,394 @@
+;;; (phantom guard guard) - One patrol guard (design §5): the route, the
+;;; cone, awareness, the alert states, the hunt and the capture.
+;;;
+;;; The guard walks its route's points in a loop, waiting at each for the
+;;; floor's wait there and looking left and right while it waits. It sees
+;;; with a cone of 100 degrees and 20 m (full rate in the middle 60, down to
+;;; a third at the edge), from eyes 1.65 m up, along a sight line through
+;;; the collision (glass passes). What it sees raises its awareness, a
+;;; number from 0 to 1, at a rate of your visibility (light x stance x
+;;; motion, from (phantom guard sense)) times how central and how near you
+;;; are. In real darkness it notices you only within 2 m (Mark of the
+;;; Ninja's rule, design §5), and within 1.2 m it feels you whatever the
+;;; light, if nothing is between you.
+;;;
+;;;   CALM        below 0.3   patrols
+;;;   SUSPICIOUS  0.3         stops and turns toward where it saw you
+;;;   SEARCHING   0.6         walks there, looks around for a while, then
+;;;                           goes back to its route on edge (it notices
+;;;                           faster for the rest of the attempt)
+;;;   HUNTING     1.0         chases you; it keeps the hunt while it can see
+;;;                           you, and gives up LOST-TIME after it last did,
+;;;                           searching where it lost you
+;;;
+;;; Awareness falls when it sees nothing, through every state on the way
+;;; down (Thief's rule). A hunting guard that reaches you catches you
+;;; (guard-caught?); the game restarts the floor (D12).
+;;;
+;;; The guard steps on the game's fixed tick with no platform calls and
+;;; only + - * / sqrt and (phantom detmath), so it replays the same on every
+;;; target. Its state is one vector, changed in place; nothing is allocated
+;;; per tick apart from the collision queries' own closures.
+
+(define-library (phantom guard guard)
+  (import (sigil core)
+          (sigil math)
+          (phantom detmath)
+          (phantom collide)
+          (phantom play data)
+          (phantom guard nav)
+          (phantom guard sense))
+
+  (export make-guard-world guard-world-nav make-guard guard-reset!
+          guard-step! guard-caught?
+          guard-x guard-y guard-z guard-fx guard-fy
+          guard-prev-x guard-prev-y guard-prev-fx guard-prev-fy
+          guard-state guard-state-name guard-awareness guard-sees? guard-rate
+          guard-leg guard-waiting? guard-phase guard-on-edge?
+          make-target target-set!
+          CALM SUSPICIOUS SEARCHING HUNTING
+          GUARD-EYE RANGE WALK-SPEED HUNT-SPEED)
+
+  (begin
+
+    (define CALM 0) (define SUSPICIOUS 1) (define SEARCHING 2) (define HUNTING 3)
+    (define (guard-state-name s)
+      (vector-ref (vector 'calm 'suspicious 'searching 'hunting) s))
+
+    (define GUARD-EYE 1.65)
+    (define RANGE 20.0)
+    (define COS-INNER 0.8660254037844387)   ; 30 degrees off centre
+    (define COS-OUTER 0.6427876096865394)   ; 50: the 100-degree cone's edge
+    (define DARK-01 0.12)                   ; below this light, only within DARK-NEAR
+    (define DARK-NEAR 2.0)
+    (define FEEL-NEAR 1.2)
+    (define GAIN 0.9)                       ; awareness per second, fully visible at the centre, near
+    (define EDGE-GAIN 1.4)                  ; on edge after a search
+    (define DECAY 0.12)                     ; per second, seeing nothing
+    (define SEARCH-DECAY 0.03)
+    (define LOST-TIME 5.0)                  ; a hunt given up after this long without sight
+    (define SEARCH-LOOK 8.0)                ; looking around where it lost you
+    (define WALK-SPEED 1.3)
+    (define SEARCH-SPEED 1.7)
+    (define HUNT-SPEED 3.5)                 ; your walk is 2.4 and your run 4.4
+    (define CATCH-REACH 0.8)
+    (define ARRIVE 0.3)
+    (define REFIELD-TICKS 15)
+
+    ;; turn steps per tick (1/60 s) at three rates, as cos and sin
+    (define TICK (/ 1.0 60.0))
+    (define (turn-step rate) (vector (dcos (* rate TICK)) (dsin (* rate TICK))))
+    (define TURN-WALK (turn-step 3.0))
+    (define TURN-LOOK (turn-step 1.2))
+    (define TURN-FAST (turn-step 6.0))
+
+    ;; --- the world a guard moves in ------------------------------------------
+
+    ;; A guard world: a vector
+    ;;  0 tag  1 collision  2 play data  3 nav  4 route fields (one per point)
+    ;;  5 the dynamic field (searching, hunting)
+    (define (make-guard-world coll data)
+      (let* ((route (play-route data))
+             (np (quotient (vector-length route) 2))
+             (nav (make-nav coll -0.5 -0.5 27.0 22.0))
+             (fields (make-vector np #f)))
+        (let loop ((i 0))
+          (when (< i np)
+            (let ((f (make-field nav)))
+              (nav-field! nav f (vector-ref route (* 2 i)) (vector-ref route (+ 1 (* 2 i))))
+              (vector-set! fields i f))
+            (loop (+ i 1))))
+        (vector 'guard-world coll data nav fields (make-field nav))))
+    (define (guard-world-nav gw) (vector-ref gw 3))
+
+    ;; The runner, as the guard needs it: a vector, filled by the game once
+    ;; a tick (target-set!), so the guard's step reads it without allocating.
+    ;;  0 x  1 y  2 z (feet)  3 eye z  4 height  5 light 0..1
+    ;;  6 visibility (light x stance x motion)  7 shape (stance x motion)
+    (define (make-target) (make-vector 8 0.0))
+    (define (target-set! t x y z eye h light vis shape)
+      (vector-set! t 0 x) (vector-set! t 1 y) (vector-set! t 2 z) (vector-set! t 3 eye)
+      (vector-set! t 4 h) (vector-set! t 5 light) (vector-set! t 6 vis) (vector-set! t 7 shape)
+      t)
+
+    ;; --- the guard ---------------------------------------------------------------
+
+    (define S-X 1) (define S-Y 2) (define S-Z 3) (define S-FX 4) (define S-FY 5)
+    (define S-PX 6) (define S-PY 7) (define S-PFX 8) (define S-PFY 9)
+    (define S-STATE 10) (define S-AWARE 11) (define S-LEG 12) (define S-WAIT 13)
+    (define S-LOOK 14) (define S-LSX 15) (define S-LSY 16) (define S-LOST 17)
+    (define S-SEARCH 18) (define S-EDGE 19) (define S-SEEN 20) (define S-CAUGHT 21)
+    (define S-FTX 22) (define S-FTY 23) (define S-FAGE 24) (define S-PHASE 25)
+    (define S-BFX 26) (define S-BFY 27) (define S-RATE 28) (define S-ARRIVED 29)
+    (define SLOTS 30)
+
+    (define (make-guard gw leg)
+      (let ((g (make-vector SLOTS 0.0)))
+        (vector-set! g 0 'guard)
+        (guard-reset! g gw leg)
+        g))
+
+    ;; Back to the start of an attempt: at route point leg, calm, facing
+    ;; the next point.
+    (define (guard-reset! g gw leg)
+      (let* ((route (play-route (vector-ref gw 2)))
+             (np (quotient (vector-length route) 2))
+             (leg (modulo leg np))
+             (next (modulo (+ leg 1) np))
+             (x (vector-ref route (* 2 leg))) (y (vector-ref route (+ 1 (* 2 leg))))
+             (dx (- (vector-ref route (* 2 next)) x)) (dy (- (vector-ref route (+ 1 (* 2 next))) y))
+             (l (sqrt (+ (* dx dx) (* dy dy)))))
+        (vector-set! g S-X x) (vector-set! g S-Y y) (vector-set! g S-Z 0.0)
+        (vector-set! g S-FX (if (> l 0.0) (/ dx l) 0.0))
+        (vector-set! g S-FY (if (> l 0.0) (/ dy l) 1.0))
+        (vector-set! g S-STATE CALM) (vector-set! g S-AWARE 0.0)
+        (vector-set! g S-LEG next)            ; heading for the next point
+        (vector-set! g S-WAIT -1.0) (vector-set! g S-LOOK 0.0)
+        (vector-set! g S-LSX x) (vector-set! g S-LSY y) (vector-set! g S-LOST 0.0)
+        (vector-set! g S-SEARCH 0.0) (vector-set! g S-EDGE #f) (vector-set! g S-SEEN #f)
+        (vector-set! g S-CAUGHT #f)
+        (vector-set! g S-FTX 1e9) (vector-set! g S-FTY 1e9) (vector-set! g S-FAGE 0)
+        (vector-set! g S-PHASE 0.0) (vector-set! g S-RATE 0.0) (vector-set! g S-ARRIVED #f)
+        (vector-set! g S-BFX (vector-ref g S-FX)) (vector-set! g S-BFY (vector-ref g S-FY))
+        (save-prev! g)
+        g))
+
+    (define (save-prev! g)
+      (vector-set! g S-PX (vector-ref g S-X)) (vector-set! g S-PY (vector-ref g S-Y))
+      (vector-set! g S-PFX (vector-ref g S-FX)) (vector-set! g S-PFY (vector-ref g S-FY)))
+
+    (define (guard-x g) (vector-ref g S-X))
+    (define (guard-y g) (vector-ref g S-Y))
+    (define (guard-z g) (vector-ref g S-Z))
+    (define (guard-fx g) (vector-ref g S-FX))
+    (define (guard-fy g) (vector-ref g S-FY))
+    (define (guard-prev-x g) (vector-ref g S-PX))
+    (define (guard-prev-y g) (vector-ref g S-PY))
+    (define (guard-prev-fx g) (vector-ref g S-PFX))
+    (define (guard-prev-fy g) (vector-ref g S-PFY))
+    (define (guard-state g) (vector-ref g S-STATE))
+    (define (guard-awareness g) (vector-ref g S-AWARE))
+    (define (guard-sees? g) (vector-ref g S-SEEN))
+    (define (guard-rate g) (vector-ref g S-RATE))
+    (define (guard-leg g) (vector-ref g S-LEG))
+    (define (guard-waiting? g) (>= (vector-ref g S-WAIT) 0.0))
+    (define (guard-phase g) (vector-ref g S-PHASE))
+    (define (guard-on-edge? g) (vector-ref g S-EDGE))
+    (define (guard-caught? g) (vector-ref g S-CAUGHT))
+
+    ;; --- the step -------------------------------------------------------------------
+
+    ;; One tick: see, update awareness and state, move. t is the runner
+    ;; (make-target).
+    (define (guard-step! g gw t dt)
+      (save-prev! g)
+      (perceive! g gw t dt)
+      (think! g t dt)
+      (act! g gw t dt)
+      (catch! g t))
+
+    ;; --- perception ------------------------------------------------------------------
+
+    (define (perceive! g gw t dt)
+      (let* ((gx (vector-ref g S-X)) (gy (vector-ref g S-Y))
+             (ez (+ (vector-ref g S-Z) GUARD-EYE))
+             (px (vector-ref t 0)) (py (vector-ref t 1)) (pz (vector-ref t 2))
+             (chest (+ pz (* 0.55 (vector-ref t 4))))
+             (head (vector-ref t 3))
+             (dx (- px gx)) (dy (- py gy)) (dz (- chest ez))
+             (dh (sqrt (+ (* dx dx) (* dy dy))))
+             (d (sqrt (+ (* dh dh) (* dz dz))))
+             (c (if (> d 1e-6) (/ (+ (* dx (vector-ref g S-FX)) (* dy (vector-ref g S-FY))) d) 1.0))
+             (near (and (< dh FEEL-NEAR) (< (abs (- pz (vector-ref g S-Z))) 1.5)))
+             (light (vector-ref t 5))
+             (candidate (and (< d RANGE)
+                             (or near (>= c COS-OUTER))
+                             (or near (>= light DARK-01) (< d DARK-NEAR))))
+             (clear (and candidate
+                         (let ((coll (vector-ref gw 1)) (glass (play-glass (vector-ref gw 2))))
+                           (or (sight-clear? coll glass gx gy ez px py chest)
+                               (sight-clear? coll glass gx gy ez px py head))))))
+        (if clear
+            (let* ((af (cond (near 1.0)
+                             ((>= c COS-INNER) 1.0)
+                             (else (+ 0.35 (* 0.65 (/ (- c COS-OUTER) (- COS-INNER COS-OUTER)))))))
+                   (df (- 1.0 (/ d RANGE)))
+                   ;; in the dark, near: seen as a shape (stance x motion),
+                   ;; not by the light on you
+                   (vis (if (< light DARK-01) (* 0.5 (vector-ref t 7)) (vector-ref t 6)))
+                   (rate (* GAIN vis af df (if (vector-ref g S-EDGE) EDGE-GAIN 1.0)))
+                   (rate (if near (max rate 0.9) rate)))
+              (vector-set! g S-SEEN #t)
+              (vector-set! g S-RATE rate)
+              (vector-set! g S-LSX px) (vector-set! g S-LSY py)
+              (vector-set! g S-LOST 0.0)
+              (vector-set! g S-AWARE (min 1.0 (+ (vector-ref g S-AWARE) (* rate dt)))))
+            (begin
+              (vector-set! g S-SEEN #f)
+              (vector-set! g S-RATE 0.0)
+              (vector-set! g S-LOST (+ (vector-ref g S-LOST) dt))))))
+
+    ;; --- states ------------------------------------------------------------------------
+
+    (define (enter! g state)
+      (unless (= (vector-ref g S-STATE) state)
+        (vector-set! g S-STATE state)
+        (vector-set! g S-ARRIVED #f)
+        (vector-set! g S-SEARCH 0.0)
+        (vector-set! g S-FTX 1e9)
+        (vector-set! g S-WAIT -1.0)))
+
+    (define (think! g t dt)
+      (let ((a (vector-ref g S-AWARE))
+            (s (vector-ref g S-STATE))
+            (seen (vector-ref g S-SEEN)))
+        (cond
+          ((= s HUNTING)
+           (cond (seen (vector-set! g S-AWARE 1.0))
+                 ((> (vector-ref g S-LOST) LOST-TIME)
+                  (vector-set! g S-AWARE 0.85)
+                  (enter! g SEARCHING))))
+          ((>= a 1.0) (enter! g HUNTING))
+          ((and (>= a 0.6) (< s SEARCHING)) (enter! g SEARCHING))
+          ((and (>= a 0.3) (= s CALM)) (enter! g SUSPICIOUS))
+          (else
+           (unless seen
+             (vector-set! g S-AWARE (max 0.0 (- a (* dt (if (= s SEARCHING) SEARCH-DECAY DECAY))))))
+           (cond ((and (= s SUSPICIOUS) (< (vector-ref g S-AWARE) 0.2))
+                  (enter! g CALM))
+                 ((and (= s SEARCHING) (vector-ref g S-ARRIVED) (> (vector-ref g S-SEARCH) SEARCH-LOOK))
+                  ;; back to the route, on edge
+                  (vector-set! g S-AWARE (min (vector-ref g S-AWARE) 0.25))
+                  (vector-set! g S-EDGE #t)
+                  (enter! g CALM)))))))
+
+    ;; --- acting ------------------------------------------------------------------------
+
+    (define (act! g gw t dt)
+      (let ((s (vector-ref g S-STATE)))
+        (cond
+          ((= s CALM) (patrol! g gw dt))
+          ((= s SUSPICIOUS)
+           (turn-toward! g (vector-ref g S-LSX) (vector-ref g S-LSY) TURN-WALK))
+          ((= s SEARCHING)
+           (if (vector-ref g S-ARRIVED)
+               (begin
+                 (vector-set! g S-SEARCH (+ (vector-ref g S-SEARCH) dt))
+                 (look-around! g (vector-ref g S-SEARCH) 4.0))
+               (when (go-to! g gw (vector-ref g S-LSX) (vector-ref g S-LSY) SEARCH-SPEED 0.6 dt)
+                 (vector-set! g S-ARRIVED #t)
+                 (vector-set! g S-BFX (vector-ref g S-FX)) (vector-set! g S-BFY (vector-ref g S-FY)))))
+          (else
+           (let ((tx (if (vector-ref g S-SEEN) (vector-ref t 0) (vector-ref g S-LSX)))
+                 (ty (if (vector-ref g S-SEEN) (vector-ref t 1) (vector-ref g S-LSY))))
+             (go-to! g gw tx ty HUNT-SPEED 0.0 dt)
+             (when (vector-ref g S-SEEN)
+               (turn-toward! g (vector-ref t 0) (vector-ref t 1) TURN-FAST)))))))
+
+    ;; The route: walk to the leg's point, wait there looking around, next.
+    (define (patrol! g gw dt)
+      (let* ((route (play-route (vector-ref gw 2)))
+             (waits (play-waits (vector-ref gw 2)))
+             (np (vector-length waits))
+             (leg (exact (vector-ref g S-LEG))))
+        (if (>= (vector-ref g S-WAIT) 0.0)
+            (let ((left (- (vector-ref g S-WAIT) dt)))
+              (look-around! g (- (vector-ref waits leg) left) (vector-ref waits leg))
+              (if (> left 0.0)
+                  (vector-set! g S-WAIT left)
+                  (begin
+                    (vector-set! g S-WAIT -1.0)
+                    (vector-set! g S-LEG (modulo (+ leg 1) np)))))
+            (let* ((f (vector-ref (vector-ref gw 4) leg))
+                   (nav (vector-ref gw 3))
+                   (steps (nav-steer! nav f (vector-ref g S-X) (vector-ref g S-Y)))
+                   (wx (vector-ref route (* 2 leg))) (wy (vector-ref route (+ 1 (* 2 leg))))
+                   (ex (- wx (vector-ref g S-X))) (ey (- wy (vector-ref g S-Y))))
+              (if (or (not steps) (< (+ (* ex ex) (* ey ey)) (* ARRIVE ARRIVE)) (= steps 0))
+                  (if (> (vector-ref waits leg) 0.0)
+                      (begin
+                        (vector-set! g S-WAIT (vector-ref waits leg))
+                        (vector-set! g S-BFX (vector-ref g S-FX)) (vector-set! g S-BFY (vector-ref g S-FY)))
+                      (vector-set! g S-LEG (modulo (+ leg 1) np)))
+                  (step-to! g nav (nav-steer-x nav) (nav-steer-y nav) WALK-SPEED dt))))))
+
+    ;; Walk toward (tx, ty) through the nav, rebuilding the dynamic field
+    ;; when the target has moved. Returns #t when within reach of it (or
+    ;; when it cannot be reached: nothing more to walk).
+    (define (go-to! g gw tx ty speed reach dt)
+      (let* ((nav (vector-ref gw 3))
+             (f (vector-ref gw 5))
+             (mx (- tx (vector-ref g S-FTX))) (my (- ty (vector-ref g S-FTY))))
+        (vector-set! g S-FAGE (+ (vector-ref g S-FAGE) 1))
+        (when (and (> (+ (* mx mx) (* my my)) 0.25)
+                   (or (> (vector-ref g S-FAGE) REFIELD-TICKS) (> (vector-ref g S-FTX) 1e8)))
+          (nav-field! nav f tx ty)
+          (vector-set! g S-FTX tx) (vector-set! g S-FTY ty) (vector-set! g S-FAGE 0))
+        (let* ((ex (- tx (vector-ref g S-X))) (ey (- ty (vector-ref g S-Y)))
+               (close (< (+ (* ex ex) (* ey ey)) (* (max reach ARRIVE) (max reach ARRIVE))))
+               (steps (nav-steer! nav f (vector-ref g S-X) (vector-ref g S-Y))))
+          (cond
+            ((or close (not steps)) #t)
+            ((= steps 0)
+             ;; in the target's own cell (or the nearest one it can stand
+             ;; in): straight at it, if the ground allows
+             (step-to! g nav tx ty speed dt)
+             (< reach 0.01))
+            (else (step-to! g nav (nav-steer-x nav) (nav-steer-y nav) speed dt) #f)))))
+
+    ;; Move toward (tx, ty) at speed, sliding along what is not walkable,
+    ;; and turn to face the way it goes.
+    (define (step-to! g nav tx ty speed dt)
+      (let* ((x (vector-ref g S-X)) (y (vector-ref g S-Y))
+             (dx (- tx x)) (dy (- ty y))
+             (l (sqrt (+ (* dx dx) (* dy dy)))))
+        (when (> l 1e-6)
+          (let* ((step (min l (* speed dt)))
+                 (nx (+ x (* step (/ dx l)))) (ny (+ y (* step (/ dy l)))))
+            (cond ((nav-walkable? nav nx ny) (vector-set! g S-X nx) (vector-set! g S-Y ny))
+                  ((nav-walkable? nav nx y) (vector-set! g S-X nx))
+                  ((nav-walkable? nav x ny) (vector-set! g S-Y ny))
+                  ((not (nav-walkable? nav x y))
+                   ;; off the walkable cells (a reset, a push): straight on
+                   (vector-set! g S-X nx) (vector-set! g S-Y ny)))
+            (vector-set! g S-PHASE (+ (vector-ref g S-PHASE) step))
+            (unless (and (= (vector-ref g S-STATE) HUNTING) (vector-ref g S-SEEN))
+              (turn-toward! g tx ty TURN-WALK))))))
+
+    ;; Turn the facing toward (tx, ty) by at most one step of turn.
+    (define (turn-toward! g tx ty turn)
+      (let* ((dx (- tx (vector-ref g S-X))) (dy (- ty (vector-ref g S-Y)))
+             (l (sqrt (+ (* dx dx) (* dy dy)))))
+        (when (> l 1e-6)
+          (let* ((ux (/ dx l)) (uy (/ dy l))
+                 (fx (vector-ref g S-FX)) (fy (vector-ref g S-FY))
+                 (dot (+ (* fx ux) (* fy uy)))
+                 (cross (- (* fx uy) (* fy ux)))
+                 (c (vector-ref turn 0)) (s (vector-ref turn 1)))
+            (if (>= dot c)
+                (begin (vector-set! g S-FX ux) (vector-set! g S-FY uy))
+                (let* ((s (if (>= cross 0.0) s (- s)))
+                       (nfx (- (* fx c) (* fy s)))
+                       (nfy (+ (* fx s) (* fy c)))
+                       (m (sqrt (+ (* nfx nfx) (* nfy nfy)))))
+                  (vector-set! g S-FX (/ nfx m)) (vector-set! g S-FY (/ nfy m))))))))
+
+    ;; Look left and right of the facing saved on arrival (S-BFX, S-BFY):
+    ;; up to 60 degrees each way over a period, from the time spent there.
+    (define (look-around! g time period)
+      (let* ((p (max period 1.0))
+             (a (* 1.05 (dsin (/ (* TAU time) p))))
+             (c (dcos a)) (s (dsin a))
+             (bx (vector-ref g S-BFX)) (by (vector-ref g S-BFY)))
+        (turn-toward! g (+ (vector-ref g S-X) (- (* bx c) (* by s)))
+                      (+ (vector-ref g S-Y) (+ (* bx s) (* by c)))
+                      TURN-LOOK)))
+
+    ;; A hunting guard within reach of you, at your height, catches you.
+    (define (catch! g t)
+      (when (= (vector-ref g S-STATE) HUNTING)
+        (let ((dx (- (vector-ref t 0) (vector-ref g S-X)))
+              (dy (- (vector-ref t 1) (vector-ref g S-Y))))
+          (when (and (< (+ (* dx dx) (* dy dy)) (* CATCH-REACH CATCH-REACH))
+                     (< (abs (- (vector-ref t 2) (vector-ref g S-Z))) 1.2))
+            (vector-set! g S-CAUGHT #t)))))))

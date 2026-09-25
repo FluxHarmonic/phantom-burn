@@ -1,0 +1,151 @@
+;;; (phantom play data) - What P1's guard and game loop read from a floor:
+;;; its play.sexp (scripts/play-import.mjs), read once at load.
+;;;
+;;;   guards   one patrol: its route ((x y) ...) and the wait at each point
+;;;   start    where the runner arrives, and facing
+;;;   exit     the stairwell door, and the badge it wants
+;;;   badge    the facilities badge on the FM office's desk (x y z)
+;;;   glass    the collision's glass triangles, which sight passes through
+;;;   light    the floor's baked per-vertex circuit light, sampled on a grid
+;;;            over every upward surface: per cell, one layer per floor
+;;;            height (the lobby and the mezzanine over it), each with the
+;;;            intensity of circuits 0 to 5 there
+;;;
+;;; The light grid answers "how much of each circuit reaches the floor where
+;;; you stand"; (phantom play light) turns that and the live circuit state
+;;; into how lit you are. Everything here is plain vectors and numbers, read
+;;; once, so the per-tick lookups allocate nothing.
+
+(define-library (phantom play data)
+  (import (sigil core)
+          (sigil math)
+          (sigil io))
+
+  (export play-data-from-string play-data?
+          play-route play-waits play-start play-exit play-badge play-glass
+          light-cell light-grid-x0 light-grid-y0 light-grid-w light-grid-h
+          light-sample! light-sample-z NCIRCUITS)
+
+  (begin
+
+    (define NCIRCUITS 6)
+    (define LAYER 7)                ; z, then circuits 0..5
+
+    ;; The data: a vector
+    ;;  0 tag  1 route (vector of x y pairs, flat)  2 waits (vector)
+    ;;  3 start (x y facing)  4 exit (x y)  5 badge (x y z)
+    ;;  6 glass (flat vector, 9 per triangle)
+    ;;  7 cell  8 x0  9 y0  10 w  11 h
+    ;;  12 starts (vector w*h + 1: each cell's first layer)
+    ;;  13 layers (flat vector, LAYER per layer)
+    ;;  14 the z of the last sample
+    (define (play-data? d) (and (vector? d) (= (vector-length d) 15) (eq? (vector-ref d 0) 'play-data)))
+    (define (play-route d) (vector-ref d 1))
+    (define (play-waits d) (vector-ref d 2))
+    (define (play-start d) (vector-ref d 3))
+    (define (play-exit d) (vector-ref d 4))
+    (define (play-badge d) (vector-ref d 5))
+    (define (play-glass d) (vector-ref d 6))
+    (define (light-cell d) (vector-ref d 7))
+    (define (light-grid-x0 d) (vector-ref d 8))
+    (define (light-grid-y0 d) (vector-ref d 9))
+    (define (light-grid-w d) (vector-ref d 10))
+    (define (light-grid-h d) (vector-ref d 11))
+    (define (light-sample-z d) (vector-ref d 14))
+
+    (define (entry datum key)
+      (let ((e (assq key datum)))
+        (unless e (error (string-append "play.sexp: no (" (symbol->string key) " ...)")))
+        (cdr e)))
+
+    (define (flo x) (* 1.0 x))
+    (define (drop l n) (if (= n 0) l (drop (cdr l) (- n 1))))
+
+    ;; The play.sexp text as play data, or an error naming what is missing.
+    (define (play-data-from-string s)
+      (let* ((datum (read (open-input-string s)))
+             (_ (unless (pair? datum) (error "play.sexp: not a list")))
+             (guard (car (entry datum 'guards)))
+             (_ (unless (and (pair? guard) (eq? (car guard) 'patrol))
+                  (error "play.sexp: the first guard is not a patrol")))
+             (points (cadr guard))
+             (waits (caddr guard))
+             (route (list->vector (apply append (map (lambda (p) (list (flo (car p)) (flo (cadr p)))) points))))
+             (glass (list->vector (map flo (entry datum 'glass))))
+             (light (entry datum 'light))
+             (cell (flo (list-ref light 0)))
+             (x0 (flo (list-ref light 1)))
+             (y0 (flo (list-ref light 2)))
+             (w (list-ref light 3))
+             (h (list-ref light 4))
+             (n (list-ref light 5))
+             (starts (make-vector (+ 1 (* w h)) 0))
+             (layers (make-vector (* LAYER n) 0.0)))
+        (unless (= (length points) (length waits))
+          (error "play.sexp: the guard's route and waits differ in length"))
+        (unless (= (remainder (vector-length glass) 9) 0)
+          (error "play.sexp: the glass is not whole triangles"))
+        ;; the layers, sorted by cell: count per cell, then prefix sums
+        (let fill ((rest (drop light 6)) (i 0) (prev -1))
+          (cond ((null? rest)
+                 (unless (= i n) (error "play.sexp: the light grid has fewer layers than it says")))
+                ((>= i n) (error "play.sexp: the light grid has more layers than it says"))
+                (else
+                 (let ((k (car rest)))
+                   (when (or (< k prev) (< k 0) (>= k (* w h)))
+                     (error "play.sexp: a light cell is out of order or out of range"))
+                   (vector-set! starts (+ k 1) (+ (vector-ref starts (+ k 1)) 1))
+                   (let copy ((j 0) (vs (cdr rest)))
+                     (if (< j LAYER)
+                         (begin
+                           (vector-set! layers (+ (* LAYER i) j) (flo (car vs)))
+                           (copy (+ j 1) (cdr vs)))
+                         (fill vs (+ i 1) k)))))))
+        (let sum ((k 1))
+          (when (<= k (* w h))
+            (vector-set! starts k (+ (vector-ref starts k) (vector-ref starts (- k 1))))
+            (sum (+ k 1))))
+        (vector 'play-data route (list->vector (map flo waits))
+                (list->vector (map flo (entry datum 'start)))
+                (list->vector (map flo (entry datum 'exit)))
+                (list->vector (map flo (entry datum 'badge)))
+                glass cell x0 y0 w h starts layers 0.0)))
+
+    ;; The grid cell of (x, y), or -1 off the grid.
+    (define (cell-of d x y)
+      (let ((col (exact (floor (/ (- x (vector-ref d 8)) (vector-ref d 7)))))
+            (row (exact (floor (/ (- y (vector-ref d 9)) (vector-ref d 7))))))
+        (if (and (>= col 0) (< col (vector-ref d 10)) (>= row 0) (< row (vector-ref d 11)))
+            (+ (* row (vector-ref d 10)) col)
+            -1)))
+
+    ;; The light at the floor under (x, y) for feet at z: the highest layer
+    ;; at or below z + 0.4 (the floor you stand on, not the mezzanine over
+    ;; you), each circuit's intensity into out (a vector of NCIRCUITS).
+    ;; Returns #t, or #f with out zeroed where no floor was sampled.
+    (define (light-sample! d x y z out)
+      (vector-fill! out 0.0)
+      (let ((k (cell-of d x y)))
+        (if (< k 0)
+            #f
+            (let* ((starts (vector-ref d 12))
+                   (layers (vector-ref d 13))
+                   (a (vector-ref starts k))
+                   (b (vector-ref starts (+ k 1))))
+              (let pick ((i a) (best -1))
+                (if (< i b)
+                    (let ((lz (vector-ref layers (* LAYER i))))
+                      (pick (+ i 1)
+                            (if (and (<= lz (+ z 0.4))
+                                     (or (< best 0) (> lz (vector-ref layers (* LAYER best)))))
+                                i
+                                best)))
+                    (if (< best 0)
+                        #f
+                        (begin
+                          (vector-set! d 14 (vector-ref layers (* LAYER best)))
+                          (let copy ((j 0))
+                            (when (< j NCIRCUITS)
+                              (vector-set! out j (vector-ref layers (+ (* LAYER best) 1 j)))
+                              (copy (+ j 1))))
+                          #t))))))))))

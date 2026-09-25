@@ -1,0 +1,175 @@
+;;; (phantom guard sense) - What a guard can see, and how visible the runner
+;;; is (design §3 "Light and visibility", §5 "Perception").
+;;;
+;;; Sight is a segment against the floor's collision: walls, doors, desks
+;;; and the cabinet block it, so a crouched body behind a desk is hidden and
+;;; a standing one is not. Glass does not block it: a hit on one of the
+;;; floor's glass triangles continues past the pane.
+;;;
+;;; Visibility is light x stance x motion. The light is sampled at the floor
+;;; under the runner's feet, Thief's way, from the floor's baked per-vertex
+;;; circuit light (the play data's grid) and the circuits' live state: each
+;;; circuit's baked intensity there times its colour's brightness, its level
+;;; and whether it is on, plus the ambient the renderer adds (the night's
+;;; floor, and bounce in proportion to how much of the switchable light is
+;;; on). So switching a circuit off drops the light where it reached, and
+;;; drops the bounce everywhere a little.
+;;;
+;;; (light-levels! ...) is called once a tick with the circuits' state;
+;;; the lookups after it allocate nothing.
+
+(define-library (phantom guard sense)
+  (import (sigil core)
+          (sigil math)
+          (phantom collide)
+          (phantom play data))
+
+  (export sight-clear? make-light-state light-levels! light-at light-rgb-at!
+          light-r light-g light-b
+          light-01 stance-factor motion-factor
+          LIGHT-DARK LIGHT-BRIGHT NIGHT BOUNCE)
+
+  (begin
+
+    ;; The renderer's ambient ((phantom render) sync-light!): the night's
+    ;; floor everywhere, plus bounce in proportion to the switchable
+    ;; circuits that are on. Kept equal to render.sgl's by hand.
+    (define NIGHT '(0.045 0.032 0.085))
+    (define BOUNCE '(0.155 0.108 0.255))
+
+    ;; The light, as brightness (luma), that maps to 0 and to 1 in light-01.
+    ;; Measured on floor 14 (test/test-guard.sgl prints the table): the dark
+    ;; lobby is about 0.06, the lit lobby about 0.45.
+    (define LIGHT-DARK 0.07)
+    (define LIGHT-BRIGHT 0.40)
+
+    (define (luma r g b) (+ (* 0.3 r) (* 0.59 g) (* 0.11 b)))
+
+    ;; --- sight --------------------------------------------------------------
+
+    ;; Whether the segment from (ox oy oz) to (tx ty tz) is clear of
+    ;; everything but glass.
+    (define (sight-clear? coll glass ox oy oz tx ty tz)
+      (let loop ((ox ox) (oy oy) (oz oz) (tries 0))
+        (let* ((dx (- tx ox)) (dy (- ty oy)) (dz (- tz oz))
+               (t (collide-ray coll ox oy oz dx dy dz)))
+          (cond
+            ((not t) #t)
+            ((> t 0.9999) #t)
+            ((>= tries 4) #f)
+            (else
+             (let ((hx (+ ox (* t dx))) (hy (+ oy (* t dy))) (hz (+ oz (* t dz)))
+                   (len (sqrt (+ (* dx dx) (* dy dy) (* dz dz)))))
+               (if (on-glass? glass hx hy hz)
+                   ;; past the pane by 2 cm
+                   (let ((k (/ 0.02 (max len 1e-6))))
+                     (loop (+ hx (* k dx)) (+ hy (* k dy)) (+ hz (* k dz)) (+ tries 1)))
+                   #f)))))))
+
+    ;; Whether (x y z) lies on one of the glass triangles (within 1 cm of
+    ;; its plane, inside its edges).
+    (define (on-glass? g x y z)
+      (let loop ((i 0))
+        (and (< i (vector-length g))
+             (or (on-triangle? g i x y z)
+                 (loop (+ i 9))))))
+
+    (define (on-triangle? g i x y z)
+      (let* ((ax (vector-ref g i)) (ay (vector-ref g (+ i 1))) (az (vector-ref g (+ i 2)))
+             (ux (- (vector-ref g (+ i 3)) ax)) (uy (- (vector-ref g (+ i 4)) ay)) (uz (- (vector-ref g (+ i 5)) az))
+             (vx (- (vector-ref g (+ i 6)) ax)) (vy (- (vector-ref g (+ i 7)) ay)) (vz (- (vector-ref g (+ i 8)) az))
+             (nx (- (* uy vz) (* uz vy))) (ny (- (* uz vx) (* ux vz))) (nz (- (* ux vy) (* uy vx)))
+             (nn (+ (* nx nx) (* ny ny) (* nz nz)))
+             (px (- x ax)) (py (- y ay)) (pz (- z az)))
+        (and (> nn 1e-12)
+             (let ((d (/ (+ (* px nx) (* py ny) (* pz nz)) (sqrt nn))))
+               (and (< (abs d) 0.01)
+                    ;; barycentric coordinates of p in (u, v)
+                    (let* ((uu (+ (* ux ux) (* uy uy) (* uz uz)))
+                           (uv (+ (* ux vx) (* uy vy) (* uz vz)))
+                           (vv (+ (* vx vx) (* vy vy) (* vz vz)))
+                           (pu (+ (* px ux) (* py uy) (* pz uz)))
+                           (pv (+ (* px vx) (* py vy) (* pz vz)))
+                           (den (- (* uu vv) (* uv uv))))
+                      (and (> (abs den) 1e-12)
+                           (let ((s (/ (- (* vv pu) (* uv pv)) den))
+                                 (t (/ (- (* uu pv) (* uv pu)) den)))
+                             (and (>= s -0.001) (>= t -0.001) (<= (+ s t) 1.001))))))))))
+
+    ;; --- light --------------------------------------------------------------
+
+    ;; The light state: a vector
+    ;;  0 tag  1 per circuit: brightness gain (luma x level x on x pools)
+    ;;  2 per circuit: r gain  3 g  4 b  5 ambient luma  6 ambient r  7 g  8 b
+    ;;  9 scratch (intensity per circuit)  10 last r  11 g  12 b
+    ;; circuits is the floor.sexp's (circuits (NAME INDEX LEVEL R G B SWITCHABLE?) ...).
+    (define (make-light-state)
+      (vector 'light (make-vector NCIRCUITS 0.0) (make-vector NCIRCUITS 0.0)
+              (make-vector NCIRCUITS 0.0) (make-vector NCIRCUITS 0.0)
+              0.0 0.0 0.0 0.0 (make-vector NCIRCUITS 0.0) 0.0 0.0 0.0))
+
+    ;; Once a tick: circuits as above; (on? name) whether a circuit is on;
+    ;; night and pools the renderer's knobs (render-night, render-pools).
+    (define (light-levels! ls circuits on? night pools)
+      (let loop ((cs circuits) (sw 0) (sw-on 0))
+        (if (null? cs)
+            (let ((lit (if (= sw 0) 1.0 (/ (* 1.0 sw-on) sw))))
+              (let ((r (+ (* night (car NIGHT)) (* lit (car BOUNCE))))
+                    (g (+ (* night (cadr NIGHT)) (* lit (cadr BOUNCE))))
+                    (b (+ (* night (caddr NIGHT)) (* lit (caddr BOUNCE)))))
+                (vector-set! ls 5 (luma r g b))
+                (vector-set! ls 6 r) (vector-set! ls 7 g) (vector-set! ls 8 b)))
+            (let* ((c (car cs))
+                   (k (list-ref c 1))
+                   (level (list-ref c 2))
+                   (switchable (list-ref c 6))
+                   (on (on? (car c)))
+                   (gain (* (if on 1.0 0.0) level (if switchable 1.0 pools))))
+              (when (< k NCIRCUITS)
+                (vector-set! (vector-ref ls 1) k (* gain (luma (list-ref c 3) (list-ref c 4) (list-ref c 5))))
+                (vector-set! (vector-ref ls 2) k (* gain (list-ref c 3)))
+                (vector-set! (vector-ref ls 3) k (* gain (list-ref c 4)))
+                (vector-set! (vector-ref ls 4) k (* gain (list-ref c 5))))
+              (loop (cdr cs)
+                    (if switchable (+ sw 1) sw)
+                    (if (and switchable on) (+ sw-on 1) sw-on))))))
+
+    ;; The brightness of the light at the floor under feet at (x y z).
+    (define (light-at ls d x y z)
+      (let ((i (vector-ref ls 9)) (gain (vector-ref ls 1)))
+        (light-sample! d x y z i)
+        (let loop ((k 0) (sum (vector-ref ls 5)))
+          (if (< k NCIRCUITS)
+              (loop (+ k 1) (+ sum (* (vector-ref i k) (vector-ref gain k))))
+              sum))))
+
+    ;; The light's colour there, into (light-r ls) (light-g ls) (light-b ls):
+    ;; what the guard's body is lit by.
+    (define (light-rgb-at! ls d x y z)
+      (let ((i (vector-ref ls 9)))
+        (light-sample! d x y z i)
+        (let loop ((k 0) (r (vector-ref ls 6)) (g (vector-ref ls 7)) (b (vector-ref ls 8)))
+          (if (< k NCIRCUITS)
+              (let ((ik (vector-ref i k)))
+                (loop (+ k 1)
+                      (+ r (* ik (vector-ref (vector-ref ls 2) k)))
+                      (+ g (* ik (vector-ref (vector-ref ls 3) k)))
+                      (+ b (* ik (vector-ref (vector-ref ls 4) k)))))
+              (begin (vector-set! ls 10 r) (vector-set! ls 11 g) (vector-set! ls 12 b))))))
+    (define (light-r ls) (vector-ref ls 10))
+    (define (light-g ls) (vector-ref ls 11))
+    (define (light-b ls) (vector-ref ls 12))
+
+    ;; Brightness as 0 (dark) to 1 (fully lit).
+    (define (light-01 l)
+      (let ((v (/ (- l LIGHT-DARK) (- LIGHT-BRIGHT LIGHT-DARK))))
+        (cond ((< v 0.0) 0.0) ((> v 1.0) 1.0) (else v))))
+
+    ;; Crouched is lower (design §3): a smaller, lower shape.
+    (define (stance-factor crouched?) (if crouched? 0.5 1.0))
+
+    ;; Still is lower; walking is the reference; running is more.
+    (define (motion-factor speed)
+      (cond ((< speed 0.2) 0.6)
+            ((> speed 3.0) 1.3)
+            (else (+ 0.7 (* 0.3 (min 1.0 (/ speed 2.4)))))))))

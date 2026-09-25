@@ -1,0 +1,122 @@
+;;; (phantom play core) - The rules of an attempt at the floor, with no
+;;; drawing: the light on the runner, the guard's tick, the badge, the exit
+;;; and the capture. The game ((phantom play mode)) and the gates
+;;; (test/test-guard.sgl) run this same code, headless in the gates.
+;;;
+;;; Once a tick, after the walker has stepped: (play-tick! p walker on? night
+;;; pools) takes the runner's state and the circuits' (on? name, and the
+;;; renderer's night and pools knobs), and returns what happened:
+;;;   playing   nothing ended the attempt
+;;;   badge     the facilities badge was picked up this tick
+;;;   caught    a hunting guard reached you (D12: the floor restarts)
+;;;   won       you reached the stairwell door with the badge
+;;; The attempt holds its last outcome (play-outcome) until play-reset!.
+
+(define-library (phantom play core)
+  (import (sigil core)
+          (sigil math)
+          (phantom collide)
+          (phantom walker)
+          (phantom play data)
+          (phantom guard nav)
+          (phantom guard sense)
+          (phantom guard guard))
+
+  (export make-play play? play-reset! play-tick!
+          play-data play-guard play-guard-world
+          play-light play-light-01 play-visibility play-shape
+          play-badge? play-outcome play-ticks play-start-walker
+          play-near-exit? GUARD-START-LEG PICKUP-REACH EXIT-REACH)
+
+  (begin
+
+    ;; The guard starts each attempt at this point of its route (floor 14:
+    ;; the office, so it reaches the lobby about half a minute in; at point 0
+    ;; it would stand a metre and a half from the arrival spot).
+    (define GUARD-START-LEG 2)
+    (define PICKUP-REACH 1.1)       ; m, horizontally, from the badge
+    (define EXIT-REACH 1.2)         ; m, from the stairwell door's centre
+
+    ;; The play: a vector
+    ;;  0 tag  1 data  2 guard world  3 guard  4 light state  5 target
+    ;;  6 circuits (floor.sexp's)  7 badge held?  8 outcome  9 ticks
+    ;;  10 light (brightness)  11 light 0..1  12 visibility  13 shape
+    ;;  14 near the exit without the badge?
+    (define (play? p) (and (vector? p) (= (vector-length p) 15) (eq? (vector-ref p 0) 'play)))
+    (define (play-data p) (vector-ref p 1))
+    (define (play-guard-world p) (vector-ref p 2))
+    (define (play-guard p) (vector-ref p 3))
+    (define (play-badge? p) (vector-ref p 7))
+    (define (play-outcome p) (vector-ref p 8))
+    (define (play-ticks p) (vector-ref p 9))
+    (define (play-light p) (vector-ref p 10))
+    (define (play-light-01 p) (vector-ref p 11))
+    (define (play-visibility p) (vector-ref p 12))
+    (define (play-shape p) (vector-ref p 13))
+    (define (play-near-exit? p) (vector-ref p 14))
+
+    ;; coll: the floor's (phantom collide) collision; data: its play data;
+    ;; circuits: floor.sexp's (circuits ...) entries.
+    (define (make-play coll data circuits)
+      (let* ((gw (make-guard-world coll data))
+             (p (vector 'play data gw (make-guard gw GUARD-START-LEG) (make-light-state) (make-target)
+                        circuits #f 'playing 0 0.0 0.0 0.0 0.0 #f)))
+        p))
+
+    ;; A new attempt: the guard back at its start, the badge on the desk.
+    (define (play-reset! p)
+      (guard-reset! (vector-ref p 3) (vector-ref p 2) GUARD-START-LEG)
+      (vector-set! p 7 #f)
+      (vector-set! p 8 'playing)
+      (vector-set! p 9 0)
+      (vector-set! p 14 #f)
+      p)
+
+    ;; The walker at the floor's arrival spot, facing as the floor says.
+    (define (play-start-walker p coll)
+      (let* ((s (play-start (vector-ref p 1)))
+             (x (vector-ref s 0)) (y (vector-ref s 1))
+             (z (or (collide-floor coll x y -1.0 1.0) 0.0)))
+        (make-walker x y z (vector-ref s 2))))
+
+    (define (play-tick! p w on? night pools)
+      (if (not (eq? (vector-ref p 8) 'playing))
+          (vector-ref p 8)
+          (let* ((data (vector-ref p 1))
+                 (ls (vector-ref p 4))
+                 (x (walker-x w)) (y (walker-y w)) (z (walker-z w))
+                 (_ (light-levels! ls (vector-ref p 6) on? night pools))
+                 (light (light-at ls data x y z))
+                 (l01 (light-01 light))
+                 (shape (* (stance-factor (walker-crouching? w)) (motion-factor (walker-speed w))))
+                 (vis (* l01 shape))
+                 (g (vector-ref p 3)))
+            (vector-set! p 9 (+ (vector-ref p 9) 1))
+            (vector-set! p 10 light)
+            (vector-set! p 11 l01)
+            (vector-set! p 12 vis)
+            (vector-set! p 13 shape)
+            (target-set! (vector-ref p 5) x y z (walker-eye-z w) (walker-height w) l01 vis shape)
+            (guard-step! g (vector-ref p 2) (vector-ref p 5) TICK)
+            (let ((outcome
+                   (cond
+                     ((guard-caught? g) 'caught)
+                     ((and (not (vector-ref p 7)) (near-badge? data x y z)) 'badge)
+                     ((near-exit? data x y z)
+                      (if (vector-ref p 7) 'won (begin (vector-set! p 14 #t) 'playing)))
+                     (else (vector-set! p 14 #f) 'playing))))
+              (cond ((eq? outcome 'badge) (vector-set! p 7 #t) 'badge)
+                    ((eq? outcome 'playing) 'playing)
+                    (else (vector-set! p 8 outcome) outcome))))))
+
+    (define (near-badge? data x y z)
+      (let* ((b (play-badge data))
+             (dx (- x (vector-ref b 0))) (dy (- y (vector-ref b 1))))
+        (and (< (+ (* dx dx) (* dy dy)) (* PICKUP-REACH PICKUP-REACH))
+             (< (abs (- z 0.0)) 0.5))))
+
+    (define (near-exit? data x y z)
+      (let* ((e (play-exit data))
+             (dx (- x (vector-ref e 0))) (dy (- y (vector-ref e 1))))
+        (and (< (+ (* dx dx) (* dy dy)) (* EXIT-REACH EXIT-REACH))
+             (< z 0.5))))))

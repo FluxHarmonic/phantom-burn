@@ -1,0 +1,136 @@
+;;; P1's guard on the compiled floor 14 (assets/floors/14-slice: collide,
+;;; floor.sexp, play.sexp), through the real walker and the real guard, as
+;;; the game runs them ((phantom play core)). Run from the repo root.
+;;;
+;;; The gate (design §8, P1): a scripted walk across the lit lobby is
+;;; detected, and the same walk with the lights off is not.
+
+(import (sigil test)
+        (sigil math)
+        (sigil fs)
+        (phantom detmath)
+        (phantom soup)
+        (phantom collide)
+        (phantom walker)
+        (phantom play data)
+        (phantom play core)
+        (phantom guard nav)
+        (phantom guard sense)
+        (phantom guard guard))
+
+(define DIR "assets/floors/14-slice/")
+(define C (pbc1->collision (read-file-bytes (string-append DIR "collide"))))
+(define INFO (floor-info-from-string (read-file-string (string-append DIR "floor.sexp"))))
+(define DATA (play-data-from-string (read-file-string (string-append DIR "play.sexp"))))
+(define CIRCUITS (cdr (assq 'circuits INFO)))
+
+(define (on-set names) (lambda (c) (and (memq c names) #t)))
+(define ALL-ON (on-set '(c1 c2 c3 emergency screens city)))
+(define DARK (on-set '(emergency screens city)))
+
+(define (near? a b eps) (< (abs (- a b)) eps))
+
+;; --- the light, measured -----------------------------------------------------
+
+(define (light-table)
+  (let ((ls (make-light-state)))
+    (for-each
+     (lambda (spot)
+       (let ((x (cadr spot)) (y (caddr spot)) (z (cadddr spot)))
+         (light-levels! ls CIRCUITS ALL-ON 1.0 2.0)
+         (let ((on (light-at ls DATA x y z)))
+           (light-levels! ls CIRCUITS DARK 1.0 2.0)
+           (let ((off (light-at ls DATA x y z)))
+             (display (list 'light (car spot) 'on on (light-01 on) 'off off (light-01 off)))
+             (newline)))))
+     '((lobby-mid 7.0 5.0 0.0) (lobby-window 6.0 0.6 0.0) (under-mezz 3.0 9.0 0.0)
+       (mezzanine 6.0 8.5 3.0) (corridor 17.0 9.5 0.0) (office 19.0 16.0 0.0)
+       (fm-office 24.0 18.0 0.0) (duct 18.5 9.8 3.0) (exit 3.0 9.6 0.0)))))
+
+(light-table)
+
+;; --- running an attempt -------------------------------------------------------
+
+(define (fresh-play) (play-reset! (make-play C DATA CIRCUITS)))
+
+;; Step the walker with input-of (tick -> input) and the play, n ticks;
+;; returns (walker . outcomes seen).
+(define (run p w on? n input-of)
+  (let loop ((i 0) (w w) (seen '()))
+    (if (>= i n)
+        (cons w (reverse seen))
+        (let* ((w (walker-step w (input-of i) TICK C))
+               (o (play-tick! p w on? 1.0 2.0)))
+          (loop (+ i 1) w (if (and (not (eq? o 'playing)) (not (memq o seen))) (cons o seen) seen))))))
+
+(define (max-awareness p w on? n input-of)
+  (let loop ((i 0) (w w) (best 0.0) (state 0))
+    (if (>= i n)
+        (list best state)
+        (let* ((w (walker-step w (input-of i) TICK C)))
+          (play-tick! p w on? 1.0 2.0)
+          (let ((g (play-guard p)))
+            (loop (+ i 1) w (max best (guard-awareness g)) (max state (guard-state g))))))))
+
+(define FORWARD (make-input 0.0 1.0 0.0 0.0 #f #f #f 0))
+(define EAST (- (/ PI 2.0)))
+(define WEST (/ PI 2.0))
+
+(test-group "the nav"
+  (test "most of the ground floor is walkable, and every route point is reachable from the others"
+    (let* ((p (fresh-play))
+           (nav (guard-world-nav (play-guard-world p))))
+      (display (list 'nav 'walkable (nav-walkable-count nav) 'of (* (nav-w nav) (nav-h nav)))) (newline)
+      (assert-true (> (nav-walkable-count nav) 2500))
+      (let* ((route (play-route DATA)) (f (make-field nav)))
+        (nav-field! nav f (vector-ref route 0) (vector-ref route 1))
+        (let loop ((i 1) (ok #t))
+          (if (>= i (quotient (vector-length route) 2))
+              (assert-true ok)
+              (loop (+ i 1)
+                    (and ok (let ((s (nav-steer! nav f (vector-ref route (* 2 i)) (vector-ref route (+ 1 (* 2 i))))))
+                              (display (list 'route-point i 'steps-to-point-0 s)) (newline)
+                              (and s (> s 0))))))))))
+  (test "the nav refuses the walls: the lobby's east wall between the arch and the corner"
+    (let ((nav (guard-world-nav (play-guard-world (fresh-play)))))
+      (assert-false (nav-walkable? nav 14.0 3.5))
+      (assert-true (nav-walkable? nav 14.0 6.5)))))
+
+(test-group "the patrol"
+  (test "with nobody about, the guard walks its whole route in about a minute and stays calm"
+    (let* ((p (fresh-play))
+           (g (play-guard p))
+           ;; the runner off the floor, far away (falling: no light, out of range)
+           (w (make-walker 60.0 60.0 0.0 0.0))
+           (legs '()))
+      (let loop ((i 0) (w w) (last-leg (guard-leg g)))
+        (when (< i (* 60 75))
+          (let ((w (walker-step w NO-INPUT TICK C)))
+            (play-tick! p w ALL-ON 1.0 2.0)
+            (unless (= (guard-leg g) last-leg)
+              (set! legs (cons (list (guard-leg g) (exact (round (/ i 60)))
+                                     (/ (round (* 10 (guard-x g))) 10.0) (/ (round (* 10 (guard-y g))) 10.0)) legs)))
+            (loop (+ i 1) w (guard-leg g)))))
+      (display (list 'patrol-legs (reverse legs))) (newline)
+      (assert-true (= (guard-state g) CALM))
+      ;; it came back round to the point it started from
+      (assert-true (>= (length legs) 4)))))
+
+;; The gate walk: the runner steps out from under the mezzanine and walks
+;; east along the lobby's middle while the guard, at its first route point
+;; (2 2), waits and looks around. 4 seconds.
+(define (gate-walk on?)
+  (let* ((p (fresh-play))
+         (g (play-guard p)))
+    (guard-reset! g (play-guard-world p) 0)
+    (max-awareness p (make-walker 4.0 6.0 0.0 EAST) on? (* 60 4) (lambda (i) FORWARD))))
+
+(test-group "the P1 gate: light"
+  (test "walking across the lit lobby in view of the guard is noticed (suspicious or worse)"
+    (let ((r (gate-walk ALL-ON)))
+      (display (list 'gate-lit 'max-awareness (car r) 'max-state (cadr r))) (newline)
+      (assert-true (>= (car r) 0.3))))
+  (test "the same walk with the lobby's lights off is not noticed"
+    (let ((r (gate-walk DARK)))
+      (display (list 'gate-dark 'max-awareness (car r) 'max-state (cadr r))) (newline)
+      (assert-true (< (car r) 0.1)))))
