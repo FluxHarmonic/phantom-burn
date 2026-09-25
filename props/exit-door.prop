@@ -1,11 +1,14 @@
 ;; props/exit-door.prop - the stairwell door, locked by its reader. opening:
 ;; is the hole the compiler cuts in the wall (width height); the leaf sits in
-;; it, set back from the wall's face. The exit light is on the emergency
-;; circuit, which never goes off.
+;; it, set back from the wall's face. The threshold fills the floor between
+;; the wall's face and the leaf (without it, light and sight slip out under
+;; the leaf). The exit light is on the emergency circuit, which never goes
+;; off.
 (prop exit-door
   mount: wall
   opening: (1.0 2.2)
   parts: ((box  size: (1.0 0.04 2.2)    at: (0 -0.06 1.1)     material: steel)
+          (box  size: (1.0 0.1 0.05)    at: (0 -0.05 -0.025)  material: steel)    ; the threshold, flush with the floor
           (box  size: (0.06 0.03 0.12)  at: (0.4 -0.03 1.05)  material: dark)     ; the handle
           (box  size: (0.4 0.08 0.1)    at: (0 0.05 2.45)     material: amber)    ; the exit light
           (box  size: (0.15 0.04 0.2)   at: (0.75 0.02 1.2)   material: led))     ; the reader

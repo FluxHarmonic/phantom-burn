@@ -50,6 +50,7 @@
     (define DOOR-H 2.1)
     (define STEP-MAX 0.17)       ; the tallest riser a stair may have
     (define RAIL-H 1.0)
+    (define LANDING-TOL 0.06)    ; gate 6 lands a stair within 5 cm of an open edge; its rail gives way within this
     (define FRAME-W 0.08)
     (define FRAME-D 0.2)
     (define CLEARANCE 0.3)       ; a body's radius, for waypoints and the like
@@ -310,13 +311,19 @@
                                        (if (and pr (prop-opening (cdr pr))) (car (prop-opening (cdr pr))) DOOR-W)))
                                     ((memq kind '(arch grate)) #f)
                                     (else DOOR-W)))
-                           (s0 (if w (- sc (* 0.5 w)) (car run)))
-                           (s1 (if w (+ sc (* 0.5 w)) (cdr run))))
-                      (when (or (< s0 (- (car run) 1e-6)) (> s1 (+ (cdr run) 1e-6)))
-                        (add-problem! c 1 line (string-append what " at " (fmt-pt p) " is " (num->str (- s1 s0))
-                                                              " m wide, wider than the wall there ("
-                                                              (num->str (- (cdr run) (car run))) " m)")))
-                      (cut-holes! c o kind runs origin dir a-side a b (max s0 (car run)) (min s1 (cdr run)) p))))
+                           (s0 (if w (- sc (* 0.5 w)) (and run (car run))))
+                           (s1 (if w (+ sc (* 0.5 w)) (and run (cdr run)))))
+                      (cond
+                        ((not run)
+                         ;; within 1 mm of the wall's line, but past the end of the wall the rooms share
+                         (add-problem! c 1 line (string-append what " at " (fmt-pt p) " is past the end of the wall "
+                                                               (if b "the two rooms share" "of the room"))))
+                        (else
+                         (when (or (< s0 (- (car run) 1e-6)) (> s1 (+ (cdr run) 1e-6)))
+                           (add-problem! c 1 line (string-append what " at " (fmt-pt p) " is " (num->str (- s1 s0))
+                                                                 " m wide, wider than the wall there ("
+                                                                 (num->str (- (cdr run) (car run))) " m)")))
+                         (cut-holes! c o kind runs origin dir a-side a b (max s0 (car run)) (min s1 (cdr run)) p))))))
               ;; along: glass, window
               (let* ((seg (opening-along o))
                      (p (car seg)) (q (cadr seg))
@@ -365,6 +372,12 @@
                     (when (eq? kind 'window)
                       (city-light! c e side t0 t1 (car h) (cdr h))))))))
           runs)
+        (when (null? zs)
+          (add-problem! c 1 (opening-line o)
+                        (string-append (describe-opening o) " at " (fmt-pt centre) " cuts no hole: "
+                                       (if (eq? kind 'window)
+                                           "its sill and head leave no opening within the room's height"
+                                           "the rooms' heights do not overlap on the wall there"))))
         (when (pair? zs)
           (let ((zlo (fold-left min 1e30 (map car zs)))
                 (zhi (fold-left max -1e30 (map cdr zs))))
@@ -486,6 +499,28 @@
 
     ;; --- hatches -------------------------------------------------------------------------------------
 
+    ;; Does the square (its corners) lie inside room r? Every corner inside
+    ;; or on the outline (flush to any wall alike), no outline edge crossing
+    ;; a side, and no outline corner strictly inside it (a notch poking in).
+    (define (square-in-room? r corners)
+      (let* ((cs (room-corners r))
+             (cen (poly-centroid corners))
+             (ring (lambda (ps) (map cons ps (append (cdr ps) (list (car ps))))))
+             (sides (ring corners)))
+        (and (every (lambda (q) (point-in-poly? (pt+ q (pt* (pt-norm (pt- cen q)) 1e-5)) cs)) corners)
+             (not (any (lambda (re) (any (lambda (se) (proper-cross? (car re) (cdr re) (car se) (cdr se))) sides))
+                       (ring cs)))
+             (not (any (lambda (v) (and (point-in-poly? v corners)
+                                        (every (lambda (se) (> (point-seg-dist v (car se) (cdr se)) 1e-5)) sides)))
+                       cs)))))
+
+    ;; Do segments a-b and c-d cross at a point inside both (not at an end)?
+    (define (proper-cross? a b c d)
+      (let* ((r (pt- b a)) (s (pt- d c)) (den (pt-cross r s)))
+        (and (> (abs den) 1e-12)
+             (let* ((ca (pt- c a)) (t (/ (pt-cross ca s) den)) (u (/ (pt-cross ca r) den)))
+               (and (> t 1e-6) (< t (- 1.0 1e-6)) (> u 1e-6) (< u (- 1.0 1e-6)))))))
+
     (define (resolve-hatch! c o)
       (let* ((lu (hatch-rooms c o))
              (line (opening-line o))
@@ -499,10 +534,10 @@
                  (inside? (lambda (r q) (point-in-poly? q (room-corners r)))))
             (cond ((not (and (inside? lower p) (inside? upper p)))
                    (add-problem! c 1 line (string-append what " at " (fmt-pt p) " is not inside both rooms' footprints")))
-                  ((not (every (lambda (q) (and (inside? lower q) (inside? upper q))) corners))
+                  ((not (and (square-in-room? lower corners) (square-in-room? upper corners)))
                    (add-problem! c 1 line (string-append what " at " (fmt-pt p) ": its " (num->str (* 2 s))
                                                          " m square runs outside "
-                                                         (symbol->string (room-name (if (every (lambda (q) (inside? upper q)) corners) lower upper)))
+                                                         (symbol->string (room-name (if (square-in-room? upper corners) lower upper)))
                                                          " (it is too near a wall)")))
                   ((< (room-floor upper) (- (room-ceiling lower) 1e-6))
                    (add-problem! c 1 line (string-append what ": " (symbol->string (room-name upper))
@@ -793,7 +828,7 @@
         (fold-left
           (lambda (spans l)
             (let* ((p (car l)) (q (cadr l)))
-              (if (and (< (point-seg-dist p (edge-a e) (edge-b e)) 1e-3) (< (point-seg-dist q (edge-a e) (edge-b e)) 1e-3))
+              (if (and (< (point-seg-dist p (edge-a e) (edge-b e)) LANDING-TOL) (< (point-seg-dist q (edge-a e) (edge-b e)) LANDING-TOL))
                   (let* ((tp (* (seg-param p (edge-a e) (edge-b e)) (edge-len e)))
                          (tq (* (seg-param q (edge-a e) (edge-b e)) (edge-len e)))
                          (lo (min tp tq)) (hi (max tp tq)))

@@ -21,27 +21,36 @@
 # look-test render). Exit 0, or 2 when anything it needs is missing.
 set -eu
 cd "$(dirname "$0")/.."
-FLOOR="${1:?usage: scripts/floor-shot FLOOR [K...]}"; shift
+[ $# -ge 1 ] || { echo "usage: scripts/floor-shot FLOOR [K...]"; exit 2; }
+FLOOR="$1"; shift
+# FLOOR names files under build/floors/ that this script deletes and writes
+case "$FLOOR" in
+  ''|*[!a-z0-9-]*) echo "SETUP-FAILED: FLOOR is a floor's name (a-z, 0-9, -), not '$FLOOR'"; exit 2 ;;
+esac
 [ $# -gt 0 ] || set -- 0 1 2
-: "${SHOT_DISPLAY:?set SHOT_DISPLAY to your own Xvfb display}"
+for k in "$@"; do
+  case "$k" in ''|*[!0-9]*) echo "SETUP-FAILED: K is a view's index (0, 1, ...), not '$k'"; exit 2 ;; esac
+done
+[ -n "${SHOT_DISPLAY:-}" ] || { echo "SETUP-FAILED: set SHOT_DISPLAY to your own Xvfb display"; exit 2; }
+command -v node >/dev/null 2>&1 || { echo "SETUP-FAILED: node is not on PATH (the floor import needs it)"; exit 2; }
 SRC=build/floors
 for f in "$SRC/$FLOOR.sgm" "$SRC/$FLOOR.sgm.json" "$SRC/$FLOOR.collide"; do
   [ -f "$f" ] || { echo "SETUP-FAILED: $f missing (phantom-burn --floor-compile floors/$FLOOR.floor)"; exit 2; }
 done
 EXPORT="${EXPORT_DIR:-$HOME/Ops/attachments/stealth-game-design}"
-TMP="$(mktemp -d /tmp/floor-shot.XXXXXX)"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/floor-shot.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/scripts" "$TMP/assets"
 cp scripts/floor-import.mjs "$TMP/scripts/"
 ln -s "$PWD/assets/stand-in" "$TMP/assets/stand-in"
-node "$TMP/scripts/floor-import.mjs" "$PWD/$SRC" "$FLOOR"
+node "$TMP/scripts/floor-import.mjs" "$PWD/$SRC" "$FLOOR" || { echo "SETUP-FAILED: the floor import failed"; exit 2; }
 DIR="$TMP/assets/floors/$FLOOR"
 [ -f "$DIR/floor.sexp" ] || { echo "SETUP-FAILED: the import wrote no $DIR/floor.sexp"; exit 2; }
 mkdir -p "$SRC/shots"
 for k in "$@"; do
   out="$SRC/shots/$FLOOR-$k.png"
   rm -f "$out"
-  scripts/shot-native "$out" --floor "$DIR" --shot "$k" --hud 0
+  scripts/shot-native "$out" --floor "$DIR" --shot "$k" --hud 0 || { echo "SETUP-FAILED: shot-native failed on view $k"; exit 2; }
   [ -f "$out" ] || { echo "SETUP-FAILED: no shot for view $k"; exit 2; }
   case "$k" in
     0) ref="$EXPORT/look-2-arrival.png" ;;
@@ -51,7 +60,7 @@ for k in "$@"; do
   esac
   if [ -n "$ref" ] && [ -f "$ref" ]; then
     guix shell imagemagick -- convert \( "$out" -filter point -resize 200% \) \( "$ref" -resize 960x540 \) +append \
-      "$SRC/shots/$FLOOR-$k-vs-export.png"
+      "$SRC/shots/$FLOOR-$k-vs-export.png" || { echo "SETUP-FAILED: the side-by-side for view $k"; exit 2; }
     echo "floor-shot: $SRC/shots/$FLOOR-$k-vs-export.png (game | export)"
   fi
 done

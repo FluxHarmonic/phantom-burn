@@ -9,9 +9,12 @@
 ;;; P0 has no credentials yet, so (design section 8, "What P0 and S0 need"):
 ;;; the stairwell reader is a closed edge unless the arrival state holds the
 ;;; exit's tier (FACILITIES on the slice). With it, the exit must be reached
-;;; both ways: across the lobby, and through the duct, the grate, the
-;;; mezzanine and the stairs. Without it, the exit must be unreachable, and
-;;; nothing may reach the space behind the exit door by any other way.
+;;; from start: (a fresh body at start:, facing facing:, on the lowest floor
+;;; there) and along each of the floor's routes: (on the slice, from the
+;;; badge avoiding the corridor: the duct, the grate, the mezzanine and the
+;;; stairs). Without it, the exit door must hold (bodies driven at it, six
+;;; ways, never pass its wall line), and nothing may reach the space behind
+;;; the door by any other way.
 ;;;
 ;;; The search:
 ;;;   ANCHORS    places a body can stand at rest: candidates on a GRID over
@@ -24,11 +27,15 @@
 ;;;              gives up after MAX-TICKS; the walker's own mantle and forced
 ;;;              crouch do the rest (the cabinet, the hatch, the duct);
 ;;;   ROUTES     breadth-first over edges from a start anchor to any target
-;;;              anchor, optionally forbidding anchors in some rooms;
+;;;              anchor, optionally forbidding anchors in some rooms; a
+;;;              route from a plan point starts at the lowest anchor within
+;;;              PLACE-R of it;
 ;;;   WITNESS    the route is REALIZED from the real start (the controller run
 ;;;              along it from where the body really is, every input
-;;;              recorded), then the recording is REPLAYED from a fresh walker
-;;;              and must end where realizing ended, within the target.
+;;;              recorded), the recording written as a script (the replay
+;;;              module's text), parsed back, and REPLAYED from a fresh walker
+;;;              made from the text alone: it must end exactly where
+;;;              realizing ended, within the target.
 ;;;
 ;;; The search is conservative: "unreachable" means no searched pattern
 ;;; reached it (Harkfell's reach checker has the same honest limit).
@@ -228,32 +235,106 @@
                    (for-each (lambda (b) (vector-set! seen (vector-ref b 0) #t) (vector-set! prev (vector-ref b 0) a)) next)
                    (loop (append (cdr queue) next))))))))
 
-    ;; Realize a route from the real start state, recording every input; then
-    ;; replay the recording from a fresh start. Returns #(ok? ticks end-x end-y
-    ;; end-z replay-matches?).
-    (define (witness c start-state rt)
-      (let loop ((w start-state) (rest (cdr rt)) (ins '()))
+    ;; --- places ------------------------------------------------------------------------------
+
+    ;; A floor's facing (degrees, 0 east, anticlockwise) as a walker yaw
+    ;; (radians, 0 north, anticlockwise).
+    (define (facing->yaw deg) (* (- deg 90.0) (/ PI 180.0)))
+
+    ;; The lowest room floor under plan point p, or #f.
+    (define (floor-under fl p)
+      (let ((rs (filter (lambda (r) (point-in-poly? p (room-corners r))) (floor-rooms fl))))
+        (and (pair? rs) (fold-left min 1e30 (map room-floor rs)))))
+
+    ;; The anchor a route from plan point p starts at: of the anchors within
+    ;; PLACE-R of p in plan, the lowest (to 10 cm), then the nearest. #f when
+    ;; there is none.
+    (define PLACE-R 1.5)
+
+    (define (anchor-near anchors p)
+      (let* ((d (lambda (a) (sqrt (+ (square (- (vector-ref a 1) (px p))) (square (- (vector-ref a 2) (py p)))))))
+             (near (filter (lambda (a) (<= (d a) PLACE-R)) (vector->list anchors))))
+        (and (pair? near)
+             (let* ((zmin (fold-left min 1e30 (map (lambda (a) (vector-ref a 3)) near)))
+                    (low (filter (lambda (a) (< (vector-ref a 3) (+ zmin 0.1))) near)))
+               (fold-left (lambda (b a) (if (< (d a) (d b)) a b)) (car low) low)))))
+
+    ;; --- witnesses -----------------------------------------------------------------------------
+
+    ;; Gate 3's proof of a route: the controller is run along route rt (a list
+    ;; of anchors) from a fresh walker made from `start` (a script start line
+    ;; as a list, (x y z yaw crouched?)) after the `prefix` inputs, recording
+    ;; every input. The recording is then written as a script, parsed back,
+    ;; and replayed from a fresh walker made from the text alone. Returns
+    ;; #(arrived? ticks x y z proved? text): arrived? when every leg arrived;
+    ;; proved? when, as well, the replay from the text ends exactly where the
+    ;; run ended and that end is a target.
+    (define (witness cf c start prefix rt target?)
+      (let loop ((w (fold-left (lambda (w in) (walker-step w in TICK c)) (replay-walker start) prefix))
+                 (rest rt)
+                 (ins (reverse prefix)))
         (if (null? rest)
-            (let* ((script (reverse ins))
-                   (replayed (fold-left (lambda (w in) (walker-step w in TICK c)) start-state script))
-                   (same? (and (= (walker-x replayed) (walker-x w)) (= (walker-y replayed) (walker-y w))
-                               (= (walker-z replayed) (walker-z w)))))
-              (vector #t (length script) (walker-x replayed) (walker-y replayed) (walker-z replayed) same? script))
+            (let* ((text (script->string start (reverse ins)))
+                   (s (parse-script text))
+                   (end (and s (fold-left (lambda (w in) (walker-step w in TICK c)) (replay-walker (car s)) (cdr s))))
+                   (proved? (and end
+                                 (= (walker-x end) (walker-x w)) (= (walker-y end) (walker-y w))
+                                 (= (walker-z end) (walker-z w))
+                                 (target? (vector -1 (walker-x end) (walker-y end) (walker-z end) end
+                                                  (room-at-point cf (walker-x end) (walker-y end) (walker-z end)))))))
+              (vector #t (length ins) (walker-x w) (walker-y w) (walker-z w) proved? text))
             (let ((r (drive c w (car rest))))
               (if r
                   (loop (car r) (cdr rest) (append (cdr r) ins))
-                  (vector #f (length ins) (walker-x w) (walker-y w) (walker-z w) #f (reverse ins)))))))
+                  (vector #f (length ins) (walker-x w) (walker-y w) (walker-z w) #f #f))))))
+
+    (define (settle-prefix) (make-list (+ SETTLE 1) NO-INPUT))
+
+    ;; --- the exit door -------------------------------------------------------------------------
+
+    ;; The exit's wall: (p n d), p the exit's point on the wall line, n the
+    ;; wall's normal pointing out of the exit's room, d along the wall.
+    (define (exit-wall fl exit)
+      (let* ((p (opening-at exit))
+             (r (find (lambda (r) (eq? (room-name r) (opening-a exit))) (floor-rooms fl)))
+             (cs (room-corners r))
+             (segs (map cons cs (append (cdr cs) (list (car cs)))))
+             (s (fold-left (lambda (b s) (if (< (point-seg-dist p (car s) (cdr s)) (point-seg-dist p (car b) (cdr b))) s b))
+                           (car segs) segs))
+             (d (pt-norm (pt- (cdr s) (car s))))
+             (n0 (cons (py d) (- (px d))))
+             (n (if (point-in-poly? (pt+ p (pt* n0 0.1)) cs) (pt* n0 -1.0) n0)))
+        (list p n d)))
+
+    ;; Does the exit door hold? A body at anchor a, in front of the door, is
+    ;; driven at points 2 m past the doorway (straight through, and 0.4 m to
+    ;; either side), standing and crouched, for MAX-TICKS each. Returns #f
+    ;; when every body stays behind the wall line, or (x y z) where one got
+    ;; 0.1 m past it. Without a leaf, the first body walks out through the hole.
+    (define (door-breach c a wall)
+      (let ((p (car wall)) (n (cadr wall)) (d (caddr wall)))
+        (let try ((cases (apply append (map (lambda (lat) (list (cons lat #f) (cons lat #t))) '(0.0 -0.4 0.4)))))
+          (if (null? cases)
+              #f
+              (let* ((lat (caar cases)) (crouch? (cdar cases))
+                     (tp (pt+ (pt+ p (pt* n 2.0)) (pt* d lat))))
+                (let run ((w (vector-ref a 4)) (k 0))
+                  (cond ((> (pt-dot (pt- (cons (walker-x w) (walker-y w)) p) n) 0.1)
+                         (list (walker-x w) (walker-y w) (walker-z w)))
+                        ((>= k MAX-TICKS) (try (cdr cases)))
+                        (else
+                         (let* ((in0 (input-toward w (px tp) (py tp)))
+                                (in (if (and crouch? (= k 0))
+                                        (make-input 0.0 1.0 (input-look-yaw in0) 0.0 #f #f #t 0)
+                                        in0)))
+                           (run (walker-step w in TICK c) (+ k 1)))))))))))
 
     ;; --- the gate ------------------------------------------------------------------------------
 
-    (define (nearest-anchor anchors x y z)
-      (let loop ((i 0) (best #f) (bd 1e30))
-        (if (>= i (vector-length anchors)) best
-            (let* ((a (vector-ref anchors i))
-                   (d (+ (square (- (vector-ref a 1) x)) (square (- (vector-ref a 2) y)) (* 4 (square (- (vector-ref a 3) z))))))
-              (if (< d bd) (loop (+ i 1) a d) (loop (+ i 1) best bd))))))
+    (define (dist2 a p) (sqrt (+ (square (- (vector-ref a 1) (px p))) (square (- (vector-ref a 2) (py p))))))
 
-    ;; Returns (lines . problems).
+    ;; Returns (lines problems witness-text): the witness of the route from
+    ;; start:, for gate 5.
     (define (reach-check cf)
       (let* ((fl (ctx-floor* cf))
              (path (compiled-floor-path cf))
@@ -262,67 +343,90 @@
              (exit (find (lambda (o) (eq? (opening-kind o) 'exit)) (floor-openings fl)))
              (exit-at (and exit (opening-at exit)))
              (exit-room (and exit (opening-a exit)))
-             (tier (and exit (opening-reader exit)))
+             (tier (symbol->string (or (and exit (opening-reader exit)) 'none)))
              (start-p (floor-start fl))
-             (start (nearest-anchor anchors (px start-p) (py start-p) 0.0))
+             (start-z (and start-p (floor-under fl start-p)))
+             (start (and start-p (anchor-near anchors start-p)))
              (badge (find (lambda (t) (eq? (thing-kind t) 'badge)) (floor-things fl)))
-             (badge-p (and badge (thing-field badge 'on-desk)))
+             (stats (vector 0 0 #f))
              (lines '()) (ps '()) (witness-text #f))
         (define (say s) (set! lines (cons s lines)))
-        (define (bad msg) (set! ps (cons (problem path: path line: (and exit (opening-line exit)) message: msg gate: 3) ps)))
+        (define (bad line msg) (set! ps (cons (problem path: path line: line message: msg gate: 3) ps)))
         (define (near-exit? a)
-          (and exit-at (eq? (vector-ref a 5) exit-room)
-               (< (sqrt (+ (square (- (vector-ref a 1) (px exit-at))) (square (- (vector-ref a 2) (py exit-at))))) 1.0)))
-        (define (behind-exit? a)
-          ;; within 3 m of the exit door and outside its room
-          (and exit-at (not (eq? (vector-ref a 5) exit-room))
-               (< (sqrt (+ (square (- (vector-ref a 1) (px exit-at))) (square (- (vector-ref a 2) (py exit-at))))) 3.0)
-               (not (point-in-poly? (cons (vector-ref a 1) (vector-ref a 2))
-                                    (room-corners (find (lambda (r) (eq? (room-name r) exit-room)) (floor-rooms fl)))))))
-        (define (near-badge? a)
-          (and badge-p (< (sqrt (+ (square (- (vector-ref a 1) (px badge-p))) (square (- (vector-ref a 2) (py badge-p))))) 1.5)
-               (< (vector-ref a 3) 0.5)))
+          (and exit-at (eq? (vector-ref a 5) exit-room) (< (dist2 a exit-at) 1.0)))
+        (define (proof-line what r wt)
+          (string-append what ": " (number->string (length r)) " anchors, witness " (number->string (vector-ref wt 1))
+                         " ticks, " (if (vector-ref wt 5) "replayed from its text" "FAILED")))
         (say (string-append "anchors " (number->string (vector-length anchors))))
         (cond
-          ((not exit) (bad "the floor has no exit to reach"))
-          ((not start) (bad "the start is on no anchor"))
+          ((not exit) (bad (floor-line fl) "the floor has no exit to reach"))
+          ((not exit-at) (bad (opening-line exit) "the exit has no at: point"))
+          ((not start-z) (bad (floor-line fl) "start: is in no room"))
+          ((not start) (bad (floor-line fl) (string-append "start: has no anchor within " (number->string PLACE-R) " m")))
           (else
-           (let ((stats (vector 0 0 #f)))
-             ;; 1. with the tier: across the lobby, from the start
-             (let ((r (route c anchors start near-exit? '() stats)))
-               (if (not r)
-                   (bad (string-append "with " (symbol->string tier) ": the exit is not reached from the start"))
-                   (let ((wt (witness c (vector-ref start 4) r)))
-                     (set! witness-text (script->string (vector-ref start 6)
-                                                        (append (make-list (+ SETTLE 1) NO-INPUT) (vector-ref wt 6))))
-                     (say (string-append "with " (symbol->string tier) ", from the start: " (number->string (length r))
-                                         " anchors, witness " (number->string (vector-ref wt 1)) " ticks, "
-                                         (if (and (vector-ref wt 0) (vector-ref wt 5)) "replayed" "FAILED")))
-                     (unless (and (vector-ref wt 0) (vector-ref wt 5))
-                       (bad (string-append "with " (symbol->string tier) ": the route to the exit did not replay"))))))
-             ;; 2. with the tier: from the badge, the long way (no corridor floor)
-             (when badge-p
-               (let ((b0 (find near-badge? (vector->list anchors))))
-                 (if (not b0)
-                     (bad "the badge's desk has no anchor beside it")
-                     (let ((r (route c anchors b0 near-exit? '(corridor) stats)))
+           ;; 1. with the tier: from start:, as the player arrives there
+           (let ((r (route c anchors start near-exit? '() stats))
+                 (what (string-append "with " tier ", from start:")))
+             (if (not r)
+                 (bad (floor-line fl) (string-append what " the exit is not reached"))
+                 (let* ((sx (px start-p)) (sy (py start-p)) (sz (+ start-z 0.01))
+                        (wt (witness cf c (list sx sy sz (facing->yaw (floor-facing fl)) (low-at? c sx sy sz))
+                                     (settle-prefix) r near-exit?)))
+                   (set! witness-text (vector-ref wt 6))
+                   (say (proof-line what r wt))
+                   (unless (vector-ref wt 5)
+                     (bad (floor-line fl) (string-append what " the route to the exit does not replay from its witness"))))))
+           ;; 2. with the tier: each declared route
+           (for-each
+             (lambda (rt)
+               (let* ((name (symbol->string (route-name rt)))
+                      (from (route-from rt))
+                      (p (cond ((eq? from 'start) start-p)
+                               ((eq? from 'badge) (and badge (thing-field badge 'on-desk)))
+                               (else from)))
+                      (a0 (and p (anchor-near anchors p)))
+                      (what (string-append "with " tier ", route " name
+                                           (if (null? (route-avoid rt)) ""
+                                               (string-append " (avoiding " (string-join (map symbol->string (route-avoid rt)) ", ") ")")))))
+                 (if (not a0)
+                     (bad (route-line rt) (string-append "route " name ": from: has no anchor within " (number->string PLACE-R) " m"))
+                     (let ((r (route c anchors a0 near-exit? (route-avoid rt) stats)))
                        (if (not r)
-                           (begin (bad (string-append "with " (symbol->string tier) ": from the badge, the exit is not reached without the corridor (the duct, the grate, the mezzanine and the stairs)"))
-                                  (say (string-append "  reached from the badge, by room and height: " (reach-summary anchors (vector-ref stats 2)))))
-                           (let ((wt (witness c (vector-ref b0 4) r)))
-                             (say (string-append "with " (symbol->string tier) ", from the badge by the duct: " (number->string (length r))
-                                                 " anchors, witness " (number->string (vector-ref wt 1)) " ticks, "
-                                                 (if (and (vector-ref wt 0) (vector-ref wt 5)) "replayed" "FAILED")))
-                             (unless (and (vector-ref wt 0) (vector-ref wt 5))
-                               (bad "the route through the duct did not replay"))))))))
-             ;; 3. without the tier: nothing reaches behind the exit door
-             (let ((r (route c anchors start behind-exit? '() stats)))
-               (if r
-                   (bad (string-append "without " (symbol->string tier) ": the space behind the exit is reached at ("
-                                       (number->string (vector-ref (list-ref r (- (length r) 1)) 1)) " "
-                                       (number->string (vector-ref (list-ref r (- (length r) 1)) 2)) "), bypassing the reader"))
-                   (say (string-append "without " (symbol->string tier) ": the exit is closed and nothing reaches behind it"))))
-             (say (string-append "edges tried " (number->string (vector-ref stats 0)) ", found " (number->string (vector-ref stats 1)))))))
+                           (begin (bad (route-line rt) (string-append what ": the exit is not reached"))
+                                  (say (string-append "  " name " reached, by room and height: " (reach-summary anchors (vector-ref stats 2)))))
+                           (let ((wt (witness cf c (vector-ref a0 6) (settle-prefix) r near-exit?)))
+                             (say (proof-line what r wt))
+                             (unless (vector-ref wt 5)
+                               (bad (route-line rt) (string-append what ": the route does not replay from its witness")))))))))
+             (floor-routes fl))
+           ;; 3. without the tier: the exit door holds, and nothing reaches
+           ;; the space behind it another way
+           (let* ((wall (exit-wall fl exit))
+                  (fronts (filter near-exit? (vector->list anchors)))
+                  (front (and (pair? fronts)
+                              (fold-left (lambda (b a) (if (< (dist2 a exit-at) (dist2 b exit-at)) a b)) (car fronts) fronts)))
+                  (behind? (lambda (a) (and (< (dist2 a exit-at) 3.0)
+                                            (> (pt-dot (pt- (cons (vector-ref a 1) (vector-ref a 2)) exit-at) (cadr wall)) 0.1))))
+                  (behind (filter behind? (vector->list anchors))))
+             (if (not front)
+                 (bad (opening-line exit) "the exit has no anchor in front of it")
+                 (let ((breach (door-breach c front wall)))
+                   (if breach
+                       (bad (opening-line exit)
+                            (string-append "without " tier ": a body driven at the exit door gets through it, to ("
+                                           (string-join (map (lambda (v) (num->str v)) breach) " ") ")"))
+                       (say (string-append "without " tier ": the exit door holds (6 drives at it, standing and crouched)")))))
+             (if (null? behind)
+                 (say "  nothing stands within 3 m behind the exit")
+                 (let ((r (route c anchors start behind? '() stats)))
+                   (if r
+                       (let ((e (list-ref r (- (length r) 1))))
+                         (bad (opening-line exit)
+                              (string-append "without " tier ": the space behind the exit is reached at ("
+                                             (num->str (vector-ref e 1)) " " (num->str (vector-ref e 2)) "), bypassing the reader")))
+                       (say (string-append "without " tier ": none of the " (number->string (length behind))
+                                           " anchors behind the exit is reached"))))))
+           (say (string-append "edges tried " (number->string (vector-ref stats 0)) ", found " (number->string (vector-ref stats 1))))))
         (list (reverse lines) (reverse ps) witness-text)))
 
     (define (reach-report-lines r) (car r))

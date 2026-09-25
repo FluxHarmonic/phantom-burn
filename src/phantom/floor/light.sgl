@@ -183,14 +183,17 @@
     ;; v: a batch vertex (its room at index 16). emitters: a vector of #(x y z
     ;; radius strength circuit-index r g b down? room). sees: a vector of
     ;; vectors, (sees[a][b]) true when rooms a and b can see each other, or #f
-    ;; to cast every ray; a room of -1 on either side always casts. Returns
+    ;; to cast every ray; a room of -1 on either side always casts. opt: an
+    ;; optional (off room x y), giving a plan offset (dx . dy) or #f to add to
+    ;; the ray origin (compile.sgl moves it off the room's outline). Returns
     ;; SLOTS.
 
-    (define (bake-vertex occ emitters v sees)
+    (define (bake-vertex occ emitters v sees . opt)
       (let* ((x (vector-ref v 0)) (y (vector-ref v 1)) (z (vector-ref v 2))
              (nx (vector-ref v 5)) (ny (vector-ref v 6)) (nz (vector-ref v 7))
              (vroom (vector-ref v 16))
-             (lx (+ x (* LIFT nx))) (ly (+ y (* LIFT ny))) (lz (+ z (* LIFT nz)))
+             (off (and (pair? opt) ((car opt) vroom x y)))
+             (lx (+ x (* LIFT nx) (if off (car off) 0.0))) (ly (+ y (* LIFT ny) (if off (cdr off) 0.0))) (lz (+ z (* LIFT nz)))
              (n (vector-length emitters))
              (acc (let loop ((i 0) (acc '()))
                     (if (>= i n) acc

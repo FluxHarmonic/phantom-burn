@@ -12,10 +12,12 @@
 ;;;   phantom-burn --floor-time FLOOR [N]     compile N times, print the times
 ;;;   phantom-burn --floor-replay FILE.collide SCRIPT
 ;;;                                           gate 5's native leg: the trace, one line a tick
-;;;   phantom-burn --floor-reach FLOOR [--save-witness PATH]
-;;;                                           gate 3: the exit reached both ways with
-;;;                                           the tier, and not without it (witnesses
-;;;                                           replayed through the real walker)
+;;;   phantom-burn --floor-reach FLOOR [--save-witness PATH] [--probe X Y Z]
+;;;                                           gate 3: the exit reached from start: and
+;;;                                           along each route: with the tier, and the
+;;;                                           door holding without it (witnesses replayed
+;;;                                           from their text through the real walker);
+;;;                                           --probe prints one body settling at X Y Z
 ;;;
 ;;; Exit status: 0 clean, 1 problems, 2 a usage or file error.
 
@@ -67,18 +69,25 @@
             ((and (string=? (car a) flag) (pair? (cdr a))) (cadr a))
             (else (arg-after (cdr a) flag default))))
 
+    ;; Each option and how many values follow it.
+    (define OPTION-VALUES '(("--out" . 1) ("--save-witness" . 1) ("--probe" . 3)))
+
     (define (positional a)
       (let loop ((a a) (acc '()))
         (cond ((null? a) (reverse acc))
               ((and (>= (string-length (car a)) 2) (string=? (substring (car a) 0 2) "--"))
-               (loop (if (and (pair? (cdr a)) (string=? (car a) "--out")) (cddr a) (cdr a)) acc))
+               (let ((k (let ((o (assoc (car a) OPTION-VALUES))) (if o (cdr o) 0))))
+                 (loop (let drop ((a (cdr a)) (k k)) (if (or (= k 0) (null? a)) a (drop (cdr a) (- k 1)))) acc)))
               (else (loop (cdr a) (cons (car a) acc))))))
 
     (define (ms a b) (/ (round (/ (* 10000.0 (- b a)) (jiffies-per-second))) 10.0))
 
+    ;; 2 when a floor file cannot be read, else 1 when any floor has problems.
     (define (check floors)
       (let ((ok (fold-left (lambda (ok f) (and (report (compile-floor f read-text-file (member "--raise" (args)))) ok)) #t floors)))
-        (if ok 0 1)))
+        (cond ((any (lambda (f) (not (file-exists? f))) floors) 2)
+              (ok 0)
+              (else 1))))
 
     (define (compile-to floor out)
       (let* ((t0 (current-jiffy))
@@ -166,7 +175,9 @@
 
     (define (usage)
       (say "usage: phantom-burn --floor-check FLOOR... | --floor-compile FLOOR [--out DIR] |")
-      (say "       --floor-sheet FLOOR [OUT.svg] | --floor-time FLOOR [N]")
+      (say "       --floor-sheet FLOOR [OUT.svg] | --floor-time FLOOR [N] |")
+      (say "       --floor-reach FLOOR [--save-witness PATH] [--probe X Y Z] |")
+      (say "       --floor-replay FILE.collide SCRIPT")
       2)
 
     (define (floor-main)
@@ -179,7 +190,7 @@
                       (compile-to (car pos) (arg-after (cdr a) "--out" "build/floors")))
                      ((and (string=? cmd "--floor-sheet") (pair? pos))
                       (sheet (car pos) (and (pair? (cdr pos)) (cadr pos))))
-                     ((and (string=? cmd "--floor-reach") (member "--probe" a))
+                     ((and (string=? cmd "--floor-reach") (member "--probe" a) (pair? pos))
                       (let* ((m (member "--probe" a)) (n (lambda (i) (string->number (list-ref m i)))))
                         (for-each say (reach-probe (compile-floor (car pos) read-text-file) (n 1) (n 2) (n 3)))
                         0))

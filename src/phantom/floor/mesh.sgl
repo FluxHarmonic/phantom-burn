@@ -91,7 +91,16 @@
              (verts (batch-verts b))
              (found (let loop ((l (vector-ref hash k)))
                       (cond ((null? l) #f)
-                            ((same? (growable-ref verts (car l)) x y z u w nx ny nz) (car l))
+                            ;; one vertex only where everything matches: the room too,
+                            ;; which the bake's sight culling reads
+                            ((let ((v (growable-ref verts (car l))))
+                               (and (same? v x y z u w nx ny nz)
+                                    (eqv? (vector-ref v 16) room)
+                                    (= (vector-ref v 8) (vector-ref colour 0)) (= (vector-ref v 9) (vector-ref colour 1))
+                                    (= (vector-ref v 10) (vector-ref colour 2)) (= (vector-ref v 11) (vector-ref colour 3))
+                                    (= (vector-ref v 12) (vector-ref emission 0)) (= (vector-ref v 13) (vector-ref emission 1))
+                                    (= (vector-ref v 14) (vector-ref emission 2)) (= (vector-ref v 15) (vector-ref emission 3))))
+                             (car l))
                             (else (loop (cdr l)))))))
         (or found
             (let ((i (growable-push! verts

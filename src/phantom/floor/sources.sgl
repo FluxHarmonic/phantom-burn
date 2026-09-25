@@ -60,18 +60,27 @@
                    (ltext (read-text lpath))
                    (lr (if ltext (read-legend ltext lpath) (cons #f (list (missing lpath "the legend")))))
                    (lg (car lr))
+                   (builtins (if fl (builtins-needed fl) '()))
                    (kinds (if fl
-                              (append BUILTIN-PROPS
+                              (append (map car builtins)
                                       (filter-map (lambda (t)
-                                                    (and (memq (thing-kind t) '(desk cabinet prop))
+                                                    (and (memq (thing-kind t) '(desk cabinet prop lifts))
                                                          (thing-field t 'kind)))
                                                   (floor-things fl)))
                               '()))
                    (kinds (dedupe kinds))
+                   ;; a built-in's missing file is reported here; a thing's
+                   ;; missing kind by check-references, at the thing's line
                    (prs (map (lambda (k)
                                (let* ((p (path-join root (string-append "props/" (symbol->string k) ".prop")))
-                                      (tx (read-text p)))
-                                 (list k p (if tx (read-prop tx p) (cons #f '())))))
+                                      (tx (read-text p))
+                                      (why (assq k builtins)))
+                                 (list k p (cond (tx (read-prop tx p))
+                                                 (why (cons #f (list (problem path: p line: #f
+                                                                              message: (string-append "cannot be read (the floor needs it for "
+                                                                                                      (cdr why) ")")
+                                                                              gate: 1))))
+                                                 (else (cons #f '()))))))
                              kinds))
                    (props (filter-map (lambda (x) (and (car (caddr x)) (cons (car x) (car (caddr x))))) prs))
                    (prop-ps (apply append
@@ -99,6 +108,19 @@
               (sources root: root floor: fl legend: lg props: props textures: textures
                        paths: (append (list floor-path lpath) (map cadr prs) (map cadr trs))
                        problems: (append (cdr fr) (cdr lr) prop-ps tex-ps refs))))))
+
+    ;; The built-in props floor fl uses, each with what it is for:
+    ;; ((kind . why) ...).
+    (define (builtins-needed fl)
+      (filter-map (lambda (x) (and (caddr x) (cons (car x) (cadr x))))
+                  (list (list 'lift "its lifts"
+                              (any (lambda (t) (and (eq? (thing-kind t) 'lifts) (not (thing-field t 'kind)))) (floor-things fl)))
+                        (list 'exit-door "its exit"
+                              (any (lambda (o) (eq? (opening-kind o) 'exit)) (floor-openings fl)))
+                        (list 'light-switch "its circuits' panels"
+                              (any circuit-panel (floor-circuits fl)))
+                        (list 'badge "its badge"
+                              (any (lambda (t) (eq? (thing-kind t) 'badge)) (floor-things fl))))))
 
     (define (dedupe xs)
       (let loop ((xs xs) (acc '()))

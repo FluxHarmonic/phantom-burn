@@ -38,7 +38,8 @@
 #     ended 0 or 1, the runner wrote its completion marker after a checked
 #     copy, and the wasm is present.
 #
-# Exit: 0 all green; 1 a test failed (builds fine); 2 a build failed; 125
+# Exit: 0 all green; 1 a test, a command or an output copy failed (builds
+# fine); 2 a build failed; 125
 # refused or SETUP-FAILED; 126/127 from azoth-remote; 124/255 timeout / lost.
 # Each test's own rc is on its "=== TEST-RESULT rc=" line.
 #
@@ -60,7 +61,9 @@ while [ $# -gt 0 ]; do
     --no-web)   WEB=0; FETCH=0; shift ;;
     --no-fetch) FETCH=0; shift ;;
     --release)  RELEASE=1; shift ;;
-    --command)  [ $# -ge 2 ] || { say "--command needs its arguments"; exit 125; }; COMMANDS+=("$2"); RELEASE=1; shift 2 ;;
+    --command)  [ $# -ge 2 ] || { say "--command needs its arguments"; exit 125; }
+                case "$2" in *$'\n'*) say "--command: one line, please (it travels one command per line)"; exit 125 ;; esac
+                COMMANDS+=("$2"); RELEASE=1; shift 2 ;;
     --output)   [ $# -ge 2 ] || { say "--output needs a path"; exit 125; }
                 case "$2" in /*|*..*) say "--output $2: a path inside the checkout, please"; exit 125 ;; esac
                 OUTPUTS+=("$2"); shift 2 ;;
@@ -175,15 +178,18 @@ while IFS= read -r c; do
   [ -n "$c" ] || continue
   Tc=$(t)
   echo "=== COMMAND phantom-burn $c"
-  # the arguments split on spaces, as documented
-  env -u DISPLAY scripts/dev ./build/release/bin/phantom-burn $c < /dev/null 2>&1; r=$?
+  # the arguments split on spaces, as documented, and never glob-expanded
+  read -r -a argv <<< "$c"
+  env -u DISPLAY scripts/dev ./build/release/bin/phantom-burn "${argv[@]}" < /dev/null 2>&1; r=$?
   echo "=== COMMAND-RESULT rc=$r $(( $(t) - Tc ))s $c"
   [ $r -eq 0 ] || RC=1
 done < ../commands
 clean "after the commands"
 while IFS= read -r o; do
   [ -n "$o" ] || continue
-  if [ -e "$o" ]; then mkdir -p "../out/outputs/$(dirname "$o")" && cp -r "$o" "../out/outputs/$o" && echo "remote: output $o"; else echo "remote: output $o: not there"; fi
+  if [ ! -e "$o" ]; then echo "remote: output $o: not there"
+  elif mkdir -p "../out/outputs/$(dirname "$o")" && cp -r "$o" "../out/outputs/$o"; then echo "remote: output $o"
+  else echo "remote: output $o: COPY-FAILED"; RC=1; fi
 done < ../outputs
 if [ "$WEB" = 1 ]; then
   mkdir -p ../out/web

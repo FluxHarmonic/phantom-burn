@@ -15,7 +15,7 @@
           (sigil math))
 
   (export EPS pt px py pt+ pt- pt* pt-dot pt-cross pt-len pt-dist pt-norm pt=?
-          poly-area poly-ccw poly-centroid poly-bbox
+          poly-area poly-ccw poly-centroid poly-area-centroid poly-bbox
           point-in-poly? point-seg-dist seg-param seg-point-on?
           seg-cross seg-overlap?
           poly-simple-problem
@@ -39,7 +39,7 @@
     (define (pt-norm a) (let ((l (pt-len a))) (if (> l 0.0) (pt* a (/ 1.0 l)) a)))
     (define (pt=? a b) (< (pt-dist a b) 1e-6))
 
-    ;; Twice... no: the signed area itself, positive for counter-clockwise.
+    ;; The signed area, positive for counter-clockwise.
     (define (poly-area ps)
       (if (null? ps) 0.0
           (let loop ((a ps) (acc 0.0))
@@ -54,9 +54,22 @@
     ;; (a b c) orientation: >0 counter-clockwise.
     (define (orient a b c) (pt-cross (pt- b a) (pt- c a)))
 
+    ;; The average of the corners (for a triangle, its centroid).
     (define (poly-centroid ps)
       (let ((n (length ps)))
         (pt* (fold-left pt+ (cons 0.0 0.0) ps) (/ 1.0 n))))
+
+    ;; The centre of the area (the centroid proper); the corner average for a
+    ;; polygon with no area.
+    (define (poly-area-centroid ps)
+      (let ((a (poly-area ps)))
+        (if (< (abs a) 1e-12)
+            (poly-centroid ps)
+            (let loop ((l ps) (cx 0.0) (cy 0.0))
+              (if (null? l)
+                  (cons (/ cx (* 6.0 a)) (/ cy (* 6.0 a)))
+                  (let* ((p (car l)) (q (if (null? (cdr l)) (car ps) (cadr l))) (k (pt-cross p q)))
+                    (loop (cdr l) (+ cx (* (+ (px p) (px q)) k)) (+ cy (* (+ (py p) (py q)) k)))))))))
 
     ;; (xmin ymin xmax ymax)
     (define (poly-bbox ps)
