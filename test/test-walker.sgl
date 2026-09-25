@@ -188,10 +188,12 @@
       (assert-true (< (abs (- (walker-y w) 0.1)) 0.01))
       (assert-true (walker-crouching? w))
       (assert-true (<= (walker-height w) 1.0))))
-  (test "under a ceiling lower than a crouched body (0.7 m), the body is still not thrown sideways"
-    ;; the crouch alone cannot clear this one: only collide's rule (no
-    ;; sideways push out of a ceiling over the centre) keeps the body put
-    (let* ((c (scene (ground) (box -2.0 -2.0 0.7 2.0 2.0 0.9)))
+  (test "under a small ceiling lower than a crouched body (0.7 m), the body is not thrown out sideways"
+    ;; the crouch alone cannot clear this one, and the patch is small, so a
+    ;; shove would land where there is headroom (the compiler's duct case):
+    ;; only collide's rule (no sideways push out of a ceiling over the
+    ;; centre) keeps the body put
+    (let* ((c (scene (ground) (box 0.0 -0.2 0.7 0.6 0.4 0.9)))
            (w (run (make-walker 0.3 0.1 0.0 0.0) c 10 NO-INPUT)))
       (assert-true (< (abs (- (walker-x w) 0.3)) 0.01))
       (assert-true (< (abs (- (walker-y w) 0.1)) 0.01))))
