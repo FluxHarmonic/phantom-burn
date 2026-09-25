@@ -214,11 +214,18 @@
                      (let* ((xf (wall-xform p (room-floor r) (side-normal (car ws) (cdr ws))))
                             ;; the lens, in the prop's frame (props/camera.prop)
                             (lens (xform-point xf (v3 0 0.655 2.61)))
-                            (look (thing-field t 'look)))
+                            (look (thing-field t 'look))
+                            ;; the view, lens to look: (API v5 §1) FACING its
+                            ;; heading in degrees from +x counter-clockwise (the
+                            ;; shell's fan), ARGS (FOV RANGE PITCH), PITCH
+                            ;; degrees up from level (negative looks down)
+                            (dx (- (car look) (v3x lens))) (dy (- (cadr look) (v3y lens)))
+                            (dz (- (caddr look) (v3z lens)))
+                            (deg (lambda (y x) (/ (round (* 1e4 (/ (* (atan y x) 180.0) 3.141592653589793))) 1e4))))
                        (place-prop! c pr xf (room-index r) 'camera #f id)
-                       (device! c t (v3x lens) (v3y lens) (v3z lens) 0 (room-index r)
-                                (list (car look) (cadr look) (caddr look)
-                                      (or (thing-field t 'fov) 70) (or (thing-field t 'range) 12)))))))))
+                       (device! c t (v3x lens) (v3y lens) (v3z lens) (deg dy dx) (room-index r)
+                                (list (or (thing-field t 'fov) 70) (or (thing-field t 'range) 12)
+                                      (deg dz (sqrt (+ (* dx dx) (* dy dy))))))))))))
           ((blinds)
            (let* ((r (room-by-name c (thing-field t 'in)))
                   (seg (thing-field t 'along)) (p0 (car seg)) (p1 (cadr seg))
@@ -432,10 +439,17 @@
           ((or (< m 0.0) (> m len))
            (string-append "from: " (num->str m) " m is off the " (num->str len) " m wall"))
           (else
-           (let* ((p (pt- (pt+ a (pt* (pt- b a) (/ m len))) (pt* out (+ back 0.01))))
-                  ;; the prop's back (+y) points out of the room; whole degrees
-                  ;; stay exact (floor-xform's quarter turns use no libm)
-                  (deg (/ (round (* 1e6 (/ (* (atan (- (px out)) (py out)) 180.0) 3.141592653589793))) 1e6)))
+           ;; floor-xform turns local +y to (-sin f, cos f), so +y along v is
+           ;; f = atan(-vx, vy). A floor prop's back (+y) points out of the
+           ;; room, its back touching the wall; a wall prop (mount: wall, the
+           ;; README's frame, as wall-xform places the lifts) has its origin on
+           ;; the wall's face and +y into the room. Whole degrees stay exact
+           ;; (floor-xform's quarter turns use no libm).
+           (let* ((wall? (eq? (prop-mount pr) 'wall))
+                  (on (pt+ a (pt* (pt- b a) (/ m len))))
+                  (p (if wall? on (pt- on (pt* out (+ back 0.01)))))
+                  (v (if wall? (pt* out -1.0) out))
+                  (deg (/ (round (* 1e6 (/ (* (atan (- (px v)) (py v)) 180.0) 3.141592653589793))) 1e6)))
              (list (px p) (py p) z deg (room-index r)))))))
 
     ;; --- ceiling panels ---------------------------------------------------------------------------

@@ -499,6 +499,60 @@
     (define (js-pt p) (if p (js-list (list (px p) (py p)) js-num) "null"))
     (define (js-bool b) (if b "true" "false"))
 
+    ;; The map's openings for the terminal (topics/phantom-burn-device-api
+    ;; §3 (f)): a list of (KIND P Q), KIND door, window or hatch. A wall
+    ;; opening is the span of its holes (a hole's t0 t1 are metres along its
+    ;; edge); the pieces of one opening cut into collinear edges are joined.
+    ;; A ceiling hatch cuts no wall: P Q are opposite corners of its square.
+    (define (map-openings c)
+      (let* ((es (plan-edges (ctx-plan c)))
+             (holes (ctx-holes c))
+             (fl (ctx-floor c))
+             (map-kind (lambda (k) (case k ((arch exit door) 'door) ((window glass) 'window) ((grate hatch) 'hatch) (else k))))
+             (near? (lambda (a b) (< (pt-dist a b) 1e-3)))
+             (walls (let loop ((i 0) (acc '()))
+                      (if (>= i (vector-length holes))
+                          (reverse acc)
+                          (loop (+ i 1)
+                                (append (reverse (map (lambda (h) (let ((e (vector-ref es i)))
+                                                                    (list (map-kind (vector-ref h 4))
+                                                                          (edge-point e (vector-ref h 0))
+                                                                          (edge-point e (vector-ref h 1)))))
+                                                      (vector-ref holes i)))
+                                        acc)))))
+             ;; x and y joined when they are the same kind, collinear and share an end
+             (join (lambda (x y)
+                     (and (eq? (car x) (car y))
+                          (let* ((a (cadr x)) (b (caddr x)) (p (cadr y)) (q (caddr y))
+                                 (d1 (pt- b a)) (d2 (pt- q p)))
+                            (and (< (abs (- (* (px d1) (py d2)) (* (py d1) (px d2)))) (* 1e-3 (pt-dist a b) (pt-dist p q)))
+                                 (cond ((near? b p) (list (car x) a q))
+                                       ((near? b q) (list (car x) a p))
+                                       ((near? a p) (list (car x) b q))
+                                       ((near? a q) (list (car x) b p))
+                                       (else #f)))))))
+             (joined (let pass ((xs walls))
+                       ;; join the first pair that joins, until none does
+                       (let find-pair ((l xs))
+                         (if (null? l)
+                             xs
+                             (let ((hit (find (lambda (y) (join (car l) y)) (cdr l))))
+                               (if hit
+                                   (pass (cons (join (car l) hit)
+                                               (filter (lambda (z) (not (or (eq? z (car l)) (eq? z hit)))) xs)))
+                                   (find-pair (cdr l))))))))
+             (hatches (filter-map
+                        (lambda (o)
+                          (and (eq? (opening-kind o) 'hatch)
+                               (let* ((p (opening-at o))
+                                      (rs (filter (lambda (r) (point-in-poly? p (room-corners r))) (floor-rooms fl))))
+                                 (and (pair? rs)
+                                      (let* ((upper (fold-left (lambda (a b) (if (> (room-floor b) (room-floor a)) b a)) (car rs) rs))
+                                             (sq (hatch-square o upper)))
+                                        (list 'hatch (car sq) (caddr sq)))))))
+                        (floor-openings fl))))
+        (append joined hatches)))
+
     (define (compiled-floor->json cf)
       (js-obj
         (list
@@ -596,20 +650,9 @@
                                       (lambda (r) (js-obj (list (cons "room" (js-sym (room-name r)))
                                                                 (cons "floor" (js-num (room-floor r)))
                                                                 (cons "corners" (js-list (room-corners r) js-pt))))))))
-          (cons "openings" (let* ((c (compiled-floor-ctx cf))
-                                  (es (if c (plan-edges (ctx-plan c)) (vector)))
-                                  (holes (if c (ctx-holes c) (vector))))
-                             (js-list (let loop ((i 0) (acc '()))
-                                        (if (>= i (vector-length holes))
-                                            (reverse acc)
-                                            (loop (+ i 1)
-                                                  (append (reverse (map (lambda (h) (cons (vector-ref es i) h)) (vector-ref holes i))) acc))))
-                                      (lambda (eh)
-                                        ;; a hole's t0 t1 are metres along its edge from edge-a
-                                        (let* ((e (car eh)) (h (cdr eh))
-                                               (at (lambda (t) (edge-point e t)))
-                                               (kind (vector-ref h 4)))
-                                          (js-obj (list (cons "kind" (js-str (case kind ((arch exit door) "door") ((window) "window") ((grate) "grate") ((hatch) "hatch") (else (symbol->string kind)))))
-                                                        (cons "from" (js-pt (at (vector-ref h 0))))
-                                                        (cons "to" (js-pt (at (vector-ref h 1)))))))))))
+          (cons "openings" (let ((c (compiled-floor-ctx cf)))
+                             (js-list (if c (map-openings c) '())
+                                      (lambda (o) (js-obj (list (cons "kind" (js-sym (car o)))
+                                                                (cons "from" (js-pt (cadr o)))
+                                                                (cons "to" (js-pt (caddr o)))))))))
           (cons "problems" (js-list (compiled-floor-problems cf) (lambda (p) (js-str (problem->string p))))))))))

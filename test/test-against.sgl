@@ -1,0 +1,65 @@
+;;; against: WALL faces a prop the way its mount says (README "Where things
+;;; go"): a floor prop's back (+y) to the wall, touching it; a wall prop
+;;; (mount: wall) with its origin on the wall's face and +y into the room, as
+;;; the lifts are placed. The shell found against: west put a wall prop's +y
+;;; into the wall (topics/phantom-burn-device-api §2).
+(import (sigil test)
+        (sigil fs)
+        (sigil list)
+        (phantom floor compile)
+        (phantom floor format)
+        (phantom floor poly)
+        (phantom floor mesh)
+        (phantom floor shapes)
+        (phantom floor build)
+        (phantom floor dress))
+
+;; floors/root-room.floor with a panel on each side wall: its room is
+;; (0 0)-(9 7), so the west wall is x = 0 and the east wall x = 9.
+(define SCRATCH "floors/scratch-against.floor")
+(define TEXT
+  (let* ((s (read-file-string "floors/root-room.floor"))
+         (mark "(prop  kind: cable-tray")
+         (i (let loop ((i 0)) (if (string=? (substring s i (+ i (string-length mark))) mark) i (loop (+ i 1))))))
+    (string-append (substring s 0 i)
+                   "(prop  kind: light-switch  in: key-room  against: west  from: (south 4.5))\n   "
+                   "(prop  kind: light-switch  in: key-room  against: east  from: (south 4.5))\n   "
+                   (substring s i (string-length s)))))
+(define (reader path)
+  (cond ((string=? path SCRATCH) TEXT)
+        ((file-exists? path) (read-file-string path))
+        (else #f)))
+
+(define cf (compile-floor SCRATCH reader))
+(define placed
+  (let ((g (ctx-placed (compiled-floor-ctx cf))))
+    (let loop ((i 0) (acc '()))
+      (if (>= i (growable-count g)) (reverse acc) (loop (+ i 1) (cons (growable-ref g i) acc))))))
+(define (of-kind k) (filter (lambda (p) (eq? (prop-name (placed-prop p)) k)) placed))
+(define (near? a b) (< (abs (- a b)) 1e-6))
+(define (x-of p) (vector-ref (xform-origin (placed-xform p)) 0))
+(define (ay p) (xform-ay (placed-xform p)))
+
+(test-group "against:"
+  (test "the scratch floor compiles clean"
+    (for-each (lambda (p) (display p) (newline)) (compiled-floor-problems cf))
+    (assert-equal 0 (length (compiled-floor-problems cf))))
+  (test "a wall prop against the west wall: on it, +y east into the room"
+    (let ((ws (filter (lambda (p) (< (x-of p) 4.5)) (of-kind 'light-switch))))
+      (assert-equal 1 (length ws))
+      (display (list 'west-switch (xform-origin (placed-xform (car ws))) (ay (car ws)))) (newline)
+      (assert-true (near? 0.0 (x-of (car ws))))
+      (assert-true (near? 1.0 (px (ay (car ws)))))
+      (assert-true (near? 0.0 (py (ay (car ws)))))))
+  (test "a wall prop against the east wall: on it, +y west into the room"
+    (let ((ws (filter (lambda (p) (> (x-of p) 4.5)) (of-kind 'light-switch))))
+      (assert-equal 1 (length ws))
+      (assert-true (near? 9.0 (x-of (car ws))))
+      (assert-true (near? -1.0 (px (ay (car ws)))))))
+  (test "floor props keep their backs to the wall: the west racks' +y is west, off the wall by their depth"
+    (let ((racks (filter (lambda (p) (< (x-of p) 4.5)) (of-kind 'server-rack))))
+      (assert-equal 3 (length racks))
+      (for-each (lambda (r)
+                  (assert-true (near? -1.0 (px (ay r))))
+                  (assert-true (> (x-of r) 0.0)))
+                racks))))

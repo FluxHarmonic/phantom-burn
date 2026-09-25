@@ -29,12 +29,16 @@
     (for-each (lambda (p) (display (problem->string p)) (newline)) (compiled-floor-problems cf))
     (display (list 'compile-ms ms 'vertices nv 'indices ni 'stats (compiled-floor-stats cf))) (newline)
     (assert-equal 0 (length (compiled-floor-problems cf))))
-  (test "parts: eight textures, then solid, then glass"
+  (test "parts: eight textures, then solid, then the named parts (the badge, the devices'), then glass"
     (let ((names (map part-name (compiled-floor-parts cf))))
       (display names) (newline)
-      (assert-equal "solid" (list-ref names (- (length names) 2)))
+      (assert-equal "solid" (list-ref names 8))
+      (assert-equal "badge" (list-ref names 9))
       (assert-equal "glass" (list-ref names (- (length names) 1)))
-      (assert-equal 10 (length names))))
+      ;; P3: the printer, phone and vent LEDs, the blinds (closed and open,
+      ;; each slats and the untextured rest), the terminal's screen and LED,
+      ;; the camera's LED and alarm
+      (assert-equal 22 (length names))))
   (test "the parts cover the index buffer exactly, in order"
     (let loop ((ps (compiled-floor-parts cf)) (at 0))
       (if (null? ps)
