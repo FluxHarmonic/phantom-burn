@@ -133,7 +133,8 @@
         (when f (render-fog! f))
         (when h (game-set-hud! h))
         (when v (game-set-view! v))
-        (when shot (game-set-shot! shot))))
+        (when shot (game-set-shot! shot))
+        (when (param "on") (game-set-on! (param "on")))))
 
     (define (start!)
       ;; one attempt: a failure is reported once, not retried per frame

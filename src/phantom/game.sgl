@@ -44,7 +44,7 @@
           (phantom stand-in))
 
   (export game-init! game-frame! game-reload!
-          game-set-view! game-set-shot! game-set-hud! game-set-trace! game-set-auto! game-status
+          game-set-view! game-set-shot! game-set-hud! game-set-on! game-set-trace! game-set-auto! game-status
           make-controls FOV)
 
   (begin
@@ -220,6 +220,20 @@
       (set! *shot* k)
       (apply-view-light! (view-ref k)))
     (define (game-set-hud! n) (set! *hud* n))
+
+    ;; Switch the switchable circuits by a spec: "all", "none", or names
+    ;; separated by commas ("c1,c3"): those on, the rest off.
+    (define (game-set-on! spec)
+      (let ((names (let split ((i 0) (start 0) (acc '()))
+                     (cond ((>= i (string-length spec))
+                            (reverse (if (> i start) (cons (string->symbol (substring spec start i)) acc) acc)))
+                           ((char=? (string-ref spec i) #\,)
+                            (split (+ i 1) (+ i 1) (if (> i start) (cons (string->symbol (substring spec start i)) acc) acc)))
+                           (else (split (+ i 1) start acc))))))
+        (for-each (lambda (c)
+                    (render-circuit-set! c (or (string=? spec "all")
+                                               (and (not (string=? spec "none")) (memq c names) #t))))
+                  (render-switchable))))
 
     ;; The floor: (load-mesh* layout name) and (load-texture* name) load its
     ;; files; coll is its (phantom collide) collision; info is a compiled
