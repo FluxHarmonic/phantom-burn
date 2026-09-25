@@ -139,11 +139,12 @@
                   (assert-true (> r 0.00316))))
               (bank-slots)))
   (test "a muffled guard step is darker than a clear one (less of it changes sample to sample)"
-    (let* ((diff (lambda (bv) (let ((n (quotient (bytevector-length bv) 4)))
+    ;; on the left channel (the samples are interleaved stereo): frame to frame
+    (let* ((diff (lambda (bv) (let ((n (quotient (bytevector-length bv) 8)))
                                 (let loop ((i 1) (acc 0.0) (all 0.0))
                                   (if (>= i n) (/ acc (max all 1e-12))
-                                      (loop (+ i 1) (+ acc (let ((d (- (f32 bv i) (f32 bv (- i 1))))) (* d d)))
-                                            (+ all (* (f32 bv i) (f32 bv i)))))))))
+                                      (loop (+ i 1) (+ acc (let ((d (- (f32 bv (* 2 i)) (f32 bv (* 2 (- i 1)))))) (* d d)))
+                                            (+ all (* (f32 bv (* 2 i)) (f32 bv (* 2 i))))))))))
            (clear (diff (bank-sample BANK-A '(guard clear 0))))
            (muffled (diff (bank-sample BANK-A '(guard muffled 0)))))
       (assert-true (< muffled (* 0.3 clear))))))
@@ -175,12 +176,13 @@
         (assert-equal '(step tile heel) (list (car key) (cadr key) (caddr key)))
         (assert-true (< 0.4 gain 0.6))
         (mixer-render! (sound-mixer s) out 512)
-        (let ((want (make-bytevector 4 0)) (ok #t))
+        (let ((want (make-bytevector 8 0)) (ok #t))
           (let loop ((i 0))
             (when (< i 512)
               ;; the mixer's own steps: (gain x the centre's pan gain) x the sample
-              (f32! want 0 (* (* gain (car (pan-gains 0.0))) (f32 sample i)))
-              (unless (and (= (f32 out (* 2 i)) (f32 want 0)) (= (f32 out (+ 1 (* 2 i))) (f32 want 0))) (set! ok #f))
+              (f32! want 0 (* (* gain (car (pan-gains 0.0))) (f32 sample (* 2 i))))
+              (f32! want 1 (* (* gain (cdr (pan-gains 0.0))) (f32 sample (+ 1 (* 2 i)))))
+              (unless (and (= (f32 out (* 2 i)) (f32 want 0)) (= (f32 out (+ 1 (* 2 i))) (f32 want 1))) (set! ok #f))
               (loop (+ i 1))))
           (assert-true ok)))))
   (test "on the duct, the grate's metal at half gain; a guard through a wall, the muffled step, panned"
@@ -243,7 +245,7 @@
 
 (test-group "the bed loop"
   (test "is BED-LOOP-S long and sounds"
-    (let* ((l (bank-bed-loop BANK-A)) (n (quotient (bytevector-length l) 4)))
+    (let* ((l (bank-bed-loop BANK-A)) (n (quotient (bytevector-length l) 8)))
       (assert-equal (exact (round (* BED-LOOP-S RATE))) n)
       (assert-true (> (rms l) 0.001))))
   (test "sits well under your steps (David: \"a drone in the air\"): its RMS 30 dB under a tile heel's peak"
@@ -335,22 +337,18 @@
   (let loop () (unless (or (done? b) (bank-render! b 4096)) (loop)))
   b)
 
-;; an event tune rendered the way the bank does, on a player of its own, to mono
-(define (mono-render text frames)
+;; an event tune rendered the way the bank does, on a player of its own: its
+;; stereo output as pulled, in blocks of 1024
+(define (stereo-render text frames)
   (let* ((p (open-tune-player (read-tune-string text) RATE))
-         (buf (make-bytevector (* 8 frames) 0))
-         (out (make-bytevector (* 4 frames) 0)))
+         (buf (make-bytevector (* 8 frames) 0)))
     (let loop ((done 0))
       (when (< done frames)
         (let ((n (min 1024 (- frames done))))
           (player-pull! p buf (* 8 done) n)
           (loop (+ done n)))))
-    (let fill ((i 0))
-      (when (< i frames)
-        (f32! out i (* 0.5 (+ (f32 buf (* 2 i)) (f32 buf (+ 1 (* 2 i))))))
-        (fill (+ i 1))))
     (player-close! p)
-    out))
+    buf))
 
 (define BANK-E (bank-until (make-bank RATE loader) (lambda (b) #f)))
 
@@ -359,30 +357,30 @@
     (for-each (lambda (k)
                 (let ((s (bank-sample BANK-E (list 'event k))))
                   (unless (and s (> (rms s) 0.00316)) (display k) (display " is missing or silent\n"))
-                  (assert-true (and s (= (quotient (bytevector-length s) 4) (exact (round (* (event-seconds k) RATE))))))
+                  (assert-true (and s (= (quotient (bytevector-length s) 8) (exact (round (* (event-seconds k) RATE))))))
                   (assert-true (and s (> (rms s) 0.00316)))))
               EVENT-KINDS))
   (test "each is its approved tune's own render, exactly (the file copied from the sketchbook)"
     (for-each (lambda (k)
                 (let ((name (string-append "event-" (symbol->string k))))
                   (assert-true (equal? (bank-sample BANK-E (list 'event k))
-                                       (mono-render (loader name) (exact (round (* (event-seconds k) RATE))))))))
+                                       (stereo-render (loader name) (exact (round (* (event-seconds k) RATE))))))))
               EVENT-KINDS))
   (test "each has faded out by its end (its last 100 ms is under -60 dBFS)"
     (for-each (lambda (k)
                 (let* ((s (bank-sample BANK-E (list 'event k)))
-                       (n (quotient (bytevector-length s) 4))
-                       (tail (make-bytevector (* 4 (quotient RATE 10)) 0)))
-                  (bytevector-copy! tail 0 s (* 4 (- n (quotient RATE 10))) (* 4 n))
+                       (n (quotient (bytevector-length s) 8))
+                       (tail (make-bytevector (* 8 (quotient RATE 10)) 0)))
+                  (bytevector-copy! tail 0 s (* 8 (- n (quotient RATE 10))) (* 8 n))
                   (unless (< (rms tail) 0.001) (display k) (display " still sounds at its end\n"))
                   (assert-true (< (rms tail) 0.001))))
               EVENT-KINDS))
-  (test "the steps are usable before the bed, and the bed before the events"
+  (test "the steps are usable before the events, and the events before the bed"
     (let ((b (make-bank RATE (only-loader "event-note"))))
       (bank-until b (lambda (b) (bank-sample b '(step tile heel 0))))
-      (assert-false (bank-bed-loop b))
-      (bank-until b (lambda (b) (bank-bed-loop b)))
       (assert-false (bank-sample b '(event note)))
+      (bank-until b (lambda (b) (bank-sample b '(event note))))
+      (assert-false (bank-bed-loop b))
       (assert-false (bank-ready? b))))
   (test "the slots and the bed are the same bytes with the events as without"
     (assert-true (equal? (vector-ref BANK-A 2) (vector-ref BANK-E 2)))
