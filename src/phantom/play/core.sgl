@@ -23,7 +23,8 @@
           (phantom guard sense)
           (phantom guard guard)
           (phantom guard hearing)
-          (phantom sound logic))
+          (phantom sound logic)
+          (phantom play devices))
 
   (export make-play play? play-reset! play-tick!
           play-data play-guard play-guard-world
@@ -32,7 +33,9 @@
           play-near-exit? GUARD-START-LEG PICKUP-REACH EXIT-REACH
           play-hearing play-take-steps! play-last-heard play-runner-room
           play-guard-path! play-set-hearing!
-          play-use! play-incidents play-patches play-take-events! play-event! USE-REACH)
+          play-use! play-incidents play-patches play-take-events! play-event! USE-REACH
+          play-devices-state play-deck play-tier play-deck! play-device-level play-device-approach
+          PHONE-NOISE PRINTER-NOISE ANSWER-REACH DEVICE-NOTICE)
 
   (begin
 
@@ -59,7 +62,15 @@
     ;;  playback, newest first: ((kind x y) ...)  28 the switchable circuits
     ;;  that were on when the attempt began (#f until its first tick): only
     ;;  a light that was on and is now off makes a dark room (design §3)
-    (define (play? p) (and (vector? p) (= (vector-length p) 29) (eq? (vector-ref p 0) 'play)))
+    ;;  P3: 29 the devices ((phantom play devices))  30 the deck
+    ;;  31 each device's approach: where a unit stands to reach it (#(x y z),
+    ;;  or #f)
+    (define (play? p) (and (vector? p) (= (vector-length p) 32) (eq? (vector-ref p 0) 'play)))
+    (define (play-device-approach p i) (vector-ref (vector-ref p 31) i))
+    (define (play-devices-state p) (vector-ref p 29))
+    (define (play-deck p) (vector-ref p 30))
+    ;; the runner's tier (design §3): the facilities badge makes you FACILITIES
+    (define (play-tier p) (if (vector-ref p 7) 'facilities 'staff))
     (define USE-REACH 1.3)          ; m, horizontally: the panel, the reader
     (define (play-incidents p) (reverse (vector-ref p 24)))
     ;; the events since the last call, oldest first, and forget them
@@ -94,7 +105,8 @@
              (p (vector 'play data gw (make-guard gw GUARD-START-LEG) (make-light-state) (make-target)
                         circuits #f 'playing 0 0.0 0.0 0.0 0.0 #f
                         (make-hearing data) (make-steps) #f #f '() (hearing-threshold data) 0.0 -1 #t
-                        '() 0 -1 '() #f)))
+                        '() 0 -1 '() #f
+                        (make-devices data) (make-deck) (device-approaches data gw))))
         p))
 
     ;; A new attempt: the guard back at its start, the badge on the desk.
@@ -113,6 +125,8 @@
       (vector-set! p 26 -1)
       (vector-set! p 27 '())
       (vector-set! p 28 #f)
+      (devices-reset! (vector-ref p 29))
+      (deck-reset! (vector-ref p 30))
       p)
 
     ;; The path from the guard to you (for playback: how much of the guard
@@ -179,6 +193,12 @@
             (target-set! (vector-ref p 5) x y z (walker-eye-z w) (walker-height w) l01 vis shape)
             (steps! p w x y z)
             (guard-step! g (vector-ref p 2) (vector-ref p 5) TICK)
+            (devices-tick! (vector-ref p 29) TICK
+                           (lambda (i kind)
+                             (when (eq? kind 'printer)
+                               (let ((d (vector-ref (play-devices data) i)))
+                                 (event! p 'print-done (device-x d) (device-y d))))))
+            (hear-devices! p)
             (notice! p on?)
             (let ((outcome
                    (cond
@@ -191,6 +211,113 @@
                                           'badge)
                     ((eq? outcome 'playing) 'playing)
                     (else (event! p 'caught x y) (vector-set! p 8 outcome) outcome))))))
+
+    ;; --- devices (P3) ----------------------------------------------------------------
+
+    ;; A sounding device's noise at the source, on the steps' scale (a
+    ;; walk on tile is 0.6): a phone is heard across the floor, a printer
+    ;; through a room or two.
+    (define PHONE-NOISE 3.0)
+    (define PRINTER-NOISE 1.5)
+    (define DEVICE-NOTICE 0.65)     ; awareness a heard device raises: SEARCHING, toward it
+    (define ANSWER-REACH 1.8)       ; m: a searching unit this near a ringing phone answers it
+
+    ;; Where a unit stands to reach each device: the nearest place to it on
+    ;; its room's floor that the guard's route connects to. A device's own
+    ;; point is on a desk or up a wall, and the nearest walkable cell to it
+    ;; can be the desk's top, an island no path reaches (so a search for it
+    ;; would end where it began). Found once, when the play is made.
+    (define APPROACH-WITHIN 3.0)    ; m: farther, the device has no approach (#f)
+    (define (device-approaches data gw)
+      (let* ((nav (guard-world-nav gw))
+             (f (make-field nav))
+             (route (play-route data))
+             (_ (nav-field! nav f (vector-ref route 0) (vector-ref route 1) 0.0 #f #f #f))
+             (dist (field-dist f))
+             (rooms (play-rooms data))
+             (ds (play-devices data)))
+        (list->vector
+          (map (lambda (d)
+                 (let ((fz (room-floor (vector-ref rooms (device-room d)))))
+                   (let scan ((i 0) (best -1) (bd (* APPROACH-WITHIN APPROACH-WITHIN)))
+                     (if (< i (vector-length dist))
+                         (if (and (>= (vector-ref dist i) 0) (< (abs (- (nav-node-z nav i) fz)) 0.4))
+                             (let* ((dx (- (nav-node-x nav i) (device-x d))) (dy (- (nav-node-y nav i) (device-y d)))
+                                    (d2 (+ (* dx dx) (* dy dy))))
+                               (if (< d2 bd) (scan (+ i 1) i d2) (scan (+ i 1) best bd)))
+                             (scan (+ i 1) best bd))
+                         (and (>= best 0) (vector (nav-node-x nav best) (nav-node-y nav best) (nav-node-z nav best)))))))
+               (vector->list ds)))))
+
+    (define (device-noise kind state)
+      (case kind
+        ((phone) (if (eq? state 'ringing) PHONE-NOISE 0.0))
+        ((printer) (if (eq? state 'running) PRINTER-NOISE 0.0))
+        (else 0.0)))
+
+    ;; What reaches the guard of device i now (0 when it is silent).
+    (define (play-device-level p i)
+      (let* ((data (vector-ref p 1)) (dv (vector-ref p 29))
+             (d (vector-ref (play-devices data) i))
+             (noise (device-noise (device-kind d) (devices-state dv i))))
+        (if (= noise 0.0)
+            0.0
+            (let* ((g (vector-ref p 3)) (h (vector-ref p 15))
+                   (rg (room-at data (guard-x g) (guard-y g) (guard-z g))))
+              (hear-path! h (device-room d) (device-x d) (device-y d) rg (guard-x g) (guard-y g))
+              (heard-level h noise)))))
+
+    ;; The unit and the sounding devices (design §4, "the first
+    ;; distractions"): one it hears over the threshold, it goes to look at
+    ;; (SEARCHING, the device's floor as the place), and the noticing is an
+    ;; incident; a ringing phone it reaches while searching, it answers.
+    ;; It returns to its route when the search runs out (the guard's own
+    ;; rule). A hunting unit carries on hunting.
+    (define (hear-devices! p)
+      (when (vector-ref p 23)
+        (let* ((data (vector-ref p 1)) (dv (vector-ref p 29)) (g (vector-ref p 3))
+               (ds (play-devices data)))
+          (let loop ((i 0))
+            (when (< i (vector-length ds))
+              (let ((level (play-device-level p i)))
+                (when (> level (vector-ref p 20))
+                  (let* ((d (vector-ref ds i))
+                         (room (device-room d))
+                         (fz (room-floor (vector-ref (play-rooms data) room)))
+                         (a (vector-ref (vector-ref p 31) i)))
+                    ;; to where it can stand by it (its approach), else its point
+                    (if a
+                        (guard-notice! g DEVICE-NOTICE (vector-ref a 0) (vector-ref a 1) (vector-ref a 2))
+                        (guard-notice! g DEVICE-NOTICE (device-x d) (device-y d) fz))
+                    (incident! p (if (eq? (device-kind d) 'phone) 'phone-rang 'printer-ran) room)
+                    (when (and (eq? (device-kind d) 'phone) (= (guard-state g) SEARCHING))
+                      (let ((dx (- (guard-x g) (device-x d))) (dy (- (guard-y g) (device-y d))))
+                        (when (< (+ (* dx dx) (* dy dy)) (* ANSWER-REACH ANSWER-REACH))
+                          (devices-state-set! dv i 'idle 0.0)))))))
+              (loop (+ i 1)))))))
+
+    ;; The deck, once a tick with held? its hold (the caller's input): aims
+    ;; from the walker's eye, steps the hold, and runs a completed command.
+    ;; Returns deck-step!'s result ((hold), (run INDEX COMMAND), (deny
+    ;; INDEX) or #f).
+    (define (play-deck! p w held?)
+      (if (not (eq? (vector-ref p 8) 'playing))
+          #f
+          (let* ((data (vector-ref p 1)) (dv (vector-ref p 29)) (k (vector-ref p 30))
+                 (coll (vector-ref (vector-ref p 2) 1)))
+            (deck-aim! k dv coll (play-glass data) (walker-eye-x w) (walker-eye-y w) (walker-eye-z w)
+                       (walker-yaw w) (walker-pitch w))
+            (let ((r (deck-step! k dv held? (play-tier p) TICK)))
+              (when (pair? r)
+                (case (car r)
+                  ((hold) (event! p 'deck-hold (walker-x w) (walker-y w)))
+                  ((deny) (event! p 'deck-deny (walker-x w) (walker-y w)))
+                  ((run)
+                   (let* ((i (cadr r)) (d (vector-ref (play-devices data) i))
+                          (ev (devices-run! dv i (caddr r))))
+                     (event! p 'deck-confirm (walker-x w) (walker-y w))
+                     (when ev (event! p ev (device-x d) (device-y d)))))))
+              r))))
 
     ;; --- incidents (design §5, D19) ------------------------------------------------
 
@@ -238,7 +365,10 @@
       '((badge-seen "BADGE REVOKED: FACILITIES" "Nice badge. It isn't yours anymore.")
         (you-seen "PATROLS TIGHTENED" "Found you. Now I know what you look like.")
         (you-heard "PATROLS TIGHTENED" "You walk loudly for a ghost.")
-        (dark-room "EMERGENCY LIGHTING: ~" "You like the dark. I've fixed the dark.")))
+        (dark-room "EMERGENCY LIGHTING: ~" "You like the dark. I've fixed the dark.")
+        ;; P3 (the device API, §5), drafts for David (D18)
+        (phone-rang "PHONES MUTED ON THIS FLOOR" "Nobody was calling. I know who dialled.")
+        (printer-ran "PRINTERS LOCKED" "Print jobs from nobody. Cute.")))
     (define DUCT-PATCH '("DUCT GRATES BOLTED" "Crawling through my walls? I've bolted them."))
 
     (define (patch-for inc)

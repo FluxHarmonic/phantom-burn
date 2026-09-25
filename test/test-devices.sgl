@@ -1,0 +1,172 @@
+;;; P3's deck and first distractions on floor 14 (design §3, §4;
+;;; topics/phantom-burn-device-api), through (phantom play core) as the game
+;;; runs it.
+;;;
+;;; The distraction gate (P3, §Gates): a scripted ring pulls the unit off its
+;;; route to the phone, and it returns after the search. Its sabotage (the
+;;; unit ignores device sounds) must turn the pull red.
+
+(import (sigil test)
+        (sigil math)
+        (sigil fs)
+        (phantom soup)
+        (phantom walker)
+        (phantom play data)
+        (phantom play devices)
+        (phantom play core)
+        (phantom guard guard))
+
+(define DIR "assets/floors/14-slice/")
+(define C (pbc1->collision (read-file-bytes (string-append DIR "collide"))))
+(define INFO (floor-info-from-string (read-file-string (string-append DIR "floor.sexp"))))
+(define DATA (play-data-from-string (read-file-string (string-append DIR "play.sexp"))))
+(define CIRCUITS (cdr (assq 'circuits INFO)))
+(define (on? c) #t)
+
+(define (fresh) (play-reset! (make-play C DATA CIRCUITS)))
+(define (idx id) (device-index DATA id))
+(define PHONE (idx 'office-phone))
+(define PRINTER (idx 'office-printer))
+(define VENT (idx 'corridor-vent))
+(define (dev i) (vector-ref (play-devices DATA) i))
+
+;; A walker at (x y) looking at device i: its yaw and pitch set by one
+;; look input (yaw 0 is north, counter-clockwise; pitch up).
+(define (walker-at-looking x y i)
+  (let* ((w0 (make-walker x y 0.0 0.0))
+         (d (dev i))
+         (dx (- (device-x d) x)) (dy (- (device-y d) y))
+         (yaw (atan (- dx) dy))
+         (w1 (make-walker x y 0.0 yaw))
+         (dz (- (+ (device-z d) 0.15) (walker-eye-z w1)))
+         (pitch (atan dz (sqrt (+ (* dx dx) (* dy dy))))))
+    (walker-step w1 (make-input 0.0 0.0 0.0 pitch #f #f #f 0) TICK C)))
+
+(define (hold p w n) (let loop ((i 0) (last #f)) (if (< i n) (loop (+ i 1) (or (play-deck! p w #t) last)) last)))
+
+(test-group "the floor's devices"
+  (test "floor 14 has its six devices, with their tiers"
+    (assert-equal 6 (device-count DATA))
+    (assert-true (>= PHONE 0)) (assert-true (>= PRINTER 0)) (assert-true (>= VENT 0))
+    (assert-equal 'staff (device-tier (dev PHONE)))
+    (assert-equal 'facilities (device-tier (dev VENT)))
+    (assert-equal 'security (device-tier (dev (idx 'lift-camera)))))
+  (test "a camera's args are (fov range pitch), looking down"
+    (let ((a (device-args (dev (idx 'lift-camera)))))
+      (assert-equal 3 (vector-length a))
+      (assert-true (< (vector-ref a 2) 0.0)))))
+
+(test-group "the deck"
+  (test "aimed at the phone from 2 m, a 0.8 s hold rings it (STAFF)"
+    (let* ((p (fresh)) (w (walker-at-looking 17.45 15.85 PHONE)))
+      (play-deck! p w #f)
+      (display (list 'aim (deck-list (play-deck p) (play-devices-state p) (play-tier p)))) (newline)
+      (assert-equal PHONE (deck-target (play-deck p)))
+      (assert-false (deck-blocked? (play-deck p)))
+      (assert-equal 'ring (deck-command (play-deck p) (play-devices-state p)))
+      ;; not yet at 0.75 s
+      (hold p w 45)
+      (assert-equal 'idle (devices-state (play-devices-state p) PHONE))
+      (let ((r (hold p w 10)))
+        (assert-true (and (pair? r) (eq? (car r) 'run)))
+        (assert-equal 'ringing (devices-state (play-devices-state p) PHONE)))
+      ;; one hold, one command: still held, nothing more
+      (assert-false (play-deck! p w #t))
+      (assert-true (memq 'deck-confirm (map car (play-take-events! p))))))
+  (test "letting go early runs nothing"
+    (let* ((p (fresh)) (w (walker-at-looking 17.45 15.85 PHONE)))
+      (hold p w 30)
+      (play-deck! p w #f)
+      (hold p w 30)
+      (assert-equal 'idle (devices-state (play-devices-state p) PHONE))))
+  (test "the vent is FACILITIES: denied to STAFF"
+    (let* ((p (fresh)) (w (walker-at-looking 16.5 8.3 VENT)))
+      (play-deck! p w #f)
+      (assert-equal VENT (deck-target (play-deck p)))
+      (let ((r (hold p w 60)))
+        (assert-true (and (pair? r) (eq? (car r) 'deny))))
+      (assert-equal 'denied (deck-status (play-deck p)))
+      (assert-equal 'off (devices-state (play-devices-state p) VENT))))
+  (test "through a wall: blocked, and holding does nothing"
+    (let* ((p (fresh)) (w (walker-at-looking 18.5 12.4 PHONE)))
+      (play-deck! p w #f)
+      (assert-equal PHONE (deck-target (play-deck p)))
+      (assert-true (deck-blocked? (play-deck p)))
+      (hold p w 60)
+      (assert-equal 'blocked (deck-status (play-deck p)))
+      (assert-equal 'idle (devices-state (play-devices-state p) PHONE))))
+  (test "looking away: no target"
+    (let* ((p (fresh)) (w (make-walker 17.45 15.85 0.0 3.14159)))
+      (play-deck! p w #f)
+      (assert-equal -1 (deck-target (play-deck p))))))
+
+;; The unit, from point leg of its route (0: the lobby; 2: the office), for n ticks
+;; with the runner off the floor; returns (ticks-near-phone first-near-tick
+;; state-after) and whether the phone was answered.
+(define GONE (make-walker 60.0 60.0 0.0 0.0))
+(define (near? g i r) (let ((dx (- (guard-x g) (device-x (dev i)))) (dy (- (guard-y g) (device-y (dev i)))))
+                        (< (+ (* dx dx) (* dy dy)) (* r r))))
+(define (run-pull i ring? n leg)
+  (let* ((p (fresh)) (g (play-guard p)))
+    (guard-reset! g (play-guard-world p) leg)
+    (when ring? (devices-run! (play-devices-state p) i (if (= i PHONE) 'ring 'print)))
+    (let loop ((t 0) (near 0) (first -1) (answered #f) (searched #f) (calm -1) (back -1))
+      (if (>= t n)
+          (list near first answered p calm back)
+          (begin
+            ;; answered: the phone went quiet with its ring not run out
+            (let ((left (devices-timer (play-devices-state p) i))
+                  (was (devices-state (play-devices-state p) i)))
+              (play-tick! p GONE on? 1.0 2.0)
+              (let* ((nr (near? g i 2.5))
+                     (searched (or searched (= (guard-state g) SEARCHING)))
+                     ;; the search over: calm again after searching
+                     (calm (if (and searched (< calm 0) (= (guard-state g) CALM)) t calm))
+                     ;; then back on its route: at one of its points
+                     (back (if (and (>= calm 0) (< back 0) (on-route? g)) t back)))
+                (loop (+ t 1) (if nr (+ near 1) near) (if (and nr (< first 0)) t first)
+                      (or answered (and (eq? was 'ringing) (> left (* 2 TICK))
+                                        (eq? (devices-state (play-devices-state p) i) 'idle)))
+                      searched calm back))))))))
+(define (on-route? g)
+  (let ((r (play-route DATA)))
+    (let loop ((k 0))
+      (and (< k (vector-length r))
+           (or (let ((dx (- (guard-x g) (vector-ref r k))) (dy (- (guard-y g) (vector-ref r (+ k 1)))))
+                 (< (+ (* dx dx) (* dy dy)) 1.0))
+               (loop (+ k 2)))))))
+
+(test-group "the distraction gate"
+  (test "THE PULL: a ring pulls the unit from the lobby to the phone, it answers, searches there, and returns to its route"
+    (let* ((with (run-pull PHONE #t (* 60 70) 0))
+           (without (run-pull PHONE #f (* 60 70) 0))
+           (p (list-ref with 3)) (g (play-guard p)))
+      (display (list 'ring 'near-ticks (car with) 'first (cadr with) 'answered (caddr with)
+                     'calm (list-ref with 4) 'back-on-route (list-ref with 5)
+                     'state (guard-state g) 'incidents (play-incidents p) 'patches (play-patches p))) (newline)
+      (display (list 'no-ring 'near-ticks (car without) 'first (cadr without))) (newline)
+      ;; pulled: there sooner than its route brings it, and it stays to search
+      (assert-true (>= (cadr with) 0))
+      (assert-true (or (< (cadr without) 0) (< (+ (cadr with) 300) (cadr without))))
+      ;; its route passes the phone (about 6 s within 2.5 m); the search
+      ;; there adds at least 6 s more
+      (assert-true (> (car with) (+ (car without) (* 60 6))))
+      (assert-true (caddr with))
+      ;; and back on its route: calm after the search, then at a route point
+      (assert-true (>= (list-ref with 4) 0))
+      (assert-true (> (list-ref with 5) (list-ref with 4)))
+      (assert-true (assq 'phone-rang (play-incidents p)))
+      (assert-true (equal? (car (car (play-patches p))) "PHONES MUTED ON THIS FLOOR"))))
+  (test "a print job pulls the unit to the printer, off its route"
+    (let* ((with (run-pull PRINTER #t (* 60 45) 2))
+           (without (run-pull PRINTER #f (* 60 45) 2)))
+      (display (list 'print 'near-ticks (car with) 'first (cadr with) 'no-print (car without))) (newline)
+      (assert-true (> (car with) (* 60 3)))
+      (assert-equal 0 (car without))
+      (assert-true (assq 'printer-ran (play-incidents (list-ref with 3))))))
+  (test "an unheard device is no incident: a ring stopped at once"
+    (let* ((p (fresh)))
+      (devices-run! (play-devices-state p) PHONE 'ring)
+      (devices-state-set! (play-devices-state p) PHONE 'idle 0.0)
+      (let loop ((t 0)) (when (< t 600) (play-tick! p GONE on? 1.0 2.0) (loop (+ t 1))))
+      (assert-true (null? (play-incidents p))))))
