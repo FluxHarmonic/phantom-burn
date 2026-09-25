@@ -15,7 +15,31 @@ phantom-burn --floor-sheet FLOOR [OUT.svg]   the plan from above
 phantom-burn --floor-time FLOOR [N]          compile N times, print the stage times
 ```
 
+```
+phantom-burn --floor-reach FLOOR [--save-witness PATH]
+                                              gate 3: the exit reached from the start and
+                                              (from the badge) through the duct, with the
+                                              exit's tier; nothing behind the exit without
+                                              it; each route replayed through the walker
+phantom-burn --floor-reach FLOOR --probe X Y Z
+                                              a body settled at (X Y Z), tick by tick
+phantom-burn --floor-replay FILE.collide SCRIPT
+                                              gate 5's native leg: a witness script
+                                              replayed over the shipped collision file,
+                                              one "replay K X Y Z YAW HEIGHT" line a tick
+scripts/floor-shot FLOOR [K...]              in-game shots of the floor's views through the
+                                              shell's shot-native, beside the export's renders
+```
+
 Exit status: 0 clean, 1 problems, 2 a usage or file error. `--raise` (with `--floor-check`) lets an internal compiler error through with its stack, and prints the stages as they finish.
+
+Heavy runs go to an azoth runner (folio `procedures/azoth-remote-builds`):
+
+```
+scripts/build-remote --no-web --command "--floor-reach floors/14-slice.floor" --output build/floors
+```
+
+builds HEAD's release config on the runner, runs the release binary with those arguments, and fetches `build/floors` to `build/remote-out-<sha>/`.
 
 In-process: `(compile-floor "floors/NAME.floor" read-text)` from `(phantom floor compile)`, where `read-text` is `(lambda (path) text-or-#f)`. It never raises on bad content.
 
@@ -130,3 +154,10 @@ Agreed 2026-09-25 (David asked whether `.floor` scales to larger maps). P0's sli
 - **1, parse and legend:** every file reads; every field exists and has the right shape; every name is declared (surfaces, circuits, rooms, props, materials, textures, palette colours). Openings sit on a wall their rooms share; a hatch's square lies inside both rooms, with the upper room's floor above the lower room's ceiling. Guard waypoints are in a room and 0.3 m clear of walls, props, stairs and rails. Views and the start are in a room. Fixtures: every emissive vertex's tag names a real circuit, and every switchable ceiling panel's emissive vertices carry its circuit.
 - **2, sealed:** outlines are simple; no two rooms on one level overlap; no opening opens onto the void; and rays from inside every room, in 26 directions, all meet the built surfaces.
 - **6, stacking and stairs:** closed rooms over others start at or above their ceiling; open ones sit inside them, with 2 m under their slab; a room over another is above it, and stacked rooms say `over:`; stairs start in the lower room and land on an open edge of the upper, with no rail across where they land.
+  The built heights are checked too: in every face, no two rooms have air at the same height.
+- **3, reach** (`--floor-reach`, through the shell's `(phantom walker)` at its fixed TICK over the compiled collision):
+  - With the exit's tier, the exit is reached from the start, and from the badge through the duct with the corridor's floor forbidden.
+  - Without the tier, nothing reaches the space behind the exit.
+  - Each route is realized from the real start state, recording every input, then replayed from a fresh walker to the same place.
+  - "Unreachable" means no searched pattern reached it.
+- **5, determinism:** a gate 3 witness replayed natively (`--floor-replay`) and on the web (the shell's page, a `replay` dispatch over the same `.collide` bytes) gives byte-identical traces.
