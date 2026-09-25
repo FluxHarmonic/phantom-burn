@@ -12,7 +12,8 @@
 ;;;               q e (lean), and the arrows (look)
 ;;;   1 pressed   the keys pressed this frame (symbols): c crouch; the
 ;;;               style lab's p (dither on/off), [ ] (spread -/+ 8),
-;;;               b (Bayer 4x4 / 8x8), n (next palette), - = (fog), h (HUD);
+;;;               b (Bayer 4x4 / 8x8), n (next palette), - = (fog), h (HUD),
+;;;               v (vertex snapping), x (affine textures);
 ;;;               7 8 9 (go to the export's three views)
 ;;;   2 3         mouse motion this frame, pixels
 ;;;   4 5         the move stick, -1..1, y down (the phone's left thumb)
@@ -120,6 +121,8 @@
               ((string=? name "-") (render-fog! (* (render-fog) 0.8)))
               ((string=? name "=") (render-fog! (* (render-fog) 1.25)))
               ((string=? name "h") (set! *hud* (modulo (+ *hud* 1) 3)))
+              ((string=? name "v") (render-snap! (if (> (render-snap) 0.0) 0.0 1.0)))
+              ((string=? name "x") (render-affine! (not (render-affine?))))
               ((string=? name "c") (set! *crouch-press* #t))
               ((string=? name "7") (game-set-view! 0))
               ((string=? name "8") (game-set-view! 1))
@@ -222,7 +225,9 @@
                                     "  BAYER " (number->string (render-bayer))
                                     "  SPREAD " (fixed0 (render-spread))
                                     "  " (symbol->string (render-palette))
-                                    "  FOG " (fixed0 (render-fog)))
+                                    "  FOG " (fixed0 (render-fog))
+                                    (if (> (render-snap) 0.0) "  SNAP" "")
+                                    (if (render-affine?) "  AFFINE" ""))
                      (if *shot*
                          (string-append "SHOT " (symbol->string (car (view-ref *shot*))))
                          (string-append (fixed1 (walker-x w)) " " (fixed1 (walker-y w)) " " (fixed1* (walker-z w))
@@ -231,7 +236,7 @@
                                         "  " (surface-name (walker-surface w)))))
                (if (= *hud* 2)
                    (list "WASD MOVE  SHIFT SNEAK  R RUN  C CROUCH  Q E LEAN  MOUSE LOOK"
-                         "P DITHER  [ ] SPREAD  B BAYER  N PALETTE  - = FOG  7 8 9 VIEWS  H HUD")
+                         "P DITHER  [ ] SPREAD  B BAYER  N PALETTE  - = FOG  V SNAP  X AFFINE  7 8 9 VIEWS  H HUD")
                    '())))))
 
     ;; fixed1 for a number that may be negative

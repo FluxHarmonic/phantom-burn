@@ -3,6 +3,7 @@
 ;;;   phantom-burn [--floor DIR] [--size WxH] [--frames N] [--seconds S] [--view K]
 ;;;                [--shot K] [--hud 0|1|2] [--dither on|off] [--spread S]
 ;;;                [--bayer 4|8] [--palette NAME] [--fog M] [--card]
+;;;                [--snap] [--affine]
 ;;;
 ;;; --floor names the floor's directory (default assets/stand-in, the G0
 ;;; export: floor14.sgm, city.sgm, the textures, floor14.collide). The
@@ -65,7 +66,7 @@
 
     ;; The keys whose presses the game reads (style lab, crouch, views).
     (define PRESS-KEYS
-      (map string->symbol '("c" "p" "[" "]" "b" "n" "-" "=" "h" "7" "8" "9")))
+      (map string->symbol '("c" "p" "[" "]" "b" "n" "-" "=" "h" "v" "x" "7" "8" "9")))
 
     (define (pressed-keys)
       (let loop ((ks PRESS-KEYS) (acc '()))
@@ -84,6 +85,8 @@
             (shot (string->number (arg-value args "--shot" "none"))))
         (when d (render-dither! (string=? d "on")))
         (when (member "--card" args) (render-card! #t))
+        (when (member "--snap" args) (render-snap! 1.0))
+        (when (member "--affine" args) (render-affine! #t))
         (when s (render-spread! s))
         (when b (render-bayer! b))
         (when p (render-palette! (string->symbol p)))

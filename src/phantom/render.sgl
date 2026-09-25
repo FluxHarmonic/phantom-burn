@@ -28,6 +28,7 @@
           render-dither? render-dither! render-spread render-spread!
           render-bayer render-bayer! render-palette render-palette!
           render-fog render-fog! render-card? render-card!
+          render-snap render-snap! render-affine? render-affine!
           render-world-ms render-post-ms
           make-camera camera-set!)
 
@@ -52,12 +53,14 @@ uniform vec4 lights[16];    // xyz, radius (design coordinates)
 uniform vec4 light_rgb[16]; // rgb, circuit
 uniform vec4 levels;        // each circuit's level
 uniform vec4 ambient;
+uniform vec4 retro;         // x: snap vertices to a grid of this many view pixels (0 off), y: 1 affine textures
 in vec3 position;
 in vec2 uv;
 in vec3 normal;
 in vec4 color;
 in vec4 emission;
 out vec2 v_uv;
+out vec3 v_uvw;             // uv * w and w: dividing in the fragment stage undoes the perspective correction
 out vec3 v_color;
 out float v_fog;
 void main() {
@@ -75,20 +78,29 @@ void main() {
   v_color = mix(color.rgb * lit, emission.rgb, emission.a);
   v_uv = uv;
   v_fog = clamp(length(wp - eye.xyz) / eye.w, 0.0, 1.0);
-  gl_Position = view_proj * vec4(wp, 1.0);
+  vec4 clip = view_proj * vec4(wp, 1.0);
+  if (retro.x > 0.0 && clip.w > 0.0) {
+    vec2 cells = vec2(240.0, 135.0) / retro.x;
+    clip.xy = floor(clip.xy / clip.w * cells + 0.5) / cells * clip.w;
+  }
+  v_uvw = vec3(uv * clip.w, clip.w);
+  gl_Position = clip;
 }
 ")
 
     (define WORLD-FRAGMENT
       "uniform vec4 fog_color;
 uniform float alpha;
+uniform vec4 retro;
 uniform sampler2D tex;
 in vec2 v_uv;
+in vec3 v_uvw;
 in vec3 v_color;
 in float v_fog;
 out vec4 frag_color;
 void main() {
-  vec3 c = texture(tex, v_uv).rgb * v_color;
+  vec2 uv = retro.y > 0.5 ? v_uvw.xy / v_uvw.z : v_uv;
+  vec3 c = texture(tex, uv).rgb * v_color;
   frag_color = vec4(mix(c, fog_color.rgb, v_fog * v_fog), alpha);
 }
 ")
@@ -113,6 +125,9 @@ void main() {
     (define *fog* 45.0)
     (define *flip* 1.0)       ; see POST-FRAGMENT's opts.x
     (define *card* #f)        ; the test card instead of the world
+    (define *snap* 0.0)       ; vertex snapping grid in view pixels, 0 off (§6: off by default)
+    (define *affine* #f)      ; affine texture mapping (§6: off by default)
+    (define *retro* (make-bytevector 16 0))
     (define *card-tex* #f)
     (define *opts-copy* (make-bytevector 16 0))
     (define *world-ms* 0.0)
@@ -147,6 +162,14 @@ void main() {
         (sync-post!)))
     (define (render-fog) *fog*)
     (define (render-fog! d) (set! *fog* (max 1.0 (* 1.0 d))))
+    (define (sync-retro!)
+      (f32! *retro* 0 *snap*)
+      (f32! *retro* 1 (if *affine* 1.0 0.0))
+      (when *opaque* (both (lambda (p) (set-pipeline-uniform! p 'retro *retro*)))))
+    (define (render-snap) *snap*)
+    (define (render-snap! px) (set! *snap* (max 0.0 (* 1.0 px))) (sync-retro!))
+    (define (render-affine?) *affine*)
+    (define (render-affine! on?) (set! *affine* on?) (sync-retro!))
     (define (render-card?) *card*)
     ;; The card is made here, not in a frame, so a shot never waits on it.
     (define (render-card! on?)
@@ -203,6 +226,7 @@ void main() {
               (set-pipeline-uniform! p 'ambient '(0.2 0.14 0.34 1.0))
               (set-pipeline-uniform! p 'fog_color (list BG-R BG-G BG-B 1.0))
               (set-pipeline-uniform! p 'levels '(1.0 1.0 1.0 1.0))))
+      (sync-retro!)
       (set-pipeline-uniform! *opaque* 'alpha 1.0)
       (set-pipeline-uniform! *glass* 'alpha 0.3))
 

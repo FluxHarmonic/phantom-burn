@@ -9,7 +9,7 @@
 ;;;
 ;;; The page's events, besides the loader's keydown and keyup:
 ;;;   ("params", "k=v&...")  the page's query: floor, view, shot, hud,
-;;;                          dither, spread, bayer, palette, fog, card (before start)
+;;;                          dither, spread, bayer, palette, fog, card, snap, affine
 ;;;   ("look", "dx,dy")      pointer-locked mouse motion, CSS pixels
 ;;;   ("move", "x,y")        the left stick, -1..1, y down
 ;;;   ("lookstick", "x,y")   the right stick
@@ -107,6 +107,8 @@
             (shot (and (param "shot") (string->number (param "shot")))))
         (when d (render-dither! (not (string=? d "off"))))
         (when (param "card") (render-card! #t))
+        (when (param "snap") (render-snap! (or (string->number (param "snap")) 1.0)))
+        (when (param "affine") (render-affine! #t))
         (when s (render-spread! s))
         (when b (render-bayer! b))
         (when p (render-palette! (string->symbol p)))
