@@ -218,6 +218,36 @@
               (room-over u)))
           (floor-rooms (ctx-floor c)))))
 
+    ;; The built heights: in every face, rooms that do not share air must not
+    ;; have air at the same height. This checks what the build made of over:
+    ;; (the lower room's ceiling dropped under a mezzanine, a duct above its
+    ;; corridor's ceiling), not what the floor file says.
+    (define (check-built-stacking! c)
+      (let ((faces (vector->list (plan-faces (ctx-plan c))))
+            (seen '()))
+        (for-each
+          (lambda (f)
+            (let ((ivs (face-ivs c (face-index f))))
+              (for-each
+                (lambda (a)
+                  (for-each
+                    (lambda (b)
+                      (when (and (< (iv-owner a) (iv-owner b))
+                                 (not (linked? (ctx-owners c) (ctx-groups c) (iv-owner a) (iv-owner b)))
+                                 (> (min (iv-hi a) (iv-hi b)) (+ (max (iv-lo a) (iv-lo b)) 1e-6))
+                                 (not (member (cons (iv-owner a) (iv-owner b)) seen)))
+                        (set! seen (cons (cons (iv-owner a) (iv-owner b)) seen))
+                        (let ((ra (owner-room-of c (iv-owner a))) (rb (owner-room-of c (iv-owner b))))
+                          (add-problem! c 6 (if rb (room-line rb) #f)
+                                        (string-append "the built floor gives "
+                                                       (if ra (rname ra) "a hatch") " and " (if rb (rname rb) "a hatch")
+                                                       " air at the same height near " (fmt-pt (face-sample f)) ", "
+                                                       (num->str (max (iv-lo a) (iv-lo b))) " to "
+                                                       (num->str (min (iv-hi a) (iv-hi b))))))))
+                    ivs))
+                ivs)))
+          faces)))
+
     ;; --- gate 6: stairs -----------------------------------------------------------------------------
 
     (define (check-stairs! c)
@@ -291,13 +321,27 @@
       (let ((rs (filter (lambda (r) (point-in-poly? p (room-corners r))) (floor-rooms (ctx-floor c)))))
         (and (pair? rs) (fold-left (lambda (a b) (if (< (room-floor b) (room-floor a)) b a)) (car rs) rs))))
 
+    ;; The room whose outline holds p, or, failing that, the lowest room whose
+    ;; outline passes within CLEARANCE of it (a point on or just past a wall
+    ;; line belongs to the room it is brushing, so its distance is reported).
+    (define (room-near c p)
+      (or (lowest-room-at c p)
+          (let ((rs (filter (lambda (r)
+                              (let ((cs (room-corners r)))
+                                (< (let loop ((a cs) (best 1e30))
+                                     (if (null? a) best
+                                         (loop (cdr a) (min best (point-seg-dist p (car a) (if (null? (cdr a)) (car cs) (cadr a)))))))
+                                   CLEARANCE)))
+                            (floor-rooms (ctx-floor c)))))
+            (and (pair? rs) (fold-left (lambda (a b) (if (< (room-floor b) (room-floor a)) b a)) (car rs) rs)))))
+
     (define (check-guards! c)
       (for-each
         (lambda (t)
           (when (eq? (thing-kind t) 'guard)
             (for-each
               (lambda (p k)
-                (let ((r (lowest-room-at c p)))
+                (let ((r (room-near c p)))
                   (if (not r)
                       (add-problem! c 1 (thing-line t) (string-append "the guard's waypoint " (number->string (+ k 1))
                                                                       " " (fmt-pt p) " is in no room"))
@@ -327,6 +371,7 @@
       (check-outlines! c)
       (check-overlaps! c)
       (check-stacking! c)
+      (check-built-stacking! c)
       (check-stairs! c)
       (check-guards! c)
       (check-views! c)
