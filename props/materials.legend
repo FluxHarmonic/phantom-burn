@@ -41,6 +41,7 @@
    (duct     texture: steel)
    (dark     colour: "#0D0A1A")
    (plastic  colour: "#2A2D3A")
+   (slat     colour: "#8A8FA0")                ; blinds (P3): C-STATIC-A, light enough to read against a night window
    (chair    colour: "#21173D")
    (skirting colour: "#17122E")
    (pane     colour: "#CCE6FF"  glass: 0.3)

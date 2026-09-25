@@ -1,0 +1,10 @@
+;; props/blinds-open.prop - raised blinds: the slats stacked under the head
+;; rail. The same frame as blinds-closed (x 0..1 along the edge, z 1 the
+;; window's head), but the compiler places it at the head without scaling z,
+;; so the stack keeps its depth: z here is metres below the head, from 1.
+(prop blinds-open
+  mount: wall
+  parts: ((box  size: (1.0 0.03 0.02)    at: (0.5 0.05 1.0)     material: steel)   ; the head rail
+          (box  size: (0.98 0.045 0.07)  at: (0.5 0.05 0.955)   material: slat)    ; the stacked slats
+          (box  size: (0.98 0.05 0.012)  at: (0.5 0.05 0.915)   material: plastic) ; the bottom rail
+          (box  size: (0.006 0.006 0.3)  at: (0.9 0.075 0.8)    material: dark)))  ; the cord

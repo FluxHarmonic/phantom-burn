@@ -1,0 +1,15 @@
+;; props/printer.prop - the office's multifunction printer (P3: STAFF runs a
+;; job to pull the unit). On the floor, front -y. The LED on its panel is a
+;; named part (name: led): lit while it runs.
+(prop printer
+  parts: ((box  size: (0.6 0.55 0.5)     at: (0 0 0.25)         material: plastic)  ; the paper cabinet
+          (box  size: (0.56 0.01 0.005)  at: (0 -0.276 0.17)    material: dark)     ; its drawer seams
+          (box  size: (0.56 0.01 0.005)  at: (0 -0.276 0.34)    material: dark)
+          (box  size: (0.62 0.57 0.32)   at: (0 0 0.66)         material: steel)    ; the print engine
+          (box  size: (0.5 0.02 0.05)    at: (0 -0.29 0.66)     material: dark)     ; the output slot
+          (box  size: (0.42 0.22 0.015)  at: (0 -0.33 0.6)      material: plastic)  ; the output tray
+          (box  size: (0.6 0.5 0.06)     at: (0 0.02 0.85)      material: plastic)  ; the scanner lid
+          (wedge size: (0.3 0.12 0.06)   at: (0.1 -0.27 0.86)   material: dark)     ; the control panel
+          (box  size: (0.1 0.01 0.035)   at: (0.06 -0.305 0.87) material: screen)   ; its display
+          (box  size: (0.02 0.012 0.02)  at: (0.2 -0.305 0.87)  material: led  name: led))
+  hides: crouched)

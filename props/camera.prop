@@ -1,0 +1,16 @@
+;; props/camera.prop - one of Gibson's cameras (P3: observers on floor 14;
+;; commanding them is SECURITY). mount: wall, high over the lifts: the origin
+;; on the wall's face, +y into the room. The body looks out and down (the
+;; wedge's hood). Two named parts for the shell: the LED (name: led, C-SELECTED
+;; cyan, steady, blinking while it sees you) and the alarm (name: alarm, ICE
+;; amber, shown once it has raised an incident).
+(prop camera
+  mount: wall
+  parts: ((box  size: (0.2 0.03 0.26)    at: (0 0.015 2.66)      material: steel)    ; the wall plate
+          (box  size: (0.07 0.26 0.07)   at: (0 0.16 2.7)        material: steel)    ; the arm
+          (box  size: (0.2 0.42 0.18)    at: (0 0.42 2.62)       material: plastic)  ; the housing
+          (wedge size: (0.22 0.16 0.07)  at: (0 0.38 2.745)      material: plastic)  ; the sun hood
+          (box  size: (0.15 0.02 0.13)   at: (0 0.64 2.61)       material: dark)     ; the lens face
+          (box  size: (0.07 0.015 0.07)  at: (0 0.655 2.61)      material: dark)     ; the lens
+          (box  size: (0.03 0.015 0.03)  at: (0.058 0.655 2.66)  material: led    name: led)
+          (box  size: (0.03 0.015 0.03)  at: (-0.058 0.655 2.66) material: amber  name: alarm)))

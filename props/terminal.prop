@@ -1,0 +1,13 @@
+;; props/terminal.prop - the floor's terminal (P3): a workstation on a desk
+;; whose screen shows the floor's map. Origin on the desk top under its
+;; middle; the screen faces -y, where you stand. Its screen is a named part
+;; (name: screen) the shell can hide for the lit one; its LED shows the deck
+;; can reach it. The screen lights the room around it (the screens circuit).
+(prop terminal
+  parts: ((box  size: (0.22 0.18 0.02)   at: (0 0.12 0.01)      material: plastic)  ; the stand's foot
+          (box  size: (0.06 0.04 0.3)    at: (0 0.14 0.17)      material: plastic)  ; the stand
+          (box  size: (0.62 0.06 0.4)    at: (0 0.1 0.44)       material: plastic)  ; the monitor's housing
+          (box  size: (0.56 0.02 0.34)   at: (0 0.065 0.44)     material: screen  name: screen)
+          (box  size: (0.46 0.16 0.025)  at: (0 -0.14 0.0125)   material: dark)     ; the keyboard
+          (box  size: (0.02 0.02 0.012)  at: (0.28 0.068 0.26)  material: led  name: led))
+  lamps: ((at: (0 -0.3 0.5)  colour: "#4DF2D9"  radius: 2.0  strength: 0.4  circuit: screens)))

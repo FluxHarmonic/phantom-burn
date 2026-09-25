@@ -1,0 +1,33 @@
+;; props/blinds-closed.prop - lowered blinds (P3: FACILITIES opens and closes
+;; them; the city light comes in or stays out). A 1 m module the compiler
+;; repeats along its window: x 0..1 along the window's edge, +y into the room
+;; (just inside the glass). z is a unit frame, 1 the window's head and 0 its
+;; sill: the compiler scales z to the window's height, so the 24 slats space
+;; themselves out over it.
+(prop blinds-closed
+  mount: wall
+  parts: ((box  size: (1.0 0.03 0.02)    at: (0.5 0.05 1.0)     material: steel)   ; the head rail
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.9600)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.9191)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.8783)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.8374)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.7965)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.7557)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.7148)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.6739)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.6330)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.5922)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.5513)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.5104)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.4696)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.4287)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.3878)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.3470)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.3061)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.2652)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.2243)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.1835)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.1426)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.1017)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.0609)  material: slat)
+          (box  size: (0.98 0.04 0.006)  at: (0.5 0.05 0.0200)  material: slat)))
