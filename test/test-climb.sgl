@@ -1,0 +1,152 @@
+;;; P2's climb (review M1, resolved): the guard's nav has two layers, the
+;;; ground and what is over it, joined by the stair's treads, and a capture
+;;; reaches 1.2 m across and 1.5 m up or down with a clear line. So no place
+;;; on floor 14 is safe from capture except by darkness or hiding (the
+;;; duct, crouch-only and walled).
+;;;
+;;; The sweep: every floor a runner can stand on (the room grid: every
+;;; upward surface the collision gives a room, at every cell) is a node a
+;;; guard reaches from its route, or within capture reach of one. The
+;;; sabotage (the stair's layers not joined) must turn it red, naming the
+;;; mezzanine.
+
+(import (sigil test)
+        (sigil math)
+        (sigil fs)
+        (phantom detmath)
+        (phantom soup)
+        (phantom collide)
+        (phantom walker)
+        (phantom play data)
+        (phantom play core)
+        (phantom guard nav)
+        (phantom guard guard))
+
+(define DIR "assets/floors/14-slice/")
+(define C (pbc1->collision (read-file-bytes (string-append DIR "collide"))))
+(define INFO (floor-info-from-string (read-file-string (string-append DIR "floor.sexp"))))
+(define DATA (play-data-from-string (read-file-string (string-append DIR "play.sexp"))))
+(define CIRCUITS (cdr (assq 'circuits INFO)))
+(define (on-set names) (lambda (c) (and (memq c names) #t)))
+(define ALL-ON (on-set '(c1 c2 c3 emergency screens city)))
+
+(define (room-index name)
+  (let loop ((i 0))
+    (cond ((>= i (room-count DATA)) -1)
+          ((eq? (room-name (vector-ref (play-rooms DATA) i)) name) i)
+          (else (loop (+ i 1))))))
+(define DUCT (room-index 'duct))
+(define REACH 1.2)
+(define HEIGHT 1.5)
+
+;; Every standing place: (x y z room) for each floor under each cell centre
+;; of the light grid (walked down from the top: collide-floor gives the
+;; highest in a range), where a runner fits (0.28 m clear at chest height)
+;; and the collision gives the floor a room.
+(define (floors-at x y)
+  (let down ((zhi 4.5) (acc (quote ())))
+    (let ((f (collide-floor C x y -0.5 zhi)))
+      (if f (down (- f 0.5) (cons f acc)) acc))))
+
+(define (standing-places)
+  (let ((w (light-grid-w DATA)) (h (light-grid-h DATA)) (cell (light-cell DATA))
+        (x0 (light-grid-x0 DATA)) (y0 (light-grid-y0 DATA)))
+    (let rows ((r 0) (acc (quote ())))
+      (if (>= r h)
+          acc
+          (let cols ((c 0) (acc acc))
+            (if (>= c w)
+                (rows (+ r 1) acc)
+                (let* ((x (+ x0 (* cell (+ c 0.5)))) (y (+ y0 (* cell (+ r 0.5)))))
+                  (cols (+ c 1)
+                        (let each ((fs (floors-at x y)) (acc acc))
+                          (if (null? fs)
+                              acc
+                              (let* ((z (car fs)) (room (room-at DATA x y z))
+                                     (fits (= 0 (collide-resolve! C x y 0.28 (+ z 0.4) (+ z 0.85)))))
+                                (each (cdr fs) (if (and fits (>= room 0)) (cons (list x y z room) acc) acc)))))))))))))
+
+(define (reachable-field nav)
+  (let ((f (make-field nav)) (route (play-route DATA)))
+    (nav-field! nav f (vector-ref route 0) (vector-ref route 1) 0.0 #f #f #f)
+    f))
+
+;; A place is covered when a reached node lies within REACH across and
+;; HEIGHT up or down (checked by scanning the cells around it).
+(define (covered? nav f x y z)
+  (let* ((dist (field-dist f)) (span (+ 1 (exact (ceiling (/ REACH (nav-cell nav)))))))
+    (let rows ((dr (- span)))
+      (and (<= dr span)
+           (or (let cols ((dc (- span)))
+                 (and (<= dc span)
+                      (or (let* ((px (+ x (* dc (nav-cell nav)))) (py (+ y (* dr (nav-cell nav))))
+                                 (dx (- px x)) (dy (- py y)))
+                            (and (<= (+ (* dx dx) (* dy dy)) (* REACH REACH))
+                                 ;; every layer's node there within HEIGHT
+                                 (let each ((lim 0.0))
+                                   (let ((node (nav-node-within nav px py z (+ lim HEIGHT))))
+                                     (and (>= node 0)
+                                          (<= (abs (- (nav-node-z nav node) z)) HEIGHT)
+                                          (or (>= (vector-ref dist node) 0)
+                                              ;; the nearest is unreached: try the other layer
+                                              (let ((other (nav-node-within nav px py (if (> (nav-node-z nav node) z) (- z HEIGHT) (+ z HEIGHT)) HEIGHT)))
+                                                (and (>= other 0) (not (= other node))
+                                                     (<= (abs (- (nav-node-z nav other) z)) HEIGHT)
+                                                     (>= (vector-ref dist other) 0)))))))))
+                          (cols (+ dc 1)))))
+               (rows (+ dr 1)))))))
+
+(define (uncovered nav)
+  (let ((f (reachable-field nav)))
+    (let loop ((ps (standing-places)) (bad '()) (n 0) (hidden 0))
+      (if (null? ps)
+          (list (reverse bad) n hidden)
+          (let* ((p (car ps)) (x (car p)) (y (cadr p)) (z (caddr p)) (room (cadddr p)))
+            (cond ((= room DUCT) (loop (cdr ps) bad (+ n 1) (+ hidden 1)))
+                  ((covered? nav f x y z) (loop (cdr ps) bad (+ n 1) hidden))
+                  (else (loop (cdr ps) (cons p bad) (+ n 1) hidden))))))))
+
+(define (summary bad)
+  ;; the rooms named by the uncovered places, and a few of them
+  (let count ((ps bad) (rooms '()))
+    (if (null? ps)
+        (list 'rooms rooms 'first (if (pair? bad) (list-head* bad 5) '()))
+        (let ((name (room-name (vector-ref (play-rooms DATA) (cadddr (car ps))))))
+          (count (cdr ps) (if (memq name rooms) rooms (cons name rooms)))))))
+(define (list-head* l n) (if (or (= n 0) (null? l)) '() (cons (car l) (list-head* (cdr l) (- n 1)))))
+
+(define NAV (guard-world-nav (play-guard-world (make-play C DATA CIRCUITS))))
+
+(test-group "the climb"
+  (test "the nav has an upper layer: the stair's treads and the mezzanine are walkable nodes"
+    (assert-true (nav-walkable? NAV 7.0 8.5 3.0))
+    (assert-true (< (abs (- (nav-z NAV) 3.0)) 0.05))
+    (assert-true (nav-walkable? NAV 7.0 8.5 0.0))
+    (assert-true (< (abs (nav-z NAV)) 0.05)))
+  (test "a guard's field from its route reaches the mezzanine, up the stairs"
+    (let* ((f (reachable-field NAV)) (node (nav-node-at NAV 7.0 8.5 3.0)))
+      (display (list 'mezzanine-steps (vector-ref (field-dist f) node))) (newline)
+      (assert-true (>= (vector-ref (field-dist f) node) 0))))
+  (test "THE SWEEP: every place a runner can stand is reached by a guard or within its reach, but the duct"
+    (let* ((r (uncovered NAV)) (bad (car r)))
+      (display (list 'standing-places (cadr r) 'duct (caddr r) 'uncovered (length bad) (summary bad))) (newline)
+      (assert-true (> (cadr r) 1000))
+      (assert-true (> (caddr r) 0))
+      (assert-true (null? bad))))
+  (test "a hunt from the lobby climbs the stairs and catches you on the mezzanine"
+    (let* ((p (play-set-hearing! (play-reset! (make-play C DATA CIRCUITS)) #f))
+           (g (play-guard p)))
+      (guard-reset! g (play-guard-world p) 0)
+      (guard-place! g 6.0 3.0 0.0 1.0)
+      (let ((w (let settle ((i 0) (w (make-walker 6.0 8.8 3.0 0.0)))
+                 (if (>= i 30) w (settle (+ i 1) (walker-step w NO-INPUT TICK C))))))
+        (guard-alarm! g (walker-x w) (walker-y w) (walker-z w))
+        (let loop ((i 0) (top 0.0))
+          (let ((o (play-tick! p w ALL-ON 1.0 2.0)))
+            (cond ((eq? o 'caught)
+                   (display (list 'caught-on-mezzanine 'ticks i 'guard-z (guard-z g) 'highest top)) (newline)
+                   (assert-true (> (guard-z g) 2.5)))
+                  ((>= i (* 60 30))
+                   (display (list 'not-caught 'guard (guard-x g) (guard-y g) (guard-z g) 'state (guard-state g) 'highest top)) (newline)
+                   (assert-true #f))
+                  (else (loop (+ i 1) (max top (guard-z g)))))))))))

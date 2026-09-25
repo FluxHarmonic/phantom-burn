@@ -127,7 +127,7 @@
                    (hear-path! h room x y rg (guard-x g) (guard-y g))
                    (let ((level (heard-level h (step-noise data tag gait))))
                      (vector-set! p 21 (max (vector-ref p 21) level))
-                     (when (vector-ref p 23) (guard-hear! g level (vector-ref p 20) x y))))))
+                     (when (vector-ref p 23) (guard-hear! g level (vector-ref p 20) x y z))))))
              events)))))
 
     ;; The walker at the floor's arrival spot, facing as the floor says.

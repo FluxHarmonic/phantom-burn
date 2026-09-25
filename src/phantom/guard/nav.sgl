@@ -1,21 +1,27 @@
-;;; (phantom guard nav) - Where a guard can walk, and the way to anywhere.
+;;; (phantom guard nav) - Where a guard can walk, and the way to anywhere,
+;;; on two floors of height: the ground and what is over it (the stair's
+;;; treads, the mezzanine).
 ;;;
-;;; The ground floor is rasterised once per floor load into a grid of CELL
-;;; metres. A cell is walkable when the collision has a floor under its
-;;; centre within a step of z 0, nothing overhead lower than a standing
-;;; guard, and a guard's body (a cylinder GUARD-R wide) fits there without
-;;; touching anything: walls, desks, the cabinet, the stair's sides. Guards
-;;; stay on the ground (no stairs, no duct), which is why the duct and the
-;;; mezzanine are places a hunt can lose you (design §5, "get into a vent").
+;;; The floor is rasterised once per load into a grid of CELL metres with
+;;; two layers per cell: the ground (a floor within a step of z 0) and the
+;;; upper floor (the highest floor from 0.4 to 3.4 m: a tread, the
+;;; mezzanine). A node (a cell on a layer) is walkable when a guard's body
+;;; (a cylinder GUARD-R wide, GUARD-H tall) stands on that floor touching
+;;; nothing and with nothing overhead lower than it. Two nodes join when
+;;; their cells are neighbours (8 ways; a diagonal only when both of its
+;;; sides join too, so nothing cuts a corner) and their floors are within
+;;; STEP-H of each other: that is how the stair's treads join the lobby to
+;;; the mezzanine (P2: the guard climbs, review M1). The duct (crouch-only,
+;;; 1 m high) never holds a standing guard: it stays a place to hide.
 ;;;
-;;; A field is a breadth-first distance from one target cell to every cell
-;;; (8 neighbours; a diagonal only when both of its sides are walkable, so
-;;; nothing cuts a corner). A guard steers by following the field downhill
-;;; a few cells ahead and aiming at the farthest of them it can walk to in a
-;;; straight line, which smooths the grid's staircase into straight walks.
+;;; Upper floors that are not reachable (a desk top, the cabinet's top) are
+;;; walkable nodes no path ever joins; they cost nothing.
 ;;;
+;;; A field is a breadth-first distance from one target node to every node.
+;;; A guard steers by following the field downhill a few nodes ahead and
+;;; aiming at the farthest of them it can walk to in a straight line.
 ;;; Everything is preallocated at load: building a field and steering
-;;; allocate nothing, so a hunt can rebuild its field while it runs.
+;;; allocate nothing.
 
 (define-library (phantom guard nav)
   (import (sigil core)
@@ -23,75 +29,126 @@
           (phantom collide))
 
   (export make-nav nav? nav-cell nav-w nav-h nav-walkable-count
-          nav-walkable? nav-cell-of nav-cell-x nav-cell-y
-          make-field field-target nav-field! nav-steer! nav-steer-x nav-steer-y
-          nav-line-clear? nav-nearest-walkable GUARD-R NAV-CELL)
+          nav-walkable? nav-node-at nav-node-within nav-node-x nav-node-y nav-node-z nav-z
+          make-field field-target field-dist nav-field! nav-steer! nav-steer-x nav-steer-y nav-steer-z
+          nav-line-clear? nav-nearest-walkable nav-layer-joins!
+          GUARD-R NAV-CELL STEP-H LAYERS)
 
   (begin
 
     (define NAV-CELL 0.25)
     (define GUARD-R 0.3)
     (define GUARD-H 1.8)
-    (define STEP-H 0.36)
+    (define STEP-H 0.4)             ; two nodes join when their floors are this close
+    (define GROUND-TOP 0.4)
+    (define UPPER-TOP 3.4)
+    (define LAYERS 2)
     (define LOOKAHEAD 12)
+    (define NEAR-Z 1.0)             ; a point belongs to a node within this height
 
     ;; The nav: a vector
-    ;;  0 tag  1 x0  2 y0  3 w  4 h  5 walk (bytevector w*h, 1 walkable)
-    ;;  6 queue (vector w*h)  7 steer x  8 steer y  9 walkable count
-    ;;  10 the steering's chain of cells (vector LOOKAHEAD)
-    (define (nav? n) (and (vector? n) (= (vector-length n) 11) (eq? (vector-ref n 0) 'nav)))
+    ;;  0 tag  1 x0  2 y0  3 w  4 h  5 walk (bytevector, LAYERS*w*h)
+    ;;  6 queue (vector LAYERS*w*h)  7 steer x  8 steer y  9 walkable count
+    ;;  10 the steering's chain  11 floor z per node  12 steer z
+    ;;  13 layers join? (#t; the sabotage leg turns it off)  14 last z found
+    (define (nav? n) (and (vector? n) (= (vector-length n) 15) (eq? (vector-ref n 0) 'nav)))
     (define (nav-cell n) NAV-CELL)
     (define (nav-w n) (vector-ref n 3))
     (define (nav-h n) (vector-ref n 4))
     (define (nav-walkable-count n) (vector-ref n 9))
     (define (nav-steer-x n) (vector-ref n 7))
     (define (nav-steer-y n) (vector-ref n 8))
+    (define (nav-steer-z n) (vector-ref n 12))
+    (define (nav-z n) (vector-ref n 14))
+    ;; For the climb gate's sabotage only: #f keeps each layer to itself.
+    (define (nav-layer-joins! n on?) (vector-set! n 13 on?))
+
+    (define (cells n) (* (vector-ref n 3) (vector-ref n 4)))
 
     ;; The nav over [x0, x1] x [y0, y1] from the collision.
     (define (make-nav coll x0 y0 x1 y1)
       (let* ((w (+ 1 (exact (ceiling (/ (- x1 x0) NAV-CELL)))))
              (h (+ 1 (exact (ceiling (/ (- y1 y0) NAV-CELL)))))
-             (walk (make-bytevector (* w h) 0)))
+             (wh (* w h))
+             (walk (make-bytevector (* LAYERS wh) 0))
+             (fz (make-vector (* LAYERS wh) 0.0)))
         (let rows ((r 0) (count 0))
           (if (< r h)
               (let cols ((c 0) (count count))
                 (if (< c w)
                     (let* ((x (+ x0 (* NAV-CELL (+ c 0.5))))
                            (y (+ y0 (* NAV-CELL (+ r 0.5))))
-                           (ok (cell-walkable? coll x y)))
-                      (when ok (bytevector-u8-set! walk (+ (* r w) c) 1))
-                      (cols (+ c 1) (if ok (+ count 1) count)))
+                           (k (+ (* r w) c))
+                           (g (standing coll x y -0.3 GROUND-TOP))
+                           (u (standing coll x y GROUND-TOP UPPER-TOP)))
+                      (when g (bytevector-u8-set! walk k 1) (vector-set! fz k g))
+                      (when u (bytevector-u8-set! walk (+ wh k) 1) (vector-set! fz (+ wh k) u))
+                      (cols (+ c 1) (+ count (if g 1 0) (if u 1 0))))
                     (rows (+ r 1) count)))
-              (vector 'nav (* 1.0 x0) (* 1.0 y0) w h walk (make-vector (* w h) 0) 0.0 0.0 count
-                      (make-vector LOOKAHEAD 0))))))
+              (vector 'nav (* 1.0 x0) (* 1.0 y0) w h walk (make-vector (* LAYERS wh) 0) 0.0 0.0 count
+                      (make-vector LOOKAHEAD 0) fz 0.0 #t 0.0)))))
 
-    (define (cell-walkable? coll x y)
-      (let ((f (collide-floor coll x y -0.3 STEP-H)))
+    ;; The floor a guard can stand on at (x, y) with its z in [zlo, zhi]
+    ;; (the highest there), or #f.
+    (define (standing coll x y zlo zhi)
+      (let ((f (collide-floor coll x y zlo zhi)))
         (and f
              (not (collide-ceiling coll x y (+ f 0.05) (+ f GUARD-H)))
-             (= 0 (collide-resolve! coll x y GUARD-R (+ f STEP-H) (+ f GUARD-H))))))
+             (= 0 (collide-resolve! coll x y GUARD-R (+ f 0.36) (+ f GUARD-H)))
+             f)))
 
-    ;; --- cells ------------------------------------------------------------------
+    ;; --- nodes ------------------------------------------------------------------
 
-    (define (nav-cell-of n x y)
+    (define (cell-of n x y)
       (let ((c (exact (floor (/ (- x (vector-ref n 1)) NAV-CELL))))
             (r (exact (floor (/ (- y (vector-ref n 2)) NAV-CELL)))))
         (if (and (>= c 0) (< c (vector-ref n 3)) (>= r 0) (< r (vector-ref n 4)))
             (+ (* r (vector-ref n 3)) c)
             -1)))
-    (define (nav-cell-x n k) (+ (vector-ref n 1) (* NAV-CELL (+ 0.5 (remainder k (vector-ref n 3))))))
-    (define (nav-cell-y n k) (+ (vector-ref n 2) (* NAV-CELL (+ 0.5 (quotient k (vector-ref n 3))))))
+    (define (node-cell n node) (remainder node (cells n)))
+    (define (nav-node-x n node) (+ (vector-ref n 1) (* NAV-CELL (+ 0.5 (remainder (node-cell n node) (vector-ref n 3))))))
+    (define (nav-node-y n node) (+ (vector-ref n 2) (* NAV-CELL (+ 0.5 (quotient (node-cell n node) (vector-ref n 3))))))
+    (define (nav-node-z n node) (vector-ref (vector-ref n 11) node))
 
-    (define (walk-at? n k)
-      (and (>= k 0) (= 1 (bytevector-u8-ref (vector-ref n 5) k))))
+    (define (walk-at? n node)
+      (and (>= node 0) (= 1 (bytevector-u8-ref (vector-ref n 5) node))))
 
-    (define (nav-walkable? n x y) (walk-at? n (nav-cell-of n x y)))
+    ;; The walkable node of cell k whose floor is nearest z and within
+    ;; limit of it, or -1.
+    (define (node-near n k z limit)
+      (if (< k 0)
+          -1
+          (let ((wh (cells n)) (fz (vector-ref n 11)))
+            (let pick ((l 0) (best -1) (bd limit))
+              (if (>= l LAYERS)
+                  best
+                  (let ((node (+ (* l wh) k)))
+                    (if (and (walk-at? n node) (<= (abs (- (vector-ref fz node) z)) bd))
+                        (pick (+ l 1) node (abs (- (vector-ref fz node) z)))
+                        (pick (+ l 1) best bd))))))))
 
-    ;; The walkable cell nearest (x, y) within 2 m (by rings of cells), or -1.
-    (define (nav-nearest-walkable n x y)
-      (let ((k (nav-cell-of n x y)))
-        (if (walk-at? n k)
-            k
+    ;; The node under (x y z), or -1. Its floor goes to (nav-z n).
+    (define (nav-node-at n x y z)
+      (let ((node (node-near n (cell-of n x y) z NEAR-Z)))
+        (when (>= node 0) (vector-set! n 14 (nav-node-z n node)))
+        node))
+
+    ;; The walkable node at (x y) whose floor is nearest z within limit, or -1.
+    (define (nav-node-within n x y z limit) (node-near n (cell-of n x y) z limit))
+
+    ;; Whether a guard can stand at (x y) on a floor within a step of z;
+    ;; that floor goes to (nav-z n).
+    (define (nav-walkable? n x y z)
+      (let ((node (node-near n (cell-of n x y) z STEP-H)))
+        (and (>= node 0)
+             (begin (vector-set! n 14 (nav-node-z n node)) #t))))
+
+    ;; The walkable node nearest (x y z) (within NEAR-Z of height, 2 m
+    ;; across, by rings of cells), or -1.
+    (define (nav-nearest-walkable n x y z)
+      (let ((here (node-near n (cell-of n x y) z NEAR-Z)))
+        (if (>= here 0)
+            here
             (let* ((w (vector-ref n 3)) (h (vector-ref n 4))
                    (c0 (exact (floor (/ (- x (vector-ref n 1)) NAV-CELL))))
                    (r0 (exact (floor (/ (- y (vector-ref n 2)) NAV-CELL)))))
@@ -106,37 +163,65 @@
                                 (scan (+ dr 1) best best-d2)
                                 (let ((r (+ r0 dr)) (c (+ c0 dc)))
                                   (if (and (or (= (abs dr) d) (= (abs dc) d))
-                                           (>= r 0) (< r h) (>= c 0) (< c w)
-                                           (walk-at? n (+ (* r w) c)))
-                                      (let* ((kk (+ (* r w) c))
-                                             (dx (- (nav-cell-x n kk) x)) (dy (- (nav-cell-y n kk) y))
-                                             (d2 (+ (* dx dx) (* dy dy))))
-                                        (if (< d2 best-d2)
-                                            (col (+ dc 1) kk d2)
+                                           (>= r 0) (< r h) (>= c 0) (< c w))
+                                      (let ((node (node-near n (+ (* r w) c) z NEAR-Z)))
+                                        (if (>= node 0)
+                                            (let* ((dx (- (nav-node-x n node) x)) (dy (- (nav-node-y n node) y))
+                                                   (d2 (+ (* dx dx) (* dy dy))))
+                                              (if (< d2 best-d2)
+                                                  (col (+ dc 1) node d2)
+                                                  (col (+ dc 1) best best-d2)))
                                             (col (+ dc 1) best best-d2)))
                                       (col (+ dc 1) best best-d2)))))))))))))
+
+    ;; --- joins -----------------------------------------------------------------------
+
+    ;; The node of cell (r + dr, c + dc) that node joins, or -1: walkable,
+    ;; its floor within a step, and (with layer joins off) on the same layer.
+    (define (join n node r c dr dc)
+      (let ((w (vector-ref n 3)) (h (vector-ref n 4))
+            (rr (+ r dr)) (cc (+ c dc)))
+        (if (and (>= rr 0) (< rr h) (>= cc 0) (< cc w))
+            (let* ((k (+ (* rr w) cc))
+                   (z (nav-node-z n node))
+                   (found (node-near n k z STEP-H)))
+              (cond ((< found 0) -1)
+                    ((vector-ref n 13) found)
+                    ((= (quotient found (cells n)) (quotient node (cells n))) found)
+                    (else -1)))
+            -1)))
+
+    ;; A neighbour in direction i (0..7) of node, or -1 (a diagonal only
+    ;; when both of its sides join).
+    (define (neighbour n node i)
+      (let* ((w (vector-ref n 3)) (k (node-cell n node))
+             (r (quotient k w)) (c (remainder k w))
+             (dr (vector-ref DR i)) (dc (vector-ref DC i)))
+        (if (or (= dr 0) (= dc 0))
+            (join n node r c dr dc)
+            (if (and (>= (join n node r c dr 0) 0) (>= (join n node r c 0 dc) 0))
+                (join n node r c dr dc)
+                -1))))
+    (define DR (vector 1 -1 0 0 1 1 -1 -1))
+    (define DC (vector 0 0 1 -1 1 -1 1 -1))
 
     ;; --- fields -----------------------------------------------------------------
 
     ;; A field: a vector (tag target dist...), dist -1 where unreachable.
-    (define (make-field n) (vector 'field -1 (make-vector (* (vector-ref n 3) (vector-ref n 4)) -1)))
+    (define (make-field n) (vector 'field -1 (make-vector (* LAYERS (cells n)) -1)))
     (define (field-target f) (vector-ref f 1))
     (define (field-dist f) (vector-ref f 2))
 
-    ;; Fill f with the distance (in steps) from the walkable cell nearest
-    ;; (x, y); returns that cell, or -1 when there is none (f is then empty).
-    ;; With (fx, fy) a guard's place (fx #f: the whole floor) the search
-    ;; stops FIELD-MARGIN steps past that place's cell: a chase needs only
-    ;; the cells between the guard and its target, and the whole floor is
-    ;; ten thousand cells.
+    ;; Fill f with the distance (in steps) from the walkable node nearest
+    ;; (x y z); returns that node, or -1 when there is none (f is then
+    ;; empty). With fx a guard's place (fx #f: every node) the search stops
+    ;; FIELD-MARGIN steps past that place's node.
     (define FIELD-MARGIN 16)
-    (define (nav-field! n f x y fx fy)
+    (define (nav-field! n f x y z fx fy fz)
       (let* ((dist (vector-ref f 2))
              (q (vector-ref n 6))
-             (w (vector-ref n 3))
-             (h (vector-ref n 4))
-             (t (nav-nearest-walkable n x y))
-             (stop-cell (if fx (nav-nearest-walkable n fx fy) -1)))
+             (t (nav-nearest-walkable n x y z))
+             (stop (if fx (nav-nearest-walkable n fx fy fz) -1)))
         (vector-fill! dist -1)
         (vector-set! f 1 t)
         (when (>= t 0)
@@ -144,59 +229,36 @@
           (vector-set! q 0 t)
           (let loop ((head 0) (tail 1))
             (when (and (< head tail)
-                       (or (< stop-cell 0)
-                           (< (vector-ref dist stop-cell) 0)
-                           (<= (vector-ref dist (vector-ref q head)) (+ (vector-ref dist stop-cell) FIELD-MARGIN))))
-              (let* ((k (vector-ref q head))
-                     (r (quotient k w)) (c (remainder k w))
-                     (d (+ 1 (vector-ref dist k)))
-                     (tail (visit! n dist q tail d r c 0 1 w h)))
-                (let* ((tail (visit! n dist q tail d r c 0 -1 w h))
-                       (tail (visit! n dist q tail d r c 1 0 w h))
-                       (tail (visit! n dist q tail d r c -1 0 w h))
-                       (tail (visit-diag! n dist q tail d r c 1 1 w h))
-                       (tail (visit-diag! n dist q tail d r c 1 -1 w h))
-                       (tail (visit-diag! n dist q tail d r c -1 1 w h))
-                       (tail (visit-diag! n dist q tail d r c -1 -1 w h)))
-                  (loop (+ head 1) tail))))))
+                       (or (< stop 0)
+                           (< (vector-ref dist stop) 0)
+                           (<= (vector-ref dist (vector-ref q head)) (+ (vector-ref dist stop) FIELD-MARGIN))))
+              (let* ((node (vector-ref q head))
+                     (d (+ 1 (vector-ref dist node))))
+                (let each ((i 0) (tail tail))
+                  (if (< i 8)
+                      (let ((b (neighbour n node i)))
+                        (if (and (>= b 0) (< (vector-ref dist b) 0))
+                            (begin (vector-set! dist b d) (vector-set! q tail b) (each (+ i 1) (+ tail 1)))
+                            (each (+ i 1) tail)))
+                      (loop (+ head 1) tail)))))))
         t))
-
-    (define (visit! n dist q tail d r c dr dc w h)
-      (let ((rr (+ r dr)) (cc (+ c dc)))
-        (if (and (>= rr 0) (< rr h) (>= cc 0) (< cc w))
-            (let ((k (+ (* rr w) cc)))
-              (if (and (walk-at? n k) (< (vector-ref dist k) 0))
-                  (begin (vector-set! dist k d) (vector-set! q tail k) (+ tail 1))
-                  tail))
-            tail)))
-
-    (define (visit-diag! n dist q tail d r c dr dc w h)
-      (let ((rr (+ r dr)) (cc (+ c dc)))
-        (if (and (>= rr 0) (< rr h) (>= cc 0) (< cc w)
-                 (walk-at? n (+ (* rr w) c))
-                 (walk-at? n (+ (* r w) cc)))
-            (visit! n dist q tail d r c dr dc w h)
-            tail)))
 
     ;; --- steering ---------------------------------------------------------------
 
-    ;; Where a body at (x, y) should head to follow f: the farthest of the
-    ;; next LOOKAHEAD cells downhill that it can walk to in a straight line,
-    ;; into (nav-steer-x n) (nav-steer-y n). Returns the steps left from the
-    ;; body's cell to the target (0: there), or #f when f cannot reach it.
-    (define (nav-steer! n f x y)
+    ;; Where a body at (x y z) should head to follow f: the farthest of the
+    ;; next LOOKAHEAD nodes downhill that it can walk to in a straight line,
+    ;; into (nav-steer-x n) (nav-steer-y n) (nav-steer-z n). Returns the
+    ;; steps left from the body's node to the target (0: there), or #f when f
+    ;; cannot reach it.
+    (define (nav-steer! n f x y z)
       (let* ((dist (vector-ref f 2))
-             (k0 (nav-nearest-walkable n x y)))
+             (k0 (nav-nearest-walkable n x y z)))
         (cond
           ((or (< k0 0) (< (vector-ref dist k0) 0)) #f)
           ((= (vector-ref dist k0) 0)
-           (vector-set! n 7 (nav-cell-x n k0))
-           (vector-set! n 8 (nav-cell-y n k0))
+           (steer-to! n k0)
            0)
           (else
-           ;; the next LOOKAHEAD cells downhill, then the farthest of them
-           ;; on a clear line (tried from the far end, so usually one test);
-           ;; the first step when none is
            (let* ((chain (vector-ref n 10))
                   (m (let walk ((k (downhill n dist k0)) (i 0))
                        (if (and (>= k 0) (< i LOOKAHEAD))
@@ -207,40 +269,38 @@
              (let pick ((i (- m 1)))
                (when (>= i 0)
                  (let ((k (vector-ref chain i)))
-                   (if (or (= i 0) (nav-line-clear? n x y (nav-cell-x n k) (nav-cell-y n k)))
-                       (begin (vector-set! n 7 (nav-cell-x n k)) (vector-set! n 8 (nav-cell-y n k)))
+                   (if (or (= i 0) (nav-line-clear? n x y z (nav-node-x n k) (nav-node-y n k)))
+                       (steer-to! n k)
                        (pick (- i 1)))))))
            (vector-ref dist k0)))))
 
-    ;; The neighbour of k with the smallest distance below k's (the fixed
-    ;; order breaks ties, so the path is the same on every target), or -1.
-    (define (downhill n dist k)
-      (let* ((w (vector-ref n 3)) (h (vector-ref n 4))
-             (r (quotient k w)) (c (remainder k w)))
-        (let try ((i 0) (best -1) (bd (vector-ref dist k)))
-          (if (>= i 8)
-              best
-              (let* ((dr (vector-ref DR i)) (dc (vector-ref DC i))
-                     (rr (+ r dr)) (cc (+ c dc)))
-                (if (and (>= rr 0) (< rr h) (>= cc 0) (< cc w)
-                         (or (= dr 0) (= dc 0)
-                             (and (walk-at? n (+ (* rr w) c)) (walk-at? n (+ (* r w) cc)))))
-                    (let* ((kk (+ (* rr w) cc)) (dk (vector-ref dist kk)))
-                      (if (and (>= dk 0) (< dk bd))
-                          (try (+ i 1) kk dk)
-                          (try (+ i 1) best bd)))
-                    (try (+ i 1) best bd)))))))
-    (define DR (vector 1 -1 0 0 1 1 -1 -1))
-    (define DC (vector 0 0 1 -1 1 -1 1 -1))
+    (define (steer-to! n node)
+      (vector-set! n 7 (nav-node-x n node))
+      (vector-set! n 8 (nav-node-y n node))
+      (vector-set! n 12 (nav-node-z n node)))
 
-    ;; Whether every cell the segment crosses is walkable (sampled every
-    ;; half cell).
-    (define (nav-line-clear? n x0 y0 x1 y1)
+    ;; The neighbour of node with the smallest distance below node's (the
+    ;; fixed order breaks ties, so the path is the same on every target),
+    ;; or -1.
+    (define (downhill n dist node)
+      (let try ((i 0) (best -1) (bd (vector-ref dist node)))
+        (if (>= i 8)
+            best
+            (let ((b (neighbour n node i)))
+              (if (and (>= b 0) (>= (vector-ref dist b) 0) (< (vector-ref dist b) bd))
+                  (try (+ i 1) b (vector-ref dist b))
+                  (try (+ i 1) best bd))))))
+
+    ;; Whether a guard can walk the segment from (x0 y0), on the floor near
+    ;; z0, to (x1 y1): every half cell along it is walkable within a step of
+    ;; the floor before it (so a line up the stair's treads is clear, and one
+    ;; off the mezzanine's edge is not).
+    (define (nav-line-clear? n x0 y0 z0 x1 y1)
       (let* ((dx (- x1 x0)) (dy (- y1 y0))
              (len (sqrt (+ (* dx dx) (* dy dy))))
              (steps (+ 1 (exact (ceiling (/ len (* 0.5 NAV-CELL)))))))
-        (let loop ((i 0))
+        (let loop ((i 0) (z z0))
           (or (> i steps)
               (let ((t (/ (* 1.0 i) steps)))
-                (and (nav-walkable? n (+ x0 (* t dx)) (+ y0 (* t dy)))
-                     (loop (+ i 1))))))))))
+                (and (nav-walkable? n (+ x0 (* t dx)) (+ y0 (* t dy)) z)
+                     (loop (+ i 1) (vector-ref n 14))))))))))

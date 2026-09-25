@@ -75,6 +75,9 @@
     ;; see you there: far enough to reach under the open stair's treads (a
     ;; crouch spot no guard can stand in), never through a wall.
     (define CATCH-REACH 1.2)
+    ;; and this far up or down (P2: the 1.3 m cabinet top is in reach; the
+    ;; mezzanine, 3 m up, is reached by the stairs)
+    (define CATCH-HEIGHT 1.5)
     (define ARRIVE 0.3)
     (define REFIELD-TICKS 30)
     (define PERCEIVE-EVERY 3)                 ; sight at 20 Hz: the rays are the cost
@@ -99,7 +102,7 @@
         (let loop ((i 0))
           (when (< i np)
             (let ((f (make-field nav)))
-              (nav-field! nav f (vector-ref route (* 2 i)) (vector-ref route (+ 1 (* 2 i))) #f #f)
+              (nav-field! nav f (vector-ref route (* 2 i)) (vector-ref route (+ 1 (* 2 i))) 0.0 #f #f #f)
               (vector-set! fields i f))
             (loop (+ i 1))))
         (vector 'guard-world coll data nav fields (make-field nav))))
@@ -126,7 +129,8 @@
     (define S-BFX 26) (define S-BFY 27) (define S-RATE 28) (define S-ARRIVED 29)
     (define S-TICK 30)
     (define S-HEARD 31)             ; ticks since it last heard you (-1: never, this attempt)
-    (define SLOTS 32)
+    (define S-LSZ 32)               ; the height of where it last saw or heard you
+    (define SLOTS 33)
 
     (define (make-guard gw leg)
       (let ((g (make-vector SLOTS 0.0)))
@@ -157,6 +161,7 @@
         (vector-set! g S-PHASE 0.0) (vector-set! g S-RATE 0.0) (vector-set! g S-ARRIVED #f)
         (vector-set! g S-TICK 0)
         (vector-set! g S-HEARD -1)
+        (vector-set! g S-LSZ 0.0)
         (vector-set! g S-BFX (vector-ref g S-FX)) (vector-set! g S-BFY (vector-ref g S-FY))
         (save-prev! g)
         g))
@@ -235,7 +240,7 @@
                    (rate (if near (max rate 0.9) rate)))
               (vector-set! g S-SEEN #t)
               (vector-set! g S-RATE rate)
-              (vector-set! g S-LSX px) (vector-set! g S-LSY py)
+              (vector-set! g S-LSX px) (vector-set! g S-LSY py) (vector-set! g S-LSZ pz)
               (vector-set! g S-LOST 0.0)
               (vector-set! g S-AWARE (min 1.0 (+ (vector-ref g S-AWARE) (* rate dt)))))
             (begin
@@ -292,13 +297,14 @@
                (begin
                  (vector-set! g S-SEARCH (+ (vector-ref g S-SEARCH) dt))
                  (look-around! g (vector-ref g S-SEARCH) 4.0))
-               (when (go-to! g gw (vector-ref g S-LSX) (vector-ref g S-LSY) SEARCH-SPEED 0.6 dt)
+               (when (go-to! g gw (vector-ref g S-LSX) (vector-ref g S-LSY) (vector-ref g S-LSZ) SEARCH-SPEED 0.6 dt)
                  (vector-set! g S-ARRIVED #t)
                  (vector-set! g S-BFX (vector-ref g S-FX)) (vector-set! g S-BFY (vector-ref g S-FY)))))
           (else
            (let ((tx (if (vector-ref g S-SEEN) (vector-ref t 0) (vector-ref g S-LSX)))
-                 (ty (if (vector-ref g S-SEEN) (vector-ref t 1) (vector-ref g S-LSY))))
-             (go-to! g gw tx ty HUNT-SPEED 0.0 dt)
+                 (ty (if (vector-ref g S-SEEN) (vector-ref t 1) (vector-ref g S-LSY)))
+                 (tz (if (vector-ref g S-SEEN) (vector-ref t 2) (vector-ref g S-LSZ))))
+             (go-to! g gw tx ty tz HUNT-SPEED 0.0 dt)
              (when (vector-ref g S-SEEN)
                (turn-toward! g (vector-ref t 0) (vector-ref t 1) TURN-FAST)))))))
 
@@ -318,7 +324,7 @@
                     (vector-set! g S-LEG (modulo (+ leg 1) np)))))
             (let* ((f (vector-ref (vector-ref gw 4) leg))
                    (nav (vector-ref gw 3))
-                   (steps (nav-steer! nav f (vector-ref g S-X) (vector-ref g S-Y)))
+                   (steps (nav-steer! nav f (vector-ref g S-X) (vector-ref g S-Y) (vector-ref g S-Z)))
                    (wx (vector-ref route (* 2 leg))) (wy (vector-ref route (+ 1 (* 2 leg))))
                    (ex (- wx (vector-ref g S-X))) (ey (- wy (vector-ref g S-Y))))
               (if (or (not steps) (< (+ (* ex ex) (* ey ey)) (* ARRIVE ARRIVE)) (= steps 0))
@@ -332,10 +338,11 @@
     ;; Walk toward (tx, ty) through the nav, rebuilding the dynamic field
     ;; when the target has moved. Returns #t when within reach of it (or
     ;; when it cannot be reached: nothing more to walk).
-    (define (go-to! g gw tx ty speed reach dt)
+    (define (go-to! g gw tx ty tz speed reach dt)
       (let ((nav (vector-ref gw 3)))
-        (if (and (nav-walkable? nav tx ty)
-                 (nav-line-clear? nav (vector-ref g S-X) (vector-ref g S-Y) tx ty))
+        (if (and (nav-walkable? nav tx ty tz)
+                 (< (abs (- (nav-z nav) (vector-ref g S-Z))) STEP-H)
+                 (nav-line-clear? nav (vector-ref g S-X) (vector-ref g S-Y) (vector-ref g S-Z) tx ty))
             ;; in the open, straight there: no field to build (a field is
             ;; a search over thousands of cells; most chases need none).
             ;; The field it has is now for somewhere else: the next time
@@ -345,20 +352,20 @@
               (if (< (+ (* ex ex) (* ey ey)) (* (max reach ARRIVE) (max reach ARRIVE)))
                   #t
                   (begin (step-to! g nav tx ty speed dt) #f)))
-            (go-by-field! g gw tx ty speed reach dt))))
+            (go-by-field! g gw tx ty tz speed reach dt))))
 
-    (define (go-by-field! g gw tx ty speed reach dt)
+    (define (go-by-field! g gw tx ty tz speed reach dt)
       (let* ((nav (vector-ref gw 3))
              (f (vector-ref gw 5))
              (mx (- tx (vector-ref g S-FTX))) (my (- ty (vector-ref g S-FTY))))
         (vector-set! g S-FAGE (+ (vector-ref g S-FAGE) 1))
         (when (and (> (+ (* mx mx) (* my my)) 0.25)
                    (or (> (vector-ref g S-FAGE) REFIELD-TICKS) (> (vector-ref g S-FTX) 1e8)))
-          (nav-field! nav f tx ty (vector-ref g S-X) (vector-ref g S-Y))
+          (nav-field! nav f tx ty tz (vector-ref g S-X) (vector-ref g S-Y) (vector-ref g S-Z))
           (vector-set! g S-FTX tx) (vector-set! g S-FTY ty) (vector-set! g S-FAGE 0))
         (let* ((ex (- tx (vector-ref g S-X))) (ey (- ty (vector-ref g S-Y)))
                (close (< (+ (* ex ex) (* ey ey)) (* (max reach ARRIVE) (max reach ARRIVE))))
-               (steps (nav-steer! nav f (vector-ref g S-X) (vector-ref g S-Y))))
+               (steps (nav-steer! nav f (vector-ref g S-X) (vector-ref g S-Y) (vector-ref g S-Z))))
           (cond
             ((or close (not steps)) #t)
             ((= steps 0)
@@ -379,12 +386,15 @@
         (when (> l 1e-6)
           (let* ((step (min l (* speed dt)))
                  (nx (+ x (* step (/ dx l)))) (ny (+ y (* step (/ dy l)))))
-            (cond ((nav-walkable? nav nx ny) (vector-set! g S-X nx) (vector-set! g S-Y ny))
-                  ((nav-walkable? nav nx y) (vector-set! g S-X nx))
-                  ((nav-walkable? nav x ny) (vector-set! g S-Y ny))
-                  ((not (nav-walkable? nav x y))
-                   ;; off the walkable cells (a reset, a push): straight on
-                   (vector-set! g S-X nx) (vector-set! g S-Y ny)))
+            ;; a node within a step of the floor it stands on; its floor
+            ;; is the guard's new height (up the treads, onto the mezzanine)
+            (let ((z (vector-ref g S-Z)))
+              (cond ((nav-walkable? nav nx ny z) (vector-set! g S-X nx) (vector-set! g S-Y ny) (vector-set! g S-Z (nav-z nav)))
+                    ((nav-walkable? nav nx y z) (vector-set! g S-X nx) (vector-set! g S-Z (nav-z nav)))
+                    ((nav-walkable? nav x ny z) (vector-set! g S-Y ny) (vector-set! g S-Z (nav-z nav)))
+                    ((not (nav-walkable? nav x y z))
+                     ;; off the walkable nodes (a reset, a push): straight on
+                     (vector-set! g S-X nx) (vector-set! g S-Y ny))))
             (vector-set! g S-PHASE (+ (vector-ref g S-PHASE) step))
             (unless (and (= (vector-ref g S-STATE) HUNTING) (vector-ref g S-SEEN))
               (turn-toward! g tx ty TURN-WALK))))))
@@ -425,7 +435,7 @@
         (let ((dx (- (vector-ref t 0) (vector-ref g S-X)))
               (dy (- (vector-ref t 1) (vector-ref g S-Y))))
           (when (and (< (+ (* dx dx) (* dy dy)) (* CATCH-REACH CATCH-REACH))
-                     (< (abs (- (vector-ref t 2) (vector-ref g S-Z))) 1.2)
+                     (< (abs (- (vector-ref t 2) (vector-ref g S-Z))) CATCH-HEIGHT)
                      (let ((coll (vector-ref gw 1)) (glass (play-glass (vector-ref gw 2)))
                            (gx (vector-ref g S-X)) (gy (vector-ref g S-Y))
                            (ez (+ (vector-ref g S-Z) 1.2)))
@@ -436,10 +446,11 @@
 
     ;; The guard hunting, certain, from where it stands, as if it had just
     ;; seen you at (x, y) (P2's floor alarm; tests).
-    (define (guard-alarm! g x y)
+    (define (guard-alarm! g x y . z)
       (enter! g HUNTING)
       (vector-set! g S-AWARE 1.0)
       (vector-set! g S-LSX x) (vector-set! g S-LSY y)
+      (vector-set! g S-LSZ (if (pair? z) (car z) (vector-ref g S-Z)))
       (vector-set! g S-LOST 0.0)
       g)
 
@@ -451,11 +462,11 @@
     (define HEAR-BASE 0.08)
     (define HEAR-GAIN 0.25)
     (define HEAR-CAP 0.95)
-    (define (guard-hear! g level threshold x y)
+    (define (guard-hear! g level threshold x y z)
       (when (> level threshold)
         (vector-set! g S-HEARD 0)
         (unless (vector-ref g S-SEEN)
-          (vector-set! g S-LSX x) (vector-set! g S-LSY y))
+          (vector-set! g S-LSX x) (vector-set! g S-LSY y) (vector-set! g S-LSZ z))
         (unless (= (vector-ref g S-STATE) HUNTING)
           (let ((a (vector-ref g S-AWARE)))
             (when (< a HEAR-CAP)
