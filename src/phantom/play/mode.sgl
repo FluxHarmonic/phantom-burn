@@ -145,7 +145,15 @@
     (define (apply-deck! r)
       (when (pair? r)
         (case (car r)
-          ((run) (let ((line (command-line (caddr r)))) (when line (say! line))))
+          ((run)
+           ;; the blinds let the city in or keep it out: the city circuit is
+           ;; the light through floor 14's one window (the lobby's), in the
+           ;; renderer and in how lit you are
+           (case (caddr r)
+             ((blinds-close) (render-circuit-set! 'city #f))
+             ((blinds-open) (render-circuit-set! 'city #t))
+             (else #f))
+           (let ((line (command-line (caddr r)))) (when line (say! line))))
           ((deny) (say! "YOUR TIER CANNOT COMMAND THAT"))
           (else #f))))
 

@@ -35,6 +35,7 @@
           play-guard-path! play-set-hearing!
           play-use! play-incidents play-patches play-take-events! play-event! USE-REACH
           play-devices-state play-deck play-tier play-deck! play-device-level play-device-approach
+          play-mask VENT-NOISE MASK-GAIN
           PHONE-NOISE PRINTER-NOISE ANSWER-REACH DEVICE-NOTICE)
 
   (begin
@@ -64,8 +65,10 @@
     ;;  a light that was on and is now off makes a dark room (design §3)
     ;;  P3: 29 the devices ((phantom play devices))  30 the deck
     ;;  31 each device's approach: where a unit stands to reach it (#(x y z),
-    ;;  or #f)
-    (define (play? p) (and (vector? p) (= (vector-length p) 32) (eq? (vector-ref p 0) 'play)))
+    ;;  or #f)  32 the masking this tick: what a running vent adds to the
+    ;;  hearing threshold where the guard stands
+    (define (play? p) (and (vector? p) (= (vector-length p) 33) (eq? (vector-ref p 0) 'play)))
+    (define (play-mask p) (vector-ref p 32))
     (define (play-device-approach p i) (vector-ref (vector-ref p 31) i))
     (define (play-devices-state p) (vector-ref p 29))
     (define (play-deck p) (vector-ref p 30))
@@ -106,7 +109,7 @@
                         circuits #f 'playing 0 0.0 0.0 0.0 0.0 #f
                         (make-hearing data) (make-steps) #f #f '() (hearing-threshold data) 0.0 -1 #t
                         '() 0 -1 '() #f
-                        (make-devices data) (make-deck) (device-approaches data gw))))
+                        (make-devices data) (make-deck) (device-approaches data gw) 0.0)))
         p))
 
     ;; A new attempt: the guard back at its start, the badge on the desk.
@@ -127,6 +130,7 @@
       (vector-set! p 28 #f)
       (devices-reset! (vector-ref p 29))
       (deck-reset! (vector-ref p 30))
+      (vector-set! p 32 0.0)
       p)
 
     ;; The path from the guard to you (for playback: how much of the guard
@@ -163,7 +167,8 @@
                    (hear-path! h room x y rg (guard-x g) (guard-y g))
                    (let ((level (heard-level h (step-noise data tag gait))))
                      (vector-set! p 21 (max (vector-ref p 21) level))
-                     (when (vector-ref p 23) (guard-hear! g level (vector-ref p 20) x y z))))))
+                     ;; over the floor's threshold, raised where a vent runs
+                     (when (vector-ref p 23) (guard-hear! g level (+ (vector-ref p 20) (vector-ref p 32)) x y z))))))
              events)))))
 
     ;; The walker at the floor's arrival spot, facing as the floor says.
@@ -191,6 +196,7 @@
             (vector-set! p 12 vis)
             (vector-set! p 13 shape)
             (target-set! (vector-ref p 5) x y z (walker-eye-z w) (walker-height w) l01 vis shape)
+            (mask! p)
             (steps! p w x y z)
             (guard-step! g (vector-ref p 2) (vector-ref p 5) TICK)
             (devices-tick! (vector-ref p 29) TICK
@@ -255,6 +261,27 @@
         ((printer) (if (eq? state 'running) PRINTER-NOISE 0.0))
         (else 0.0)))
 
+    ;; A running vent (design §3: "loud places hide you"): its roar where
+    ;; the guard stands, through the rooms like any noise, raises the
+    ;; threshold he hears over by MASK-GAIN times it. It changes what the
+    ;; unit hears, not what you hear. Near the vent a walk on hard floor
+    ;; goes unheard; a run still carries.
+    (define VENT-NOISE 1.5)
+    (define MASK-GAIN 0.6)
+    (define (mask! p)
+      (let* ((data (vector-ref p 1)) (dv (vector-ref p 29)) (ds (play-devices data))
+             (g (vector-ref p 3)) (h (vector-ref p 15))
+             (rg (room-at data (guard-x g) (guard-y g) (guard-z g))))
+        (let loop ((i 0) (sum 0.0))
+          (if (< i (vector-length ds))
+              (let ((d (vector-ref ds i)))
+                (if (and (eq? (device-kind d) 'vent) (eq? (devices-state dv i) 'on))
+                    (begin
+                      (hear-path! h (device-room d) (device-x d) (device-y d) rg (guard-x g) (guard-y g))
+                      (loop (+ i 1) (+ sum (heard-level h VENT-NOISE))))
+                    (loop (+ i 1) sum)))
+              (vector-set! p 32 (* MASK-GAIN sum))))))
+
     ;; What reaches the guard of device i now (0 when it is silent).
     (define (play-device-level p i)
       (let* ((data (vector-ref p 1)) (dv (vector-ref p 29))
@@ -280,7 +307,7 @@
           (let loop ((i 0))
             (when (< i (vector-length ds))
               (let ((level (play-device-level p i)))
-                (when (> level (vector-ref p 20))
+                (when (> level (+ (vector-ref p 20) (vector-ref p 32)))
                   (let* ((d (vector-ref ds i))
                          (room (device-room d))
                          (fz (room-floor (vector-ref (play-rooms data) room)))
@@ -293,8 +320,22 @@
                     (when (and (eq? (device-kind d) 'phone) (= (guard-state g) SEARCHING))
                       (let ((dx (- (guard-x g) (device-x d))) (dy (- (guard-y g) (device-y d))))
                         (when (< (+ (* dx dx) (* dy dy)) (* ANSWER-REACH ANSWER-REACH))
-                          (devices-state-set! dv i 'idle 0.0)))))))
+                          (devices-state-set! dv i 'idle 0.0))))))
+                ;; changed and in plain view: a vent left running, blinds
+                ;; moved, with the unit in their room (or its air volume)
+                (let* ((d (vector-ref ds i)) (s (devices-state dv i)))
+                  (when (and (or (and (eq? (device-kind d) 'vent) (eq? s 'on))
+                                 (and (eq? (device-kind d) 'blinds) (eq? s 'closed)))
+                             (same-space? data (room-at data (guard-x g) (guard-y g) (guard-z g)) (device-room d)))
+                    (incident! p (if (eq? (device-kind d) 'vent) 'vent-running 'blinds-moved) (device-room d)))))
               (loop (+ i 1)))))))
+
+    ;; Rooms a and b are one space: the same room, or one air volume (the
+    ;; lobby and the mezzanine over it).
+    (define (same-space? data a b)
+      (and (>= a 0) (>= b 0)
+           (or (= a b)
+               (= (room-group (vector-ref (play-rooms data) a)) (room-group (vector-ref (play-rooms data) b))))))
 
     ;; The deck, once a tick with held? its hold (the caller's input): aims
     ;; from the walker's eye, steps the hold, and runs a completed command.
@@ -368,7 +409,9 @@
         (dark-room "EMERGENCY LIGHTING: ~" "You like the dark. I've fixed the dark.")
         ;; P3 (the device API, §5), drafts for David (D18)
         (phone-rang "PHONES MUTED ON THIS FLOOR" "Nobody was calling. I know who dialled.")
-        (printer-ran "PRINTERS LOCKED" "Print jobs from nobody. Cute.")))
+        (printer-ran "PRINTERS LOCKED" "Print jobs from nobody. Cute.")
+        (vent-running "HVAC OVERRIDES REVOKED" "Loud in here, wasn't it? Not anymore.")
+        (blinds-moved "BLINDS LOCKED" "Keeping the city out? It's my city.")))
     (define DUCT-PATCH '("DUCT GRATES BOLTED" "Crawling through my walls? I've bolted them."))
 
     (define (patch-for inc)

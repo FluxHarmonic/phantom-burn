@@ -1,0 +1,123 @@
+;;; P3's FACILITIES devices on floor 14 (design §3, §4; topics/phantom-burn-
+;;; device-api): the vent's masking, and the vent and blinds noticed.
+;;;
+;;; The masking gate (P3, §Gates): a scripted walk past the unit on hard
+;;; floor is heard with the vent off and not heard with it on. Its sabotage
+;;; (masking ignored) must turn it red.
+
+(import (sigil test)
+        (sigil math)
+        (sigil fs)
+        (phantom soup)
+        (phantom walker)
+        (phantom play data)
+        (phantom play devices)
+        (phantom play core)
+        (phantom guard guard)
+        (phantom guard hearing))
+
+(define DIR "assets/floors/14-slice/")
+(define C (pbc1->collision (read-file-bytes (string-append DIR "collide"))))
+(define INFO (floor-info-from-string (read-file-string (string-append DIR "floor.sexp"))))
+(define DATA (play-data-from-string (read-file-string (string-append DIR "play.sexp"))))
+(define CIRCUITS (cdr (assq 'circuits INFO)))
+(define (on-set names) (lambda (c) (and (memq c names) #t)))
+(define DARK (on-set '(emergency screens city)))
+(define ALL-ON (lambda (c) #t))
+(define VENT (device-index DATA 'corridor-vent))
+(define BLINDS (device-index DATA 'lobby-blinds))
+(define THRESHOLD (hearing-threshold DATA))
+
+(define (fresh) (play-reset! (make-play C DATA CIRCUITS)))
+
+;; --- the gate: a walk behind the unit, near the vent -----------------------------
+;; The corridor (the vent's room, on tile) with the lights off: the unit is
+;; held at (18.8 11.2), 1.8 m from the vent, facing on up the corridor
+;; (north-east), so only hearing can raise its awareness. The runner walks
+;; 2.8 m up the corridor behind it, from (15.2 7.4) to x 17.2, ending 2.4 m
+;; from it (outside the 1.2 m where it would feel you). Returns (loudest
+;; awareness heard? mask).
+(define (walk-behind gait vent-on?)
+  (let* ((p (fresh)) (g (play-guard p))
+         (in (make-input 0.0 1.0 0.0 0.0 (eq? gait 'sneak) (eq? gait 'run) #f 0)))
+    (guard-reset! g (play-guard-world p) 0)
+    (when vent-on? (devices-run! (play-devices-state p) VENT 'vent-on))
+    (let loop ((i 0) (w (make-walker 15.2 7.4 0.0 -0.7853981633974483)) (loud 0.0) (aware 0.0) (heard #f) (mask 0.0))
+      (if (or (>= i 900) (>= (walker-x w) 17.2))
+          (list loud aware heard mask (walker-x w))
+          (let ((w (walker-step w in TICK C)))
+            (guard-place! g 18.8 11.2 0.7071 0.7071)
+            (play-tick! p w DARK 1.0 2.0)
+            (loop (+ i 1) w (max loud (play-last-heard p)) (max aware (guard-awareness g))
+                  (or heard (guard-heard? g)) (max mask (play-mask p))))))))
+
+(test-group "the masking gate"
+  (test "THE VENT OFF: a walk on the corridor's tile behind the unit is heard"
+    (let ((r (walk-behind 'walk #f)))
+      (display (list 'vent-off r 'threshold THRESHOLD)) (newline)
+      (assert-true (>= (list-ref r 4) 17.2))
+      (assert-true (= (list-ref r 3) 0.0))
+      (assert-true (list-ref r 2))
+      (assert-true (> (car r) THRESHOLD))))
+  (test "THE VENT ON: the same walk is not heard"
+    (let ((r (walk-behind 'walk #t)))
+      (display (list 'vent-on r)) (newline)
+      (assert-true (>= (list-ref r 4) 17.2))
+      (assert-true (> (list-ref r 3) 0.0))
+      (assert-false (list-ref r 2))
+      (assert-true (< (car r) (+ THRESHOLD (list-ref r 3))))
+      (assert-true (= (cadr r) 0.0))))
+  (test "the vent masks, it does not deafen: a run is still heard over it"
+    (let ((r (walk-behind 'run #t)))
+      (display (list 'vent-on-run r)) (newline)
+      (assert-true (list-ref r 2))))
+  (test "masking falls off with the path: a unit in the office is masked less than one by the vent"
+    (let* ((p (fresh)) (g (play-guard p)) (w (make-walker 60.0 60.0 0.0 0.0)))
+      (devices-run! (play-devices-state p) VENT 'vent-on)
+      (guard-place! g 18.8 11.2 1.0 0.0)
+      (play-tick! p w DARK 1.0 2.0)
+      (let ((near (play-mask p)))
+        (guard-place! g 24.0 19.5 1.0 0.0)
+        (play-tick! p w DARK 1.0 2.0)
+        (display (list 'mask 'by-the-vent near 'fm-office (play-mask p))) (newline)
+        (assert-true (> near (* 3.0 (play-mask p))))))))
+
+;; --- noticed: a vent left running, blinds moved ------------------------------------
+(define (hold-guard-ticks p x y n)
+  (let ((g (play-guard p)) (w (make-walker 60.0 60.0 0.0 0.0)))
+    (let loop ((i 0))
+      (when (< i n)
+        (guard-place! g x y 1.0 0.0)
+        (play-tick! p w ALL-ON 1.0 2.0)
+        (loop (+ i 1))))))
+
+(test-group "noticed"
+  (test "a vent running with the unit in its room is an incident, patched HVAC OVERRIDES REVOKED"
+    (let ((p (fresh)))
+      (devices-run! (play-devices-state p) VENT 'vent-on)
+      (hold-guard-ticks p 18.8 11.2 10)
+      (display (list 'vent (play-incidents p) (play-patches p))) (newline)
+      (assert-true (assq 'vent-running (play-incidents p)))
+      (assert-true (member "HVAC OVERRIDES REVOKED" (map car (play-patches p))))))
+  (test "a vent run and stopped while the unit was elsewhere is not"
+    (let ((p (fresh)))
+      (devices-run! (play-devices-state p) VENT 'vent-on)
+      (hold-guard-ticks p 24.0 19.5 10)
+      (devices-run! (play-devices-state p) VENT 'vent-off)
+      (hold-guard-ticks p 18.8 11.2 10)
+      (assert-true (null? (play-incidents p)))))
+  (test "blinds closed with the unit in the lobby, or on the mezzanine over it, are noticed"
+    (let ((p (fresh)))
+      (devices-run! (play-devices-state p) BLINDS 'blinds-close)
+      (hold-guard-ticks p 24.0 19.5 10)
+      (assert-true (null? (play-incidents p)))
+      (hold-guard-ticks p 6.0 4.0 10)
+      (display (list 'blinds (play-incidents p) (play-patches p))) (newline)
+      (assert-true (assq 'blinds-moved (play-incidents p)))))
+  (test "blinds opened again before the unit came: nothing"
+    (let ((p (fresh)))
+      (devices-run! (play-devices-state p) BLINDS 'blinds-close)
+      (hold-guard-ticks p 24.0 19.5 10)
+      (devices-run! (play-devices-state p) BLINDS 'blinds-open)
+      (hold-guard-ticks p 6.0 4.0 10)
+      (assert-true (null? (play-incidents p))))))
