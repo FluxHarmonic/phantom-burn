@@ -10,8 +10,9 @@
 ;;;   phantom-burn --floor-sheet FLOOR [OUT.svg]
 ;;;                                           the plan from above
 ;;;   phantom-burn --floor-time FLOOR [N]     compile N times, print the times
-;;;   phantom-burn --floor-replay FILE.collide SCRIPT
+;;;   phantom-burn --floor-replay FILE.collide[.b64] SCRIPT [--dt X]
 ;;;                                           gate 5's native leg: the trace, one line a tick
+;;;                                           (--dt: the sabotage leg's other step)
 ;;;   phantom-burn --floor-reach FLOOR [--save-witness PATH] [--probe X Y Z]
 ;;;                                           gate 3: the exit reached from start: and
 ;;;                                           along each route: with the tier, and the
@@ -70,7 +71,7 @@
             (else (arg-after (cdr a) flag default))))
 
     ;; Each option and how many values follow it.
-    (define OPTION-VALUES '(("--out" . 1) ("--save-witness" . 1) ("--probe" . 3)))
+    (define OPTION-VALUES '(("--out" . 1) ("--save-witness" . 1) ("--probe" . 3) ("--dt" . 1)))
 
     (define (positional a)
       (let loop ((a a) (acc '()))
@@ -140,7 +141,19 @@
               (say "min " (number->string (fold-left min 1e30 acc)) " ms over " (number->string n) " runs")
               0))))
 
-    ;; save: #f, or a path for the lobby route's witness script (gate 5's input).
+    ;; Where route NAME's witness goes, given --save-witness PATH: PATH for
+    ;; the start's, PATH with ".NAME" before its extension for a route's
+    ;; (build/floors/replay-14-slice.the-long-way.txt).
+    (define (witness-path save name)
+      (if (string=? name "start")
+          save
+          (let loop ((i (- (string-length save) 1)))
+            (cond ((or (< i 0) (char=? (string-ref save i) #\/)) (string-append save "." name))
+                  ((char=? (string-ref save i) #\.)
+                   (string-append (substring save 0 i) "." name (substring save i (string-length save))))
+                  (else (loop (- i 1)))))))
+
+    ;; save: #f, or a path for the witness scripts (gate 5's input).
     (define (reach floor save)
       (let* ((t0 (current-jiffy))
              (cf (compile-floor floor read-text-file)))
@@ -151,9 +164,12 @@
                    (ps (cadr r)))
               (for-each say (car r))
               (for-each (lambda (p) (say (problem->string p))) ps)
-              (when (and save (caddr r))
-                (write-file-string save (caddr r))
-                (say "wrote the witness to " save))
+              (when save
+                (for-each (lambda (w)
+                            (let ((p (witness-path save (car w))))
+                              (write-file-string p (cdr w))
+                              (say "wrote the " (car w) " witness to " p)))
+                          (caddr r)))
               (say floor ": gate 3 " (if (null? ps) "OK" (string-append (number->string (length ps)) " problems"))
                    " in " (number->string (ms t0 t1)) " ms")
               (if (null? ps) 0 1)))))
@@ -161,14 +177,23 @@
     ;; Gate 5's native leg: a script replayed through the walker over the
     ;; floor's PBC1 collision file (the bytes the page ships), one line per
     ;; tick, as the web leg prints them.
-    (define (replay collide-path script-path)
-      (let* ((bytes (and (file-exists? collide-path) (read-file-bytes collide-path)))
+    ;; collide-path: a .collide file, or the page's base64 of one (.b64), so
+    ;; the native leg reads the very bytes the web leg loads. dt: TICK for
+    ;; the gate; any other is gate 5's sabotage leg (it must diverge).
+    (define (replay collide-path script-path dt)
+      (let* ((b64? (let ((n (string-length collide-path)))
+                     (and (> n 4) (string=? (substring collide-path (- n 4) n) ".b64"))))
+             (bytes (and (file-exists? collide-path)
+                         (if b64?
+                             (base64->bytevector (string-trim (read-file-string collide-path)))
+                             (read-file-bytes collide-path))))
              (text (read-text-file script-path))
              (script (and text (parse-script text))))
         (cond ((not bytes) (say "SETUP-FAILED: no collision file " collide-path) 2)
               ((not script) (say "SETUP-FAILED: " script-path " is not a replay script") 2)
+              ((not dt) (say "SETUP-FAILED: --dt takes a number") 2)
               (else
-               (let ((lines (replay-trace (pbc1->collision bytes) script TICK)))
+               (let ((lines (replay-trace (pbc1->collision bytes) script dt)))
                  (for-each (lambda (l) (say "replay " l)) lines)
                  (say "replay-done " (number->string (length lines)))
                  0)))))
@@ -177,7 +202,7 @@
       (say "usage: phantom-burn --floor-check FLOOR... | --floor-compile FLOOR [--out DIR] |")
       (say "       --floor-sheet FLOOR [OUT.svg] | --floor-time FLOOR [N] |")
       (say "       --floor-reach FLOOR [--save-witness PATH] [--probe X Y Z] |")
-      (say "       --floor-replay FILE.collide SCRIPT")
+      (say "       --floor-replay FILE.collide[.b64] SCRIPT [--dt X]")
       2)
 
     (define (floor-main)
@@ -196,7 +221,8 @@
                         0))
                      ((and (string=? cmd "--floor-reach") (pair? pos))
                       (reach (car pos) (let ((m (member "--save-witness" a))) (and m (pair? (cdr m)) (cadr m)))))
-                     ((and (string=? cmd "--floor-replay") (= (length pos) 2)) (replay (car pos) (cadr pos)))
+                     ((and (string=? cmd "--floor-replay") (= (length pos) 2))
+                      (replay (car pos) (cadr pos) (let ((d (arg-after (cdr a) "--dt" #f))) (if d (string->number d) TICK))))
                      ((and (string=? cmd "--floor-time") (pair? pos))
                       (timing (car pos) (or (and (pair? (cdr pos)) (string->number (cadr pos))) 3)))
                      (else (usage)))))

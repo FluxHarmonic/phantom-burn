@@ -21,13 +21,23 @@ phantom-burn --floor-reach FLOOR [--save-witness PATH]
                                               each of the floor's routes:, with the exit's
                                               tier; the exit door holding without it; each
                                               route's witness replayed from its text through
-                                              the walker (--save-witness: start:'s witness)
+                                              the walker (--save-witness PATH: the start's
+                                              witness to PATH, route NAME's to PATH with
+                                              .NAME before its extension)
 phantom-burn --floor-reach FLOOR --probe X Y Z
                                               a body settled at (X Y Z), tick by tick
-phantom-burn --floor-replay FILE.collide SCRIPT
+phantom-burn --floor-replay FILE.collide[.b64] SCRIPT [--dt X]
                                               gate 5's native leg: a witness script
-                                              replayed over the shipped collision file,
-                                              one "replay K X Y Z YAW HEIGHT" line a tick
+                                              replayed over the shipped collision file
+                                              (or the page's base64 of it), one
+                                              "replay K X Y Z YAW HEIGHT" line a tick;
+                                              --dt steps at X instead of TICK (the
+                                              sabotage leg, which must diverge)
+node scripts/gate-replay.mjs BUILD FLOOR SCRIPT NATIVE
+                                              gate 5: the page (headless Chrome, through
+                                              shot-web.mjs) replays SCRIPT; its trace must
+                                              equal the native leg's (NATIVE, the output of
+                                              --floor-replay BUILD's collide.b64) byte for byte
 scripts/floor-shot FLOOR [K...]              in-game shots of the floor's views through the
                                               shell's shot-native, beside the export's renders
 ```

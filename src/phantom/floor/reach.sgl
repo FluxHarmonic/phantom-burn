@@ -333,8 +333,8 @@
 
     (define (dist2 a p) (sqrt (+ (square (- (vector-ref a 1) (px p))) (square (- (vector-ref a 2) (py p))))))
 
-    ;; Returns (lines problems witness-text): the witness of the route from
-    ;; start:, for gate 5.
+    ;; Returns (lines problems witnesses): witnesses, ((name . script-text)
+    ;; ...), "start" first, then each route that was proved, for gate 5.
     (define (reach-check cf)
       (let* ((fl (ctx-floor* cf))
              (path (compiled-floor-path cf))
@@ -349,7 +349,7 @@
              (start (and start-p (anchor-near anchors start-p)))
              (badge (find (lambda (t) (eq? (thing-kind t) 'badge)) (floor-things fl)))
              (stats (vector 0 0 #f))
-             (lines '()) (ps '()) (witness-text #f))
+             (lines '()) (ps '()) (witnesses '()))
         (define (say s) (set! lines (cons s lines)))
         (define (bad line msg) (set! ps (cons (problem path: path line: line message: msg gate: 3) ps)))
         (define (near-exit? a)
@@ -372,7 +372,7 @@
                  (let* ((sx (px start-p)) (sy (py start-p)) (sz (+ start-z 0.01))
                         (wt (witness cf c (list sx sy sz (facing->yaw (floor-facing fl)) (low-at? c sx sy sz))
                                      (settle-prefix) r near-exit?)))
-                   (set! witness-text (vector-ref wt 6))
+                   (when (vector-ref wt 6) (set! witnesses (cons (cons "start" (vector-ref wt 6)) witnesses)))
                    (say (proof-line what r wt))
                    (unless (vector-ref wt 5)
                      (bad (floor-line fl) (string-append what ": the route to the exit does not replay from its witness"))))))
@@ -395,6 +395,7 @@
                            (begin (bad (route-line rt) (string-append what ": the exit is not reached"))
                                   (say (string-append "  " name " reached, by room and height: " (reach-summary anchors (vector-ref stats 2)))))
                            (let ((wt (witness cf c (vector-ref a0 6) (settle-prefix) r near-exit?)))
+                             (when (vector-ref wt 6) (set! witnesses (cons (cons name (vector-ref wt 6)) witnesses)))
                              (say (proof-line what r wt))
                              (unless (vector-ref wt 5)
                                (bad (route-line rt) (string-append what ": the route does not replay from its witness")))))))))
@@ -427,7 +428,7 @@
                        (say (string-append "without " tier ": none of the " (number->string (length behind))
                                            " anchors behind the exit is reached"))))))
            (say (string-append "edges tried " (number->string (vector-ref stats 0)) ", found " (number->string (vector-ref stats 1))))))
-        (list (reverse lines) (reverse ps) witness-text)))
+        (list (reverse lines) (reverse ps) (reverse witnesses))))
 
     (define (reach-report-lines r) (car r))
 
