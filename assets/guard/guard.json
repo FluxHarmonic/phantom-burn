@@ -1,54 +1,14 @@
 {
- "vertices_per_pose": 1224,
- "triangles": 2224,
- "poses": 8,
+ "robot": "D37",
+ "vertices_per_pose": 1280,
+ "triangles": 1352,
+ "walk_poses": 16,
+ "parts": 17,
  "stride": 40,
- "parts": [
-  [
-   0,
-   6672
-  ],
-  [
-   6672,
-   6672
-  ],
-  [
-   13344,
-   6672
-  ],
-  [
-   20016,
-   6672
-  ],
-  [
-   26688,
-   6672
-  ],
-  [
-   33360,
-   6672
-  ],
-  [
-   40032,
-   6672
-  ],
-  [
-   46704,
-   6672
-  ]
- ],
  "height": 1.79,
- "lift": 0.0337,
- "strip_z": 1.664,
- "frames": [
-  1,
-  5,
-  9,
-  13,
-  17,
-  21,
-  25,
-  29
+ "strip_z": [
+  1.639,
+  1.661
  ],
- "cycle": "32 frames at 30 fps, two steps; the game plays one cycle per 1.5 m walked"
+ "cycle": "16 poses, two steps; the game plays one cycle per 1.5 m walked; part 16 is the head's scan"
 }

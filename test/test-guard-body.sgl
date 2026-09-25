@@ -32,10 +32,11 @@
 (define (near? a b eps) (< (abs (- a b)) eps))
 
 (test-group "the baked body"
-  (test "an SGM1 file of eight parts, 40-byte vertices, u16 indices"
+  (test "an SGM1 file of the walk's parts and the scan's, 40-byte vertices, u16 indices"
     (assert-equal (list 83 71 77 49) (list (u8 0) (u8 1) (u8 2) (u8 3)))   ; "SGM1"
     (assert-equal 40 STRIDE)
-    (assert-equal POSES NPARTS)
+    (assert-equal (+ POSES 1) NPARTS)
+    (assert-equal SCAN-PART (- NPARTS 1))
     (assert-equal 2 (u32 16))
     (assert-equal (+ INDICES (* 2 NINDEX)) (bytevector-length B)))
   (test "every part is the same triangles, over its own block of vertices"
@@ -53,10 +54,16 @@
   (test "the walk is seamless: each part's next pose is the following part's pose"
     (assert-true
      (all? (lambda (k)
-             (let ((next (modulo (+ k 1) NPARTS)))
+             (let ((next (modulo (+ k 1) POSES)))
                (all? (lambda (i)
                        (all? (lambda (a) (= (pos (+ (* k PER-POSE) i) 1 a) (pos (+ (* next PER-POSE) i) 0 a))) 3))
                      PER-POSE)))
+           POSES)))
+  (test "every part, the scan's too, eases toward the same rest pose"
+    (assert-true
+     (all? (lambda (k)
+             (all? (lambda (i) (all? (lambda (a) (= (pos (+ (* k PER-POSE) i) 2 a) (pos i 2 a))) 3))
+                   PER-POSE))
            NPARTS)))
   (test "standing, the feet are on the floor and the helmet tops out under 1.85 m"
     (let ((lo (fold-verts (lambda (i m) (min m (pos i 2 2))) 9.0))
@@ -72,11 +79,11 @@
                          (length strip))))))
 
 (test-group "the walk's phase"
-  (test "one cycle every CYCLE metres, eight poses to it"
+  (test "one cycle every CYCLE metres, POSES poses to it"
     (assert-true (near? (guard-pose 0.0) 0.0 1e-9))
-    (assert-true (near? (guard-pose (* CYCLE (/ 3.0 8.0))) 3.0 1e-9))
-    (assert-true (near? (guard-pose (* CYCLE 2.5)) 4.0 1e-9))
+    (assert-true (near? (guard-pose (* CYCLE (/ 3.0 POSES))) 3.0 1e-9))
+    (assert-true (near? (guard-pose (* CYCLE 2.5)) (/ POSES 2.0) 1e-9))
     (assert-true (near? (guard-pose (* CYCLE 7.0)) 0.0 1e-9)))
   (test "the fraction between poses runs 0 to 1"
-    (let ((f (guard-pose (* CYCLE (/ 5.25 8.0)))))
+    (let ((f (guard-pose (* CYCLE (/ 5.25 POSES)))))
       (assert-true (near? (- f (floor f)) 0.25 1e-9)))))
