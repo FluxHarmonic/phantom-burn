@@ -345,18 +345,18 @@
 (define BANK-E (bank-until (make-bank RATE loader) (lambda (b) #f)))
 
 (test-group "the events in the bank"
-  (test "every kind has a sample, EVENT-S long, that sounds (above -50 dBFS)"
+  (test "every kind has a sample, (event-seconds KIND) long, that sounds (above -50 dBFS)"
     (for-each (lambda (k)
                 (let ((s (bank-sample BANK-E (list 'event k))))
                   (unless (and s (> (rms s) 0.00316)) (display k) (display " is missing or silent\n"))
-                  (assert-true (and s (= (quotient (bytevector-length s) 4) (exact (round (* EVENT-S RATE))))))
+                  (assert-true (and s (= (quotient (bytevector-length s) 4) (exact (round (* (event-seconds k) RATE))))))
                   (assert-true (and s (> (rms s) 0.00316)))))
               EVENT-KINDS))
   (test "each is its approved tune's own render, exactly (the file copied from the sketchbook)"
     (for-each (lambda (k)
                 (let ((name (string-append "event-" (symbol->string k))))
                   (assert-true (equal? (bank-sample BANK-E (list 'event k))
-                                       (mono-render (loader name) (exact (round (* EVENT-S RATE))))))))
+                                       (mono-render (loader name) (exact (round (* (event-seconds k) RATE))))))))
               EVENT-KINDS))
   (test "each has faded out by its end (its last 100 ms is under -60 dBFS)"
     (for-each (lambda (k)

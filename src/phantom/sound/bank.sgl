@@ -20,7 +20,7 @@
 ;;; And the game's events, (event KIND) for KIND in EVENT-KINDS: each is its own
 ;;; tune, assets/tunes/event-KIND.cts, COPIED byte for byte from the sketchbook
 ;;; (David approved them as heard there, 2026-09-25: "Phantom sounds are
-;;; good"), rendered for EVENT-S seconds on a player of its own, one after another,
+;;; good"), rendered for (event-seconds KIND) on a player of its own, one after another,
 ;;; after the bed. They are longer than a slot and carry the sketchbook's small
 ;;; reverb, so they are not slots.
 ;;;
@@ -49,7 +49,7 @@
           (motif tune player))
   (export bank-tune-text bank-slots make-bank bank-render! bank-render-for! bank-sample bank-ready? bank-rate
           bank-bed-loop crossfade-loop BED-TUNE-TEXT BED-LOOP-S
-          SLOT-S BANK-SURFACES EVENT-KINDS EVENT-S)
+          SLOT-S BANK-SURFACES EVENT-KINDS EVENT-S event-seconds)
   (begin
     (define SLOT-S 0.6)
     (define SLOT-ROWS 30)                 ; tempo 125, speed 1: a row is 20 ms
@@ -204,9 +204,15 @@
 
     ;; --- the events --------------------------------------------------------------------------
     ;; the kinds agreed with P2 (topics/phantom-sound-api); each tune is 125 rows
-    ;; of 20 ms, the event at row 0, rendered for its first EVENT-S seconds
+    ;; of 20 ms, the event at row 0, rendered for its first (event-seconds KIND) seconds
     (define EVENT-KINDS '(door-open door-close panel-on panel-off reader-ok reader-deny badge caught note))
-    (define EVENT-S 1.6)                  ; each event's render: all nine are silent by then (the tests hold it), 36% less to render than 2.5
+    ;; each event renders for its own length: EVENT-S, 1.6 s, is enough for seven
+    ;; of the nine (the tests hold each silent in its last 100 ms); the stairwell
+    ;; air (door-open) and the capture (caught) ring on, so they get the tune's
+    ;; whole 2.5 s. 28% less to render than 2.5 s for all.
+    (define EVENT-S 1.6)
+    (define EVENT-LONG (quote ((door-open . 2.5) (caught . 2.5))))
+    (define (event-seconds kind) (let ((e (assq kind EVENT-LONG))) (if e (cdr e) EVENT-S)))
 
     ;; --- rendering -------------------------------------------------------------------------------
     ;; Stages, each one player opened once: the slots, the bed, then each event.
@@ -282,7 +288,7 @@
                 (if text
                     (let ((rate (vector-ref b 1)))
                       (open-stage! b (open-tune-player (read-tune-string text) rate)
-                                   (exact (round (* EVENT-S rate))) (list 'event kind)))
+                                   (exact (round (* (event-seconds kind) rate))) (list (quote event) kind)))
                     (loop)))))))
 
     ;; the stage's buffer is full: move on
