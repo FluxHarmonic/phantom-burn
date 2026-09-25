@@ -115,6 +115,8 @@
     (define DARK '(0.08 0.08 0.11))
     (define VISORS '((0.302 0.949 0.851) (1.0 0.62 0.1) (1.0 0.42 0.1) (1.0 0.18 0.3)))
     (define HIP 0.86)
+    (define VISOR-NAMES (vector 'visor0 'visor1 'visor2 'visor3))
+    (define WORDS (vector "" "?" "SEARCHING" "THERE"))
 
     ;; (name . (first count)) ranges, filled by guard-mesh-bytes
     (define *ranges* '())
@@ -231,7 +233,7 @@
                (_ (light-rgb-at! ls (play-data *core*) *pose-x* *pose-y* (guard-z g)))
                (r (light-r ls)) (gg (light-g ls)) (b (light-b ls))
                (body (range 'body)) (leg (range 'leg))
-               (vis (range (vector-ref (vector 'visor0 'visor1 'visor2 'visor3) (guard-state g)))))
+               (vis (range (vector-ref VISOR-NAMES (guard-state g)))))
           (render-draw-object! *mesh* (car body) (cadr body) *model* r gg b)
           (render-draw-object! *mesh* (car vis) (cadr vis) *model* r gg b)
           (render-draw-object! *mesh* (car leg) (cadr leg) *leg-l* r gg b)
@@ -310,7 +312,7 @@
              (a (guard-awareness g))
              (p (and *cam* (project *cam* *pose-x* *pose-y* (+ (guard-z g) 2.05) w h k))))
         (when (and p (or (> a 0.02) (> s CALM)))
-          (let* ((word (vector-ref (vector "" "?" "SEARCHING" "THERE") s))
+          (let* ((word (vector-ref WORDS s))
                  (col (list-ref VISORS s))
                  (bw (* 24 ts)) (x (- (car p) (/ bw 2))) (y (cdr p)))
             (set-color 0.0 0.0 0.0 0.6)

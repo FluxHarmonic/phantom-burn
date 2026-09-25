@@ -52,8 +52,8 @@
   (begin
 
     (define CALM 0) (define SUSPICIOUS 1) (define SEARCHING 2) (define HUNTING 3)
-    (define (guard-state-name s)
-      (vector-ref (vector 'calm 'suspicious 'searching 'hunting) s))
+    (define STATE-NAMES (vector 'calm 'suspicious 'searching 'hunting))
+    (define (guard-state-name s) (vector-ref STATE-NAMES s))
 
     (define GUARD-EYE 1.65)
     (define RANGE 20.0)

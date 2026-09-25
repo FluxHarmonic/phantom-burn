@@ -134,3 +134,52 @@
     (let ((r (gate-walk DARK)))
       (display (list 'gate-dark 'max-awareness (car r) 'max-state (cadr r))) (newline)
       (assert-true (< (car r) 0.1)))))
+
+(test-group "crouching and circuits"
+  (test "in full view and light, still, a crouched runner is noticed at about half the rate of a standing one"
+    ;; the guard at its first point facing east along the lobby's south
+    ;; side; the runner 6 m ahead of it, still, for one second
+    (let* ((still (lambda (crouch?)
+                    (let* ((p (fresh-play)) (g (play-guard p))
+                           (w (make-walker 8.0 2.2 0.0 WEST))
+                           (w (if crouch? (walker-step w (make-input 0.0 0.0 0.0 0.0 #f #f #t 0) TICK C) w))
+                           (w (let loop ((i 0) (w w)) (if (>= i 60) w (loop (+ i 1) (walker-step w NO-INPUT TICK C))))))
+                      (guard-reset! g (play-guard-world p) 0)
+                      (list (car (max-awareness p w ALL-ON 60 (lambda (i) NO-INPUT))) (walker-crouching? w)))))
+           (standing (still #f))
+           (crouched (still #t)))
+      (display (list 'still-1s 'standing standing 'crouched crouched)) (newline)
+      (assert-true (cadr crouched))
+      (assert-false (cadr standing))
+      (assert-true (> (car crouched) 0.05))
+      (assert-true (< (car crouched) (* 0.75 (car standing))))))
+  (test "switching the lobby's circuit off lowers the light at your feet there"
+    (let ((ls (make-light-state)))
+      (light-levels! ls CIRCUITS ALL-ON 1.0 2.0)
+      (let ((on (light-at ls DATA 7.0 5.0 0.0)))
+        (light-levels! ls CIRCUITS (on-set '(c1 c3 emergency screens city)) 1.0 2.0)
+        (let ((off (light-at ls DATA 7.0 5.0 0.0)))
+          (display (list 'lobby-c2-on on 'off off)) (newline)
+          (assert-true (< off (* 0.25 on))))))))
+
+(test-group "the attempt"
+  (test "standing in the lit lobby on the guard's way, you are hunted and caught"
+    (let* ((p (fresh-play))
+           (r (run p (make-walker 7.0 2.0 0.0 WEST) ALL-ON (* 60 90) (lambda (i) NO-INPUT))))
+      (display (list 'caught-run (cdr r) 'ticks (play-ticks p))) (newline)
+      (assert-true (memq 'caught (cdr r)))
+      (assert-true (eq? (play-outcome p) 'caught))))
+  (test "the badge is picked up from beside the FM office desk, and the exit then wins"
+    (let* ((p (fresh-play))
+           ;; the lights off, so the guard in the office next door is no threat
+           (r1 (run p (make-walker 24.0 17.6 0.0 0.0) DARK 90 (lambda (i) FORWARD))))
+      (display (list 'badge-run (cdr r1) 'at (walker-x (car r1)) (walker-y (car r1)))) (newline)
+      (assert-true (play-badge? p))
+      (let ((r2 (run p (make-walker 3.0 8.6 0.0 0.0) DARK 60 (lambda (i) FORWARD))))
+        (display (list 'exit-run (cdr r2))) (newline)
+        (assert-true (eq? (play-outcome p) 'won)))))
+  (test "the exit without the badge does not win"
+    (let* ((p (fresh-play))
+           (r (run p (make-walker 3.0 8.6 0.0 0.0) DARK 60 (lambda (i) FORWARD))))
+      (assert-false (eq? (play-outcome p) 'won))
+      (assert-true (play-near-exit? p)))))
