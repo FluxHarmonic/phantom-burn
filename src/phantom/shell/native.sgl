@@ -3,15 +3,17 @@
 ;;;   phantom-burn [--floor DIR] [--size WxH] [--frames N] [--seconds S] [--view K]
 ;;;                [--shot K] [--hud 0|1|2] [--dither on|off] [--spread S]
 ;;;                [--bayer 4|8] [--palette NAME] [--fog M] [--card]
-;;;                [--snap] [--affine] [--trace] [--auto] [--night N] [--no-lift]
+;;;                [--snap] [--affine] [--trace] [--auto] [--night N] [--no-lift] [--pools G]
 ;;;
 ;;; --trace prints a stats line every 120 frames (frame, CPU, world and post
 ;;; pass CPU, draws, allocations per frame); --auto walks forward, turning.
 ;;;
-;;; --floor names the floor's directory (default assets/stand-in, the G0
-;;; export: floor14.sgm, city.sgm, the textures, floor14.collide). The
-;;; floor reloads by itself when floor14.sgm or floor14.collide changes
-;;; (checked twice a second), with the walker where it stands.
+;;; --floor names the floor's directory: by default assets/floors/14-slice,
+;;; the floor compiler's floor 14 (floor.sgm, collide, floor.sexp, the
+;;; textures, city.sgm; scripts/floor-import brings it in); assets/stand-in
+;;; is G0's Blender export (floor14.sgm, floor14.collide). The floor reloads
+;;; by itself when its files change (checked twice a second), with the
+;;; walker where it stands and the circuits as they were switched.
 ;;; --card shows the test card (a sweep of the colour cube) instead of the
 ;;; world, through the same post pass (scripts/gate-dither's fourth frame).
 ;;; --frames and --seconds quit after that many frames or seconds of play.
@@ -51,7 +53,8 @@
                   (or (string->number (substring s (+ x-at 1) (string-length s))) 810))
             (cons 1440 810))))
 
-    (define *dir* "assets/stand-in")
+    (define *dir* "assets/floors/14-slice")
+    (define (compiled?) (file-exists? (path "floor.sexp")))
     (define (path name) (string-append *dir* "/" name))
 
     (define (load-mesh* layout name) (load-mesh layout (path name)))
@@ -63,15 +66,18 @@
         tex))
 
     (define (load-collision)
-      (pbc1->collision (read-file-bytes (path "floor14.collide"))))
+      (pbc1->collision (read-file-bytes (path (if (compiled?) "collide" "floor14.collide")))))
 
-    (define WATCHED '("floor14.sgm" "floor14.collide"))
-    (define (stamps) (map (lambda (n) (or (file-mtime-ns (path n)) 0)) WATCHED))
+    (define (load-info)
+      (and (compiled?) (floor-info-from-string (read-file-string (path "floor.sexp")))))
+
+    (define (watched) (if (compiled?) '("floor.sgm" "collide" "floor.sexp") '("floor14.sgm" "floor14.collide")))
+    (define (stamps) (map (lambda (n) (or (file-mtime-ns (path n)) 0)) (watched)))
 
     ;; The keys whose presses the game reads (style lab, crouch, views).
     (define PRESS-KEYS
       (map string->symbol '("c" "p" "[" "]" "/" "b" "n" "-" "=" "h" "v" "x" "7" "8" "9"
-                            "j" "k" "l" "1" "2" "3" "4" "0" "," "." "g")))
+                            "j" "k" "l" "1" "2" "3" "4" "5" "6" "0" "," "." "g" ";" "'")))
 
     (define (pressed-keys)
       (let loop ((ks PRESS-KEYS) (acc '()))
@@ -95,6 +101,7 @@
         (when (member "--trace" args) (game-set-trace! #t))
         (let ((n (string->number (arg-value args "--night" "none")))) (when n (render-night! n)))
         (when (member "--no-lift" args) (render-lift! #f))
+        (let ((g (string->number (arg-value args "--pools" "none")))) (when g (render-pools! g)))
         (when (member "--auto" args) (game-set-auto! #t))
         (when s (render-spread! s))
         (when b (render-bayer! b))
@@ -107,7 +114,7 @@
     (define (game-loop args frames seconds)
       (lambda ()
         (gfx-setup)
-        (game-init! load-mesh* load-texture* (load-collision))
+        (game-init! load-mesh* load-texture* (load-collision) (load-info))
         (apply-settings! args)
         (let loop ((n 0) (seen (stamps)) (elapsed 0.0))
           (let* ((dt (wait-frame))
@@ -125,7 +132,7 @@
                             (let ((now (stamps)))
                               (unless (equal? now seen)
                                 (display "phantom-burn: floor changed, reloading") (newline)
-                                (game-reload! load-mesh* load-texture* (load-collision)))
+                                (game-reload! load-mesh* load-texture* (load-collision) (load-info)))
                               now)
                             seen)))
               (cond ((and (key-pressed? 'escape) captured?) (set-cursor-captured! #f) (loop (+ n 1) seen elapsed))

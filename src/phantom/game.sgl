@@ -16,10 +16,12 @@
 ;;;               b (Bayer 4x4 / 8x8), n (next palette), - = (fog), h (HUD),
 ;;;               v (vertex snapping), x (affine textures);
 ;;;               7 8 9 (go to the export's three views), j k l (the three
-;;;               dark-room views); 1 2 3 4 (switch c1, c2, c3, the
-;;;               emergency exit light), 0 (c1 to c3 all off, or on); , .
+;;;               dark-room views); 1 2 3 (switch c1, c2, c3), 4 5 6 (the
+;;;               always-lit emergency, screens and city, for comparison),
+;;;               0 (every switchable circuit off, or on); , .
 ;;;               (the night's ambient floor down and up: how much of a dark
-;;;               room still reads); g (the black-level lift on or off)
+;;;               room still reads); ; ' (the always-lit circuits' gain: the
+;;;               pools a dark room keeps); g (the black-level lift on or off)
 ;;;   2 3         mouse motion this frame, pixels
 ;;;   4 5         the move stick, -1..1, y down (the phone's left thumb)
 ;;;   6 7         the look stick, -1..1, y down (the right thumb)
@@ -134,11 +136,13 @@
 
     ;; --- light and views --------------------------------------------------------
 
-    ;; What stays lit in a dark room, beyond the export's 14 lights (design
-    ;; coordinates; (x y z radius r g b circuit), circuit 4 = always lit):
-    ;; the three monitors left on (#4DF2D9, just in front of each screen),
-    ;; the city through the lobby's window (magenta and cyan, outside), and
-    ;; the exit sign's spill down the door and onto the floor (emergency).
+    ;; The stand-in's pools of light in a dark room, beyond the export's 14
+    ;; lights (design coordinates; (x y z radius r g b circuit), circuit 4 =
+    ;; always lit): the three monitors left on (#4DF2D9, just in front of
+    ;; each screen), the city through the lobby's window (magenta and cyan,
+    ;; outside), and the exit sign's spill down the door and onto the floor
+    ;; (emergency). The compiled floor bakes its own (screens, city,
+    ;; emergency circuits).
     (define EMITTERS
       '((18.0 14.8 1.05 3.2 0.6 1.9 1.7 4)
         (18.0 18.8 1.05 3.2 0.6 1.9 1.7 4)
@@ -147,37 +151,56 @@
         (8.5 -0.9 3.0 10.0 0.35 1.0 0.95 4)
         (3.0 9.2 1.6 4.5 1.3 0.75 0.14 3)))
 
-    ;; The views: the export's three (all lit), then three dark rooms, each
-    ;; (name x y z yaw pitch fov-y levels), levels for c1 c2 c3 emergency.
-    (define (look-from name x y z tx ty tz levels)
+    ;; A view: (name x y z yaw pitch fov-y on), on the switchable circuits
+    ;; left on (#t: all of them). Indices 0 to 5 are the same on every
+    ;; floor: the export's arrival, overlook and office (all lit), then the
+    ;; three dark rooms; a compiled floor's other views follow.
+    (define (look-from name x y z tx ty tz fov on)
       (let* ((dx (- tx x)) (dy (- ty y)) (dz (- tz z)))
-        (list name x y z (atan (- dx) dy) (atan dz (sqrt (+ (* dx dx) (* dy dy)))) FOV levels)))
-    (define VIEWS
-      (append
-       (map (lambda (v) (append v (list '(1.0 1.0 1.0 1.0)))) stand-in-views)
-       (list
-        ;; the lobby with c2 off: the exit sign's glow under the mezzanine,
-        ;; the city on the floor by the window
-        (look-from 'lobby-dark 12.2 7.6 1.6 3.0 3.0 0.6 '(0.0 0.0 0.0 1.0))
-        ;; the office at night: the monitors' glow on the desks, the FM
-        ;; office lit behind its glass
-        (look-from 'office-night 20.5 12.2 1.6 19.4 18.8 1.0 '(0.0 0.0 1.0 1.0))
-        ;; the dark corridor, the lit office through its doorway
-        (look-from 'corridor-dark 17.6 9.6 1.6 20.6 14.0 1.1 '(1.0 0.0 0.0 1.0)))))
+        (list name x y z (atan (- dx) dy) (atan dz (sqrt (+ (* dx dx) (* dy dy)))) fov on)))
+    (define (lens->fov mm) (if mm (/ (* 2.0 (atan (/ 10.125 mm)) 180.0) PI) FOV))
+    (define DARK-VIEWS
+      (list
+       ;; the lobby, every switchable circuit off: the exit sign's glow under
+       ;; the mezzanine, the city through the window
+       (look-from 'lobby-dark 10.5 3.2 1.6 2.0 6.2 1.0 FOV '())
+       ;; the office at night: the monitors' glow on the desks, the FM
+       ;; office lit behind its glass
+       (look-from 'office-night 20.5 12.2 1.6 19.4 18.8 1.0 FOV '(c3))
+       ;; the dark corridor, the lit office through its doorway
+       (look-from 'corridor-dark 17.6 9.6 1.6 20.6 14.0 1.1 FOV '(c1))))
+    (define STAND-IN-VIEWS
+      (append (map (lambda (v) (append v (list #t))) stand-in-views) DARK-VIEWS))
+    (define (compiled-views info)
+      (let* ((vs (map (lambda (v)
+                        (look-from (list-ref v 0) (list-ref v 1) (list-ref v 2) (list-ref v 3)
+                                   (list-ref v 4) (list-ref v 5) (list-ref v 6) (lens->fov (list-ref v 7)) #t))
+                      (cdr (assq 'views info))))
+             (named (lambda (n) (let find ((l vs)) (cond ((null? l) #f) ((eq? (caar l) n) (car l)) (else (find (cdr l)))))))
+             (main (filter (lambda (v) v) (map named '(arrival overlook office))))
+             (rest (filter (lambda (v) (not (memq (car v) '(arrival overlook office)))) vs)))
+        (append main DARK-VIEWS rest)))
+    (define *views* STAND-IN-VIEWS)
 
-    (define (view-ref k) (list-ref VIEWS (min k (- (length VIEWS) 1))))
+    (define (view-ref k) (list-ref *views* (max 0 (min k (- (length *views*) 1)))))
 
-    (define (toggle-circuit! i)
-      (let ((ls (list->vector (render-levels))))
-        (vector-set! ls i (if (> (vector-ref ls i) 0.5) 0.0 1.0))
-        (render-levels! (vector->list ls))))
+    (define (apply-view-light! v)
+      (let ((on (list-ref v 7)))
+        (for-each (lambda (c) (render-circuit-set! c (or (eq? on #t) (and (memq c on) #t))))
+                  (render-switchable))
+        ;; the always-lit circuits come back on with a view
+        (for-each (lambda (c) (render-circuit-set! c #t))
+                  (filter (lambda (c) (not (memq c (render-switchable)))) (render-circuits)))))
 
-    ;; 0: c1 to c3 all off, or all on again if they already are
+    (define (toggle-circuit! name)
+      (when (memq name (render-circuits))
+        (render-circuit-set! name (not (render-circuit-on? name)))))
+
+    ;; 0: every switchable circuit off, or all on again if they already are
     (define (toggle-all!)
-      (let* ((ls (render-levels))
-             (any-on (or (> (car ls) 0.5) (> (cadr ls) 0.5) (> (caddr ls) 0.5)))
-             (v (if any-on 0.0 1.0)))
-        (render-levels! (list v v v (cadddr ls)))))
+      (let* ((sw (render-switchable))
+             (any-on (let loop ((l sw)) (and (pair? l) (or (render-circuit-on? (car l)) (loop (cdr l)))))))
+        (for-each (lambda (c) (render-circuit-set! c (not any-on))) sw)))
 
     ;; The walker at view k: the eyes' place, feet on the floor under them.
     (define (walker-at-view k)
@@ -188,28 +211,38 @@
         w))
 
     (define (game-set-view! k)
-      (render-levels! (list-ref (view-ref k) 7))
+      (apply-view-light! (view-ref k))
       (set! *walker* (walker-at-view k))
       (set! *prev* *walker*)
       (set! *acc* 0.0))
 
     (define (game-set-shot! k)
       (set! *shot* k)
-      (render-levels! (list-ref (view-ref k) 7)))
+      (apply-view-light! (view-ref k)))
     (define (game-set-hud! n) (set! *hud* n))
 
-    ;; The floor: (load-mesh* layout name) and (load-texture* name) load
-    ;; the stand-in's files; coll is its (phantom collide) collision.
-    (define (game-init! load-mesh* load-texture* coll)
+    ;; The floor: (load-mesh* layout name) and (load-texture* name) load its
+    ;; files; coll is its (phantom collide) collision; info is a compiled
+    ;; floor's floor.sexp datum, or #f for the stand-in.
+    (define (game-init! load-mesh* load-texture* coll info)
       (render-init!)
       (text-init!)
-      (game-reload! load-mesh* load-texture* coll)
+      (game-reload! load-mesh* load-texture* coll info)
       (game-set-view! 0))
 
     ;; A new floor under the walker's feet (live reload): the walker keeps
-    ;; its place.
-    (define (game-reload! load-mesh* load-texture* coll)
-      (render-load-stand-in! load-mesh* load-texture* stand-in-draws (append stand-in-lights EMITTERS))
+    ;; its place, and the circuits their switches.
+    (define (game-reload! load-mesh* load-texture* coll info)
+      (let ((saved (map (lambda (c) (cons c (render-circuit-on? c))) (render-circuits))))
+        (if info
+            (begin
+              (render-load-compiled! load-mesh* load-texture* info)
+              (set! *views* (compiled-views info)))
+            (begin
+              (render-load-stand-in! load-mesh* load-texture* stand-in-draws (append stand-in-lights EMITTERS))
+              (set! *views* STAND-IN-VIEWS)))
+        (when *walker*
+          (for-each (lambda (p) (render-circuit-set! (car p) (cdr p))) saved)))
       (set! *coll* coll))
 
     ;; --- input ---------------------------------------------------------------
@@ -236,12 +269,16 @@
               ((string=? name "j") (game-set-view! 3))
               ((string=? name "k") (game-set-view! 4))
               ((string=? name "l") (game-set-view! 5))
-              ((string=? name "1") (toggle-circuit! 0))
-              ((string=? name "2") (toggle-circuit! 1))
-              ((string=? name "3") (toggle-circuit! 2))
-              ((string=? name "4") (toggle-circuit! 3))
+              ((string=? name "1") (toggle-circuit! 'c1))
+              ((string=? name "2") (toggle-circuit! 'c2))
+              ((string=? name "3") (toggle-circuit! 'c3))
+              ((string=? name "4") (toggle-circuit! 'emergency))
+              ((string=? name "5") (toggle-circuit! 'screens))
+              ((string=? name "6") (toggle-circuit! 'city))
               ((string=? name "0") (toggle-all!))
               ((string=? name "g") (render-lift! (not (render-lift?))))
+              ((string=? name ";") (render-pools! (* (render-pools) 0.8)))
+              ((string=? name "'") (render-pools! (* (render-pools) 1.25)))
               ((string=? name ",") (render-night! (* (render-night) 0.8)))
               ((string=? name ".") (render-night! (* (render-night) 1.25)))
               (else #f))))
@@ -351,10 +388,13 @@
                                     (if (> (render-snap) 0.0) "  SNAP" "")
                                     (if (render-affine?) "  AFFINE" "")
                                     "  NIGHT " (fixed1 (render-night))
+                                    "  POOLS " (fixed1 (render-pools))
                                     (if (render-lift?) "  LIFT" ""))
-                     (let ((ls (render-levels)))
-                       (string-append "C1 " (on-off (car ls)) " C2 " (on-off (cadr ls))
-                                      " C3 " (on-off (caddr ls)) " EXIT " (on-off (cadddr ls))))
+                     (apply string-append
+                            (map (lambda (c)
+                                   (string-append (string-upcase* (symbol->string c))
+                                                  (if (render-circuit-on? c) " ON  " " OFF  ")))
+                                 (render-circuits)))
                      (if *shot*
                          (string-append "SHOT " (string-upcase* (symbol->string (car (view-ref *shot*)))))
                          (string-append (fixed1 (walker-x w)) " " (fixed1 (walker-y w)) " " (fixed1* (walker-z w))
@@ -363,7 +403,7 @@
                                         "  " (surface-name (walker-surface w)))))
                (if (= *hud* 2)
                    (list "WASD MOVE  SHIFT SNEAK  R RUN  C CROUCH  Q E LEAN  MOUSE LOOK"
-                         "1 2 3 4 CIRCUITS  0 ALL OFF  J K L DARK VIEWS  , . NIGHT  G LIFT"
+                         "1 2 3 C1 C2 C3  4 EMERGENCY  5 SCREENS  6 CITY  0 ALL OFF  J K L DARK VIEWS  , . NIGHT  ; ' POOLS  G LIFT"
                          "P DITHER  [ ] / SPREAD  B BAYER  N PALETTE  - = FOG  V SNAP  X AFFINE  7 8 9 VIEWS  H HUD")
                    '())))))
 

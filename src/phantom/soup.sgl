@@ -8,9 +8,10 @@
 (define-library (phantom soup)
   (import (sigil core)
           (sigil math)
+          (sigil io)
           (phantom collide))
 
-  (export pbc1->collision base64->bytevector)
+  (export pbc1->collision base64->bytevector floor-info-from-string)
 
   (begin
 
@@ -32,6 +33,15 @@
         (collision-from-soup (bytevector-copy bv 8 (+ 8 (* 36 n)))
                              (bytevector-copy bv (+ 8 (* 36 n)) (+ 8 (* 37 n)))
                              (bytevector-copy bv (+ 8 (* 37 n)) (+ 8 (* 38 n))))))
+
+    ;; A compiled floor's floor.sexp (scripts/floor-import) as its datum: an
+    ;; alist of (parts ...) (circuits ...) (fixtures ...) (views ...) and so
+    ;; on. An error when the text holds no list.
+    (define (floor-info-from-string s)
+      (let ((d (read (open-input-string s))))
+        (unless (and (pair? d) (assq 'parts d) (assq 'circuits d))
+          (error "floor-info-from-string: not a floor.sexp"))
+        d))
 
     (define (b64-value c)
       (let ((i (char->integer c)))

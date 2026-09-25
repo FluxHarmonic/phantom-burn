@@ -43,11 +43,13 @@
   // Phantom Burn's page. The generic loader (sigil-web-app.js) boots the
   // wasm, forwards keydown/keyup and runs the frame loop. This page adds:
   //   the query, sent to the game as ("params", QUERY) before anything loads:
-  //     ?floor=NAME   the floor under assets/NAME/ (default stand-in)
+  //     ?floor=NAME   a compiled floor under assets/floors/NAME/ (default 14-slice),
+  //                   or stand-in (G0's Blender export, assets/stand-in/)
   //     ?view=K       start at the floor's view K (0 arrival, 1 overlook, 2 office;
   //                   the dark rooms: 3 lobby-dark, 4 office-night, 5 corridor-dark)
   //     ?night=N      the dark rooms' ambient floor (1 default; , . on the keyboard)
   //     ?lift=0       no black-level lift (G on the keyboard)
+  //     ?pools=G      the always-lit circuits' gain (2 default; ; ' on the keyboard)
   //     ?shot=K       hold the camera at view K (floor shots)
   //     ?hud=0|1|2    the readout: off, stats, stats and keys
   //     ?dither=off   ?spread=S  ?bayer=4|8  ?palette=embers|ramped  ?fog=M
@@ -65,7 +67,9 @@
   (function () {
     "use strict";
     var params = new URLSearchParams(location.search);
-    var floor = (params.get("floor") || "stand-in").replace(/[^A-Za-z0-9_-]/g, "");
+    var floor = (params.get("floor") || "14-slice").replace(/[^A-Za-z0-9_-]/g, "");
+    var dir = floor === "stand-in" ? "assets/stand-in/" : "assets/floors/" + floor + "/";
+    var collideFile = floor === "stand-in" ? "floor14.collide.b64" : "collide.b64";
     function withApp(fn) {
       if (globalThis.SigilWebApp) { fn(globalThis.SigilWebApp); return; }
       document.addEventListener("sigil-web-app-ready", function (e) { fn(e.detail); }, { once: true });
@@ -90,10 +94,17 @@
         app.dispatch("params", location.search.replace(/^\?/, ""));
         app.dispatch("dpr", String(window.devicePixelRatio || 1));
         window.addEventListener("resize", function () { app.dispatch("dpr", String(window.devicePixelRatio || 1)); });
-        return fetch("assets/" + floor + "/floor14.collide.b64").then(function (r) {
-        if (!r.ok) throw new Error("no floor " + floor + " (" + r.status + ")");
-        return r.text();
-      }).then(function (t) { app.dispatch("collide", t); });
+        function text(f) {
+          return fetch(dir + f).then(function (r) {
+            if (!r.ok) throw new Error("no floor " + floor + " (" + f + ": " + r.status + ")");
+            return r.text();
+          });
+        }
+        var info = floor === "stand-in" ? Promise.resolve(null) : text("floor.sexp");
+        return info.then(function (t) {
+          if (t !== null) app.dispatch("floorinfo", t);
+          return text(collideFile);
+        }).then(function (t) { app.dispatch("collide", t); });
       }).catch(function (e) { status.textContent = String(e.message || e); });
 
       canvas.addEventListener("click", function () {
