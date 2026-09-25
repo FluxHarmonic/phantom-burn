@@ -39,7 +39,7 @@
           ctx? ctx-floor ctx-legend ctx-props ctx-mats ctx-soup ctx-plan ctx-owners ctx-groups
           ctx-ivs ctx-cols ctx-problems ctx-emitters ctx-gedges ctx-holes ctx-landings ctx-rails
           ctx-footprints ctx-placed ctx-tags ctx-stair-boxes ctx-look look-city CITY-DEFAULT
-          ctx-batches add-problem! batch-for mat tag-of room-by-name room-id
+          ctx-batches add-problem! batch-for split-batch-for ctx-splits ctx-devices mat tag-of room-by-name room-id
           face-ivs side-normal side-right side-faces iv-of edge-point
           edges-at-point pair-side owner-room-of fmt-pt num->str
           GRID CLEARANCE)
@@ -60,7 +60,8 @@
 
     (define-struct ctx
       (floor default: #f) (legend default: #f) (props default: '()) (mats default: '())
-      (batches default: #f)          ; #(alist) of (material-name . batch), in creation order
+      (batches default: #f)          ; #(alist splits): (key . batch) in creation order, and the
+                                     ; split keys: (key part-name . material), P3's named parts
       (soup default: #f) (plan default: #f) (owners default: #f) (groups default: #f)
       (ivs default: #f) (cols default: #f)
       (problems default: #f) (emitters default: #f) (gedges default: #f)
@@ -71,7 +72,8 @@
       (placed default: #f)           ; growable of #(prop xform top-z room)
       (stair-boxes default: #f)      ; growable of (poly ztop zbottom) per step or tread, for gate checks
       (tags default: '())            ; ((name noise sight) ...), a surface tag's index is its position
-      (look default: '()))           ; look-lab settings: ((city STRENGTH RADIUS) (ambient R G B)), each optional
+      (look default: '())            ; look-lab settings: ((city STRENGTH RADIUS) (ambient R G B)), each optional
+      (devices default: #f))         ; growable of #(id kind x y z facing tier room args), P3
 
     ;; --- the context --------------------------------------------------------------------
 
@@ -81,10 +83,11 @@
                            (list (list 'wall #f 'blocks) (list 'ceiling #f 'blocks) (list 'glass #f 'passes)
                                  (list 'prop #f 'blocks) (list 'trim #f 'blocks)))))
         (ctx floor: fl legend: lg props: props mats: mats
-             batches: (vector '()) soup: (make-soup)
+             batches: (vector '() '()) soup: (make-soup)
              problems: (make-growable 16) emitters: (make-growable 32) gedges: (make-growable 16)
              landings: (make-growable 4) rails: (make-growable 8) footprints: (make-growable 16)
              placed: (make-growable 16) stair-boxes: (make-growable 32) tags: tags
+             devices: (make-growable 8)
              look: (if (pair? opt) (car opt) (quote ())))))
 
     (define (add-problem! c gate line msg)
@@ -100,6 +103,18 @@
     (define (mat c name)
       (let ((p (assq name (ctx-mats c))))
         (if p (cdr p) (cdar (ctx-mats c)))))
+
+    ;; A batch of its own for a named part (P3: a device's ID-N, the blinds'
+    ;; ID-open and ID-closed): keyed by the part's name and its material, so
+    ;; the part keeps its material's texture and colour; assemble emits one
+    ;; floor part per name (and texture). The part name is a symbol.
+    (define (split-batch-for c part-name m)
+      (let* ((box (ctx-batches c))
+             (key (string->symbol (string-append (symbol->string part-name) "@" (symbol->string m)))))
+        (unless (assq key (vector-ref box 1))
+          (vector-set! box 1 (append (vector-ref box 1) (list (cons key (cons part-name m))))))
+        (batch-for c key)))
+    (define (ctx-splits c) (vector-ref (ctx-batches c) 1))
 
     (define (batch-for c name)
       (let* ((box (ctx-batches c)) (p (assq name (vector-ref box 0))))

@@ -194,7 +194,11 @@
     (define (assemble c emitters)
       (let* ((batches (vector-ref (ctx-batches c) 0))
              (mats (ctx-mats c))
-             (mi-of (lambda (b) (let ((p (assq (car b) mats))) (and p (cdr p)))))
+             (splits (ctx-splits c))
+             ;; a split batch's key is PART@MATERIAL: its material's info
+             (mi-of (lambda (b) (let* ((sp (assq (car b) splits))
+                                       (p (assq (if sp (cddr sp) (car b)) mats)))
+                                  (and p (cdr p)))))
              (textured (filter (lambda (b) (let ((mi (mi-of b))) (and mi (matinfo-texture mi)))) batches))
              (tex-names (let loop ((bs textured) (acc '()))
                           (cond ((null? bs) (reverse acc))
@@ -203,7 +207,12 @@
              ;; a material in SPLIT-PARTS is a part of its own (P2: the badge,
              ;; which play mode hides once it is taken), after the untextured
              ;; opaque part and before the glass
-             (split? (lambda (b) (memq (car b) SPLIT-PARTS)))
+             (split? (lambda (b) (or (memq (car b) SPLIT-PARTS) (assq (car b) splits))))
+             ;; the named parts (P3), in order of first use, each split again by texture
+             (split-names (let loop ((ss splits) (acc '()))
+                            (cond ((null? ss) (reverse acc))
+                                  ((memq (cadar ss) acc) (loop (cdr ss) acc))
+                                  (else (loop (cdr ss) (cons (cadar ss) acc))))))
              (groups (append
                        (map (lambda (tn) (list (symbol->string tn) tn 'opaque
                                                (filter (lambda (b) (and (not (split? b)) (eq? (matinfo-texture (mi-of b)) tn))) textured)))
@@ -215,6 +224,17 @@
                               (list (symbol->string name) #f 'opaque
                                     (filter (lambda (b) (eq? (car b) name)) batches)))
                             SPLIT-PARTS)
+                       (apply append
+                              (map (lambda (pname)
+                                     (let* ((bs (filter (lambda (b) (let ((sp (assq (car b) splits))) (and sp (eq? (cadr sp) pname)))) batches))
+                                            (texs (let loop ((l bs) (acc '()))
+                                                    (if (null? l) (reverse acc)
+                                                        (let ((t (matinfo-texture (mi-of (car l)))))
+                                                          (loop (cdr l) (if (member t acc) acc (cons t acc))))))))
+                                       (map (lambda (t) (list (symbol->string pname) t 'opaque
+                                                              (filter (lambda (b) (equal? (matinfo-texture (mi-of b)) t)) bs)))
+                                            texs)))
+                                   split-names))
                        (list (list "glass" #f 'glass
                                    (filter (lambda (b) (let ((mi (mi-of b))) (and mi (not (split? b)) (matinfo-glass? mi)))) batches)))))
              (groups (filter (lambda (g) (pair? (cadddr g))) groups))
@@ -560,4 +580,35 @@
                                   (lambda (t) (js-obj (list (cons "kind" (js-sym (thing-field t 'kind)))
                                                             (cons "route" (js-list (thing-field t 'route) js-pt))
                                                             (cons "waits" (js-list (or (thing-field t 'waits) '()) js-num)))))))
+          ;; P3 (topics/phantom-burn-device-api): the devices, and the map's
+          ;; outlines and openings for the shell's terminal
+          (cons "devices" (let ((c (compiled-floor-ctx cf)))
+                            (js-list (if c (growable->list (ctx-devices c)) '())
+                                     (lambda (d) (js-obj (list (cons "id" (js-sym (vector-ref d 0)))
+                                                               (cons "kind" (js-sym (vector-ref d 1)))
+                                                               (cons "at" (js-list (list (vector-ref d 2) (vector-ref d 3) (vector-ref d 4)) js-num))
+                                                               (cons "facing" (js-num (vector-ref d 5)))
+                                                               (cons "tier" (js-sym (vector-ref d 6)))
+                                                               (cons "room" (js-num (vector-ref d 7)))
+                                                               (cons "args" (js-list (vector-ref d 8) js-num))))))))
+          (cons "outlines" (let ((c (compiled-floor-ctx cf)))
+                             (js-list (if c (floor-rooms (ctx-floor c)) '())
+                                      (lambda (r) (js-obj (list (cons "room" (js-sym (room-name r)))
+                                                                (cons "floor" (js-num (room-floor r)))
+                                                                (cons "corners" (js-list (room-corners r) js-pt))))))))
+          (cons "openings" (let* ((c (compiled-floor-ctx cf))
+                                  (es (if c (plan-edges (ctx-plan c)) (vector)))
+                                  (holes (if c (ctx-holes c) (vector))))
+                             (js-list (let loop ((i 0) (acc '()))
+                                        (if (>= i (vector-length holes))
+                                            (reverse acc)
+                                            (loop (+ i 1)
+                                                  (append (reverse (map (lambda (h) (cons (vector-ref es i) h)) (vector-ref holes i))) acc))))
+                                      (lambda (eh)
+                                        (let* ((e (car eh)) (h (cdr eh)) (a (edge-a e)) (b (edge-b e))
+                                               (at (lambda (t) (cons (+ (px a) (* t (- (px b) (px a)))) (+ (py a) (* t (- (py b) (py a)))))))
+                                               (kind (vector-ref h 4)))
+                                          (js-obj (list (cons "kind" (js-str (case kind ((arch exit door) "door") ((window) "window") ((grate) "grate") ((hatch) "hatch") (else (symbol->string kind)))))
+                                                        (cons "from" (js-pt (at (vector-ref h 0))))
+                                                        (cons "to" (js-pt (at (vector-ref h 1)))))))))))
           (cons "problems" (js-list (compiled-floor-problems cf) (lambda (p) (js-str (problem->string p))))))))))
