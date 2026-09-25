@@ -140,7 +140,9 @@
         (when b (render-bayer! b))
         (when p (render-palette! (string->symbol p)))
         (when f (render-fog! f))
-        (when h (game-set-hud! h))
+        ;; the HUD (stats, style lab state) only with ?dev; ?hud=N overrides.
+        ;; The keys stay live either way (H shows it).
+        (game-set-hud! (or h (if (param "dev") 1 0)))
         (when v (game-set-view! v))
         (when shot (game-set-shot! shot))
         (when (param "on") (game-set-on! (param "on")))))

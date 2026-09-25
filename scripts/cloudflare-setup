@@ -1,0 +1,135 @@
+#!/bin/sh
+# The one-time Cloudflare account changes phantomburn.net needs. DAVID RUNS
+# THIS; workers do not create projects or DNS records, and do not hold the
+# tokens that can. After Harkfell's scripts/cloudflare-setup, without the R2
+# bucket (the wasm is a plain file here, under Pages' 25 MiB cap).
+#
+#   scripts/cloudflare-setup             report only: what exists, what each
+#                                        step would do (no writes)
+#   scripts/cloudflare-setup --create    create the Pages project `phantomburn`
+#                                        (production branch master). Nothing is
+#                                        public after this: no deployment, no
+#                                        domain
+#   scripts/cloudflare-setup --domain    attach phantomburn.net and
+#                                        www.phantomburn.net to the project, and
+#                                        create their proxied CNAMEs to the
+#                                        project's pages.dev name where no record
+#                                        exists. Refuses before the first
+#                                        production deployment, and where a name
+#                                        already points somewhere else
+#
+# Environment (every mode), from ~/Ops/.env-phantomburn unless set:
+#   CLOUDFLARE_API_TOKEN   the token (scopes below)
+#   CLOUDFLARE_ACCOUNT_ID  the account id (wrangler whoami prints it)
+#
+# TOKEN SCOPES: ONE token for this script and scripts/publish-web (David's,
+# 2026-09-25; no R2 here, so Harkfell's split into a setup and a publish
+# token buys nothing):
+#     Account  Cloudflare Pages   Edit   create the project, attach the domains, deploy
+#     Zone     DNS                Edit   phantomburn.net only (--domain)
+#     Zone     Zone               Read   phantomburn.net only (the zone id)
+#
+# The site is a private preview: robots.txt disallows everything, every
+# response says X-Robots-Tag: noindex, and the game lives at a path that is
+# not in the repo (~/.config/phantomburn/slug). A pages.dev preview URL is
+# public too, so the same rules hold there.
+set -eu
+# Credentials: sourced from $PHANTOM_ENV_FILE (default ~/Ops/.env-phantomburn,
+# David's; this script only sources it and never prints it). ONE token covers
+# setup and publish: Pages Edit on the account, DNS Edit and Zone Read on
+# phantomburn.net.
+ENV_FILE="${PHANTOM_ENV_FILE:-$HOME/Ops/.env-phantomburn}"
+if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
+# every wrangler call runs from an empty scratch directory: wrangler 4 edits
+# the wrangler config it finds in its cwd (Harkfell's setup, 2026-09-24)
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/phantomburn-cloudflare-setup-XXXXXX")"
+trap 'rm -rf "$SCRATCH"' EXIT
+cd "$SCRATCH" || exit 1
+PROJECT="${PHANTOM_PAGES_PROJECT:-phantomburn}"
+ZONE_NAME=phantomburn.net
+DOMAINS="phantomburn.net www.phantomburn.net"
+MODE=report
+case "${1:-}" in
+  "") ;;
+  --create) MODE=create ;;
+  --domain) MODE=domain ;;
+  *) echo "cloudflare-setup: unknown argument ${1}"; exit 2 ;;
+esac
+say() { echo "cloudflare-setup: $*"; }
+command -v wrangler > /dev/null || { say "wrangler not on PATH"; exit 1; }
+command -v jq > /dev/null || { say "jq not on PATH"; exit 1; }
+[ -n "${CLOUDFLARE_API_TOKEN:-}" ] || { say "CLOUDFLARE_API_TOKEN not set"; exit 1; }
+[ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] || { say "CLOUDFLARE_ACCOUNT_ID not set (wrangler whoami prints it)"; exit 1; }
+API=https://api.cloudflare.com/client/v4
+api() {   # METHOD PATH [JSON] -> the body; exits on success:false
+  if [ -n "${3:-}" ]; then
+    out="$(curl -sS -X "$1" "$API$2" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json" --data "$3")"
+  else
+    out="$(curl -sS -X "$1" "$API$2" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")"
+  fi
+  if [ "$(printf '%s' "$out" | jq -r '.success')" != true ]; then
+    say "API $1 $2 refused: $(printf '%s' "$out" | jq -c '.errors')" >&2
+    exit 1
+  fi
+  printf '%s' "$out"
+}
+say "account $CLOUDFLARE_ACCOUNT_ID, project $PROJECT, mode $MODE"
+
+PROJ_JSON="$(curl -sS "$API/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PROJECT" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")"
+TARGET=""
+if [ "$(printf '%s' "$PROJ_JSON" | jq -r '.success')" = true ]; then
+  HAVE_PROJECT=1
+  TARGET="$(printf '%s' "$PROJ_JSON" | jq -r '.result.subdomain')"
+  say "Pages project $PROJECT exists: production branch $(printf '%s' "$PROJ_JSON" | jq -r '.result.production_branch'), $TARGET, domains $(printf '%s' "$PROJ_JSON" | jq -r '.result.domains | join(" ")')"
+else
+  HAVE_PROJECT=0
+  say "Pages project $PROJECT does not exist ($(printf '%s' "$PROJ_JSON" | jq -c '.errors[0].message'))"
+fi
+
+if [ "$MODE" = create ]; then
+  if [ "$HAVE_PROJECT" = 0 ]; then
+    wrangler pages project create "$PROJECT" --production-branch master
+    say "created Pages project $PROJECT (no deployment, no custom domain: nothing is public)"
+  fi
+  say "next: scripts/publish-web DIR \"<line>\" --preview, checked on its pages.dev URL"
+  exit 0
+fi
+
+ZONE_ID="$(api GET "/zones?name=$ZONE_NAME" | jq -r '.result[0].id // empty')"
+[ -n "$ZONE_ID" ] || { say "no zone $ZONE_NAME visible to this token"; exit 1; }
+say "zone $ZONE_NAME is $ZONE_ID; its records for the site's names:"
+for d in $DOMAINS; do
+  recs="$(api GET "/zones/$ZONE_ID/dns_records?name=$d" | jq -r '.result[] | "\(.type) \(.name) -> \(.content) proxied=\(.proxied)"')"
+  say "  $d: ${recs:-none}"
+done
+if [ "$MODE" = report ]; then
+  say "report only. --create would make the project if missing; --domain would attach $DOMAINS"
+  say "to $PROJECT and create proxied CNAMEs to ${TARGET:-<its pages.dev name>} where no record exists (and refuse where one does)"
+  exit 0
+fi
+
+[ "$HAVE_PROJECT" = 1 ] || { say "REFUSED: the project does not exist; --create first"; exit 1; }
+case "$TARGET" in *.pages.dev) ;; *) say "REFUSED: cannot read the project's pages.dev name ('$TARGET')"; exit 1 ;; esac
+DEPLOYS="$(api GET "/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PROJECT/deployments?env=production" | jq '.result | length')"
+[ "$DEPLOYS" -gt 0 ] || { say "REFUSED: $PROJECT has no production deployment yet; publish and check it on $TARGET first"; exit 1; }
+for d in $DOMAINS; do
+  existing="$(api GET "/zones/$ZONE_ID/dns_records?name=$d" | jq -r '.result[] | select(.type == "A" or .type == "AAAA" or .type == "CNAME") | "\(.type) \(.content)"')"
+  if [ -n "$existing" ] && [ "$existing" != "CNAME $TARGET" ]; then
+    say "REFUSED: $d already points somewhere ($existing); not replacing it"
+    exit 1
+  fi
+done
+for d in $DOMAINS; do
+  if printf '%s' "$PROJ_JSON" | jq -e --arg d "$d" '.result.domains | index($d)' > /dev/null; then
+    say "$d is already attached to $PROJECT"
+  else
+    api POST "/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PROJECT/domains" "{\"name\":\"$d\"}" > /dev/null
+    say "attached $d to $PROJECT"
+  fi
+  if [ -z "$(api GET "/zones/$ZONE_ID/dns_records?name=$d" | jq -r '.result[]? | select(.type == "A" or .type == "AAAA" or .type == "CNAME") | .id')" ]; then
+    api POST "/zones/$ZONE_ID/dns_records" "{\"type\":\"CNAME\",\"name\":\"$d\",\"content\":\"$TARGET\",\"proxied\":true,\"comment\":\"phantomburn.net on Pages (scripts/cloudflare-setup)\"}" > /dev/null
+    say "created CNAME $d -> $TARGET (proxied)"
+  fi
+done
+say "done. Cloudflare validates the domains and issues certificates (minutes); then"
+say "node scripts/verify-live.mjs https://phantomburn.net <the staged DIR that was published>"

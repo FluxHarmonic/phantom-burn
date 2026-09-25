@@ -6,8 +6,12 @@
 ;;; surface tag and a u8 room per triangle. Walls, floors and ceilings are
 ;;; told apart by their normal, so props, stairs, rails and rooms over
 ;;; rooms need nothing special. (collision-from-soup) builds the index once
-;;; per floor load; every query after that allocates nothing: results go
-;;; into the collision's own slots (collide-x, collide-y, collide-surface).
+;;; per floor load. A query gathers the nearby triangles' indices into a
+;;; scratch vector on the collision (gather!) and loops over them with plain
+;;; accumulators: no closures, nothing captured and set!, so a query builds
+;;; nothing on the heap (the review's F6: the first version passed a fresh
+;;; closure per query). Results beyond the return value go into the
+;;; collision's own slots (collide-x, collide-y, collide-surface).
 ;;;
 ;;; The body is a vertical cylinder. (collide-resolve!) pushes it out of
 ;;; every triangle that reaches into its height range [zlo, zhi]: each
@@ -43,7 +47,7 @@
     ;;  bytevector  7 grid x0  8 grid y0  9 grid w  10 grid h  11 cells
     ;;  (vector of vectors of triangle indices)  12 stamps  13 query
     ;;  counter  14 out x  15 out y  16 out surface  17 clip buffer A
-    ;;  18 clip buffer B
+    ;;  18 clip buffer B  19 the last query's triangles (gather!)
     (define (collision? c) (and (vector? c) (> (vector-length c) 0) (eq? (vector-ref c 0) 'collision)))
     (define (collision-count c) (vector-ref c 1))
     (define (verts c) (vector-ref c 2))
@@ -124,7 +128,8 @@
                 (each (+ k 1))))
             (vector 'collision n vs ns bs surface room x0 y0 gw gh cells
                     (make-vector (max n 1) 0) 0 0.0 0.0 0
-                    (make-vector 24 0.0) (make-vector 24 0.0))))))
+                    (make-vector 24 0.0) (make-vector 24 0.0)
+                    (make-vector (max n 1) 0))))))
 
     ;; quotient is unbound in this Sigil; n is a small exact integer
     (define (quotient* a b) (exact (floor (/ a b))))
@@ -144,31 +149,37 @@
         (vector-set! c 13 q)
         q))
 
-    ;; Call (visit i) for every triangle whose cell overlaps the rectangle
-    ;; [x0, x1] x [y0, y1], each once.
-    (define (for-each-near c x0 y0 x1 y1 visit)
+    ;; Gather every triangle whose cell overlaps the rectangle [x0, x1] x
+    ;; [y0, y1], each once, into slot 19; returns how many.
+    (define (gather! c x0 y0 x1 y1)
       (let* ((q (next-query! c))
              (stamps (vector-ref c 12))
+             (out (vector-ref c 19))
              (gx0 (vector-ref c 7)) (gy0 (vector-ref c 8))
              (gw (vector-ref c 9)) (gh (vector-ref c 10))
              (cells (vector-ref c 11))
              (cx0 (max 0 (cell-index x0 gx0))) (cy0 (max 0 (cell-index y0 gy0)))
              (cx1 (min (- gw 1) (cell-index x1 gx0))) (cy1 (min (- gh 1) (cell-index y1 gy0))))
-        (let rows ((cy cy0))
-          (when (<= cy cy1)
-            (let cols ((cx cx0))
-              (when (<= cx cx1)
-                (let* ((cell (vector-ref cells (+ (* cy gw) cx)))
-                       (m (vector-length cell)))
-                  (let each ((k 0))
-                    (when (< k m)
-                      (let ((i (vector-ref cell k)))
-                        (unless (= (vector-ref stamps i) q)
-                          (vector-set! stamps i q)
-                          (visit i)))
-                      (each (+ k 1)))))
-                (cols (+ cx 1))))
-            (rows (+ cy 1))))))
+        (let rows ((cy cy0) (k 0))
+          (if (> cy cy1)
+              k
+              (rows (+ cy 1)
+                    (let cols ((cx cx0) (k k))
+                      (if (> cx cx1)
+                          k
+                          (cols (+ cx 1)
+                                (let* ((cell (vector-ref cells (+ (* cy gw) cx)))
+                                       (m (vector-length cell)))
+                                  (let each ((j 0) (k k))
+                                    (if (>= j m)
+                                        k
+                                        (let ((i (vector-ref cell j)))
+                                          (if (= (vector-ref stamps i) q)
+                                              (each (+ j 1) k)
+                                              (begin
+                                                (vector-set! stamps i q)
+                                                (vector-set! out k i)
+                                                (each (+ j 1) (+ k 1))))))))))))))))
 
     ;; The z of triangle i's plane at (x, y) when (x, y) lies inside its
     ;; footprint (edges included), else #f. Only for non-vertical triangles.
@@ -189,27 +200,27 @@
     ;; The highest floor surface at (x, y) with its z in [zlo, zhi], or #f.
     ;; Its surface tag goes to (collide-surface c).
     (define (collide-floor c x y zlo zhi)
-      (let ((best #f) (tag 0) (ns (normals c)))
-        (for-each-near c x y x y
-          (lambda (i)
-            (when (> (vector-ref ns (+ (* 3 i) 2)) FLOOR-NZ)
-              (let ((z (height-at c i x y)))
-                (when (and z (>= z zlo) (<= z zhi) (or (not best) (> z best)))
-                  (set! best z)
-                  (set! tag (collision-surface-of c i)))))))
-        (vector-set! c 16 tag)
-        best))
+      (let ((n (gather! c x y x y)) (out (vector-ref c 19)) (ns (normals c)))
+        (let loop ((j 0) (best #f) (tag 0))
+          (if (>= j n)
+              (begin (vector-set! c 16 tag) best)
+              (let* ((i (vector-ref out j))
+                     (z (and (> (vector-ref ns (+ (* 3 i) 2)) FLOOR-NZ) (height-at c i x y))))
+                (if (and z (>= z zlo) (<= z zhi) (or (not best) (> z best)))
+                    (loop (+ j 1) z (collision-surface-of c i))
+                    (loop (+ j 1) best tag)))))))
 
     ;; The lowest ceiling surface at (x, y) with its z in [zlo, zhi], or #f.
     (define (collide-ceiling c x y zlo zhi)
-      (let ((best #f) (ns (normals c)))
-        (for-each-near c x y x y
-          (lambda (i)
-            (when (< (vector-ref ns (+ (* 3 i) 2)) (- FLOOR-NZ))
-              (let ((z (height-at c i x y)))
-                (when (and z (>= z zlo) (<= z zhi) (or (not best) (< z best)))
-                  (set! best z))))))
-        best))
+      (let ((n (gather! c x y x y)) (out (vector-ref c 19)) (ns (normals c)))
+        (let loop ((j 0) (best #f))
+          (if (>= j n)
+              best
+              (let* ((i (vector-ref out j))
+                     (z (and (< (vector-ref ns (+ (* 3 i) 2)) (- FLOOR-NZ)) (height-at c i x y))))
+                (if (and z (>= z zlo) (<= z zhi) (or (not best) (< z best)))
+                    (loop (+ j 1) z)
+                    (loop (+ j 1) best)))))))
 
     ;; --- the cylinder -------------------------------------------------------
 
@@ -338,50 +349,59 @@
       (let pass ((p 0) (total 0))
         (if (>= p 4)
             total
-            (let ((pushes 0)
-                  (cx (vector-ref c 14)) (cy (vector-ref c 15))
-                  (bs (bounds c)) (ns (normals c)))
-              (for-each-near c (- cx r) (- cy r) (+ cx r) (+ cy r)
-                (lambda (i)
-                  (let ((b (* 6 i))
-                        (px (vector-ref c 14)) (py (vector-ref c 15)))
-                    (when (and (< (vector-ref bs (+ b 2)) (- zhi EPS))
-                               (> (vector-ref bs (+ b 5)) (+ zlo EPS))
-                               (< (vector-ref bs b) (+ px r)) (> (vector-ref bs (+ b 3)) (- px r))
-                               (< (vector-ref bs (+ b 1)) (+ py r)) (> (vector-ref bs (+ b 4)) (- py r)))
-                      (let ((n (clip-slab c i zlo zhi)))
-                        (when (and (> n 0)
-                                   (push-out! c n px py r
-                                              (vector-ref ns (* 3 i)) (vector-ref ns (+ (* 3 i) 1))
-                                              (vector-ref ns (+ (* 3 i) 2))))
-                          (set! pushes (+ pushes 1))))))))
-              (if (= pushes 0)
-                  total
-                  (pass (+ p 1) (+ total pushes)))))))
+            (let* ((cx (vector-ref c 14)) (cy (vector-ref c 15))
+                   (n (gather! c (- cx r) (- cy r) (+ cx r) (+ cy r)))
+                   (out (vector-ref c 19)))
+              (let each ((j 0) (pushes 0))
+                (if (>= j n)
+                    (if (= pushes 0) total (pass (+ p 1) (+ total pushes)))
+                    (each (+ j 1)
+                          (if (resolve-one! c (vector-ref out j) r zlo zhi) (+ pushes 1) pushes))))))))
+
+    ;; Push the centre (slots 14, 15) out of triangle i's piece within
+    ;; [zlo, zhi]; #t if it moved.
+    (define (resolve-one! c i r zlo zhi)
+      (let ((bs (bounds c)) (ns (normals c))
+            (b (* 6 i))
+            (px (vector-ref c 14)) (py (vector-ref c 15)))
+        (and (< (vector-ref bs (+ b 2)) (- zhi EPS))
+             (> (vector-ref bs (+ b 5)) (+ zlo EPS))
+             (< (vector-ref bs b) (+ px r)) (> (vector-ref bs (+ b 3)) (- px r))
+             (< (vector-ref bs (+ b 1)) (+ py r)) (> (vector-ref bs (+ b 4)) (- py r))
+             (let ((n (clip-slab c i zlo zhi)))
+               (and (> n 0)
+                    (push-out! c n px py r
+                               (vector-ref ns (* 3 i)) (vector-ref ns (+ (* 3 i) 1))
+                               (vector-ref ns (+ (* 3 i) 2))))))))
 
     ;; --- rays ---------------------------------------------------------------
 
     ;; The first hit of the segment from (ox oy oz) along (dx dy dz), for t
     ;; in [0, 1], against triangles facing either way; returns t or #f.
     (define (collide-ray c ox oy oz dx dy dz)
-      (let ((best #f) (vs (verts c)))
-        (for-each-near c (min ox (+ ox dx)) (min oy (+ oy dy)) (max ox (+ ox dx)) (max oy (+ oy dy))
-          (lambda (i)
-            (let* ((b (* 9 i))
-                   (ax (vector-ref vs b)) (ay (vector-ref vs (+ b 1))) (az (vector-ref vs (+ b 2)))
-                   (e1x (- (vector-ref vs (+ b 3)) ax)) (e1y (- (vector-ref vs (+ b 4)) ay)) (e1z (- (vector-ref vs (+ b 5)) az))
-                   (e2x (- (vector-ref vs (+ b 6)) ax)) (e2y (- (vector-ref vs (+ b 7)) ay)) (e2z (- (vector-ref vs (+ b 8)) az))
-                   (px (- (* dy e2z) (* dz e2y))) (py (- (* dz e2x) (* dx e2z))) (pz (- (* dx e2y) (* dy e2x)))
-                   (det (+ (* e1x px) (* e1y py) (* e1z pz))))
-              (when (> (abs det) 1e-12)
-                (let* ((inv (/ 1.0 det))
-                       (tx (- ox ax)) (ty (- oy ay)) (tz (- oz az))
-                       (u (* inv (+ (* tx px) (* ty py) (* tz pz)))))
-                  (when (and (>= u 0.0) (<= u 1.0))
+      (let ((n (gather! c (min ox (+ ox dx)) (min oy (+ oy dy)) (max ox (+ ox dx)) (max oy (+ oy dy))))
+            (out (vector-ref c 19)))
+        (let loop ((j 0) (best #f))
+          (if (>= j n)
+              best
+              (let ((t (ray-hit c (vector-ref out j) ox oy oz dx dy dz)))
+                (loop (+ j 1) (if (and t (or (not best) (< t best))) t best)))))))
+
+    ;; Moller-Trumbore: t in [0, 1] where the segment meets triangle i, or #f.
+    (define (ray-hit c i ox oy oz dx dy dz)
+      (let* ((vs (verts c)) (b (* 9 i))
+             (ax (vector-ref vs b)) (ay (vector-ref vs (+ b 1))) (az (vector-ref vs (+ b 2)))
+             (e1x (- (vector-ref vs (+ b 3)) ax)) (e1y (- (vector-ref vs (+ b 4)) ay)) (e1z (- (vector-ref vs (+ b 5)) az))
+             (e2x (- (vector-ref vs (+ b 6)) ax)) (e2y (- (vector-ref vs (+ b 7)) ay)) (e2z (- (vector-ref vs (+ b 8)) az))
+             (px (- (* dy e2z) (* dz e2y))) (py (- (* dz e2x) (* dx e2z))) (pz (- (* dx e2y) (* dy e2x)))
+             (det (+ (* e1x px) (* e1y py) (* e1z pz))))
+        (and (> (abs det) 1e-12)
+             (let* ((inv (/ 1.0 det))
+                    (tx (- ox ax)) (ty (- oy ay)) (tz (- oz az))
+                    (u (* inv (+ (* tx px) (* ty py) (* tz pz)))))
+               (and (>= u 0.0) (<= u 1.0)
                     (let* ((qx (- (* ty e1z) (* tz e1y))) (qy (- (* tz e1x) (* tx e1z))) (qz (- (* tx e1y) (* ty e1x)))
                            (v (* inv (+ (* dx qx) (* dy qy) (* dz qz)))))
-                      (when (and (>= v 0.0) (<= (+ u v) 1.0))
-                        (let ((t (* inv (+ (* e2x qx) (* e2y qy) (* e2z qz)))))
-                          (when (and (>= t 0.0) (<= t 1.0) (or (not best) (< t best)))
-                            (set! best t)))))))))))
-        best))))
+                      (and (>= v 0.0) (<= (+ u v) 1.0)
+                           (let ((t (* inv (+ (* e2x qx) (* e2y qy) (* e2z qz)))))
+                             (and (>= t 0.0) (<= t 1.0) t)))))))))))
