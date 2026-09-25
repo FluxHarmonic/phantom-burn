@@ -12,7 +12,7 @@
   (emergency 0 1.0 1.0 0.6235 0.102 #f)
   (screens 1 1.0 0.302 0.949 0.851 #f)
   (city 2 1.0 1.0 0.349 0.851 #f))
- (ambient 0.2 0.14 0.34)
+ (ambient 0.18 0.18 0.18)
  (fixtures
   )
  (views
