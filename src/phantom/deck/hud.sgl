@@ -375,10 +375,7 @@
                  (ok? (list-ref r 3)) (yy (+ y (* k (+ 14 (* 11 i))))))
             (color! (cond ((not ok?) C-TEXT-DIM) ((= i sel) C-SELECTED) (else C-TEXT)))
             (draw-text (string-append (if (= i sel) "> " "  ") (if cmd (name cmd) "-")) x yy k)
-            (draw-text id (+ x (* k 6 15)) yy k)
-            (when (and (= i sel) (not ok?))
-              (color! C-ICE)
-              (draw-text (string-append "  NEEDS " (name (list-ref r 4))) x (+ yy (* 8 k)) k)))
+            (draw-text id (+ x (* k 6 15)) yy k))
           (loop (cdr rs) (+ i 1))))
       ;; the command's progress and result
       (let ((yy (+ y (* k 200))))
@@ -391,7 +388,13 @@
            (draw-text (string-append "OK  " (name (caddr status)) " " (name (cadr status))) x yy k))
           ((denied) (color! C-ICE)
            (draw-text (string-append "DENIED  " (name (cadr status))) x yy k))
-          (else #f))))
+          ;; idle on a row the tier cannot run: the tier it needs
+          (else
+           (when (< sel (length rows))
+             (let ((r (list-ref rows sel)))
+               (unless (list-ref r 3)
+                 (color! C-ICE)
+                 (draw-text (string-append "NEEDS " (name (list-ref r 4))) x yy k))))))))
 
     ;; a camera's view fan: ICE dots every 2 frame pixels inside its cone
     (define (fan! d ox oy k)
