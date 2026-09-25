@@ -5,6 +5,10 @@
 //                             [--scale N] [--port N] [--cdp N] [--wait MS]
 //                             [--console FILE] [--requests FILE] [--eval JS]
 //
+// --url BASE uses a server that is already running (BASE ends in /, e.g.
+// scripts/check-site.mjs's serve-site on a staged tree) instead of serving
+// BUILD itself; the page opened is BASE?QUERY.
+//
 // --eval JS runs in the page once the game is ready, before the wait (e.g.
 // clicking the lab panel's buttons: a behavioural check of the page).
 //
@@ -26,7 +30,7 @@ import { spawn } from "node:child_process";
 
 const args = process.argv.slice(2);
 const opt = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : dflt; };
-const VALUED = ["--query", "--scale", "--port", "--cdp", "--wait", "--console", "--requests", "--eval"];
+const VALUED = ["--query", "--scale", "--port", "--cdp", "--wait", "--console", "--requests", "--eval", "--url"];
 const positional = args.filter((a, i) => !a.startsWith("--") && !(i > 0 && VALUED.includes(args[i - 1])));
 const ROOT = path.resolve(positional[0] || "build/web");
 const OUT = positional[1] || "/tmp/phantom-shot.png";
@@ -36,7 +40,8 @@ const PORT = parseInt(opt("--port", "8491"), 10);
 const CDP = parseInt(opt("--cdp", "9491"), 10);
 const W = 480, H = 270;
 
-if (!fs.existsSync(path.join(ROOT, "index.html"))) { console.log(`SETUP-FAILED: ${ROOT}/index.html missing; build --config web first`); process.exit(2); }
+const URL_BASE = opt("--url");
+if (!URL_BASE && !fs.existsSync(path.join(ROOT, "index.html"))) { console.log(`SETUP-FAILED: ${ROOT}/index.html missing; build --config web first`); process.exit(2); }
 
 const TYPES = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".wasm": "application/wasm", ".json": "application/json",
   ".css": "text/css", ".png": "image/png", ".b64": "text/plain", ".sgm": "application/octet-stream" };
@@ -54,7 +59,7 @@ const server = http.createServer((req, res) => {
     res.end(buf);
   });
 });
-await new Promise((r) => server.listen(PORT, "127.0.0.1", r));
+if (!URL_BASE) await new Promise((r) => server.listen(PORT, "127.0.0.1", r));
 
 const udd = fs.mkdtempSync("/tmp/phantom-shot-chrome-");
 const chrome = spawn("google-chrome", [
@@ -122,7 +127,7 @@ let ready = null;
 for (let attempt = 0; attempt < 3 && !ready; attempt++) {
   lines.length = 0;
   const before = requests.length;
-  await send("Page.navigate", { url: `http://127.0.0.1:${PORT}/index.html?${QUERY}` });
+  await send("Page.navigate", { url: URL_BASE ? `${URL_BASE}?${QUERY}` : `http://127.0.0.1:${PORT}/index.html?${QUERY}` });
   ready = await waitLine(/phantom-burn: ready/, 60000);
   const assetsServed = requests.slice(before).some((r) => r.includes("/assets/stand-in/") || r.includes(".b64"));
   if (!ready && !assetsServed && lines.some((l) => l.includes("Failed to fetch"))) {

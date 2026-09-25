@@ -78,6 +78,7 @@
     (define *hud-age* 1.0)
     (define *draws* 0)
     (define *ticks* 0)
+    (define *a-tick0* 0) (define *n-tick0* 0) (define *a-rest0* 0)
 
     ;; The trace (?trace / --trace): every WINDOW frames one console line
     ;; with that window's means, for scripts and the phone numbers.
@@ -87,6 +88,10 @@
     (define *trace* #f)
     (define *w-frames* 0) (define *w-frame* 0.0) (define *w-cpu* 0.0) (define *w-cpu-max* 0.0)
     (define *w-world* 0.0) (define *w-post* 0.0) (define *w-alloc0* #f) (define *stats-cost* 0)
+    ;; the window's allocations split: in the walker's ticks, and in the rest
+    ;; of the frame (input, render, HUD), with the ticks counted
+    (define *w-ticks* 0) (define *w-tick-alloc* 0) (define *w-rest-alloc* 0)
+    (define (alloc-mark) (if *trace* (allocations) 0))
     ;; auto-walk (?auto / --auto): forward and turning, so a measurement
     ;; includes the walker's collision work
     (define *auto* #f)
@@ -129,10 +134,14 @@
                       " post-ms " (fixed2 (/ *w-post* n))
                       " draws " (number->string (vector-ref (gfx-frame-stats) 0))
                       " alloc-per-frame " (number->string (exact (round (/ alloc n))))
+                      " ticks-per-frame " (fixed2 (/ *w-ticks* n))
+                      " alloc-per-tick " (if (> *w-ticks* 0) (number->string (exact (round (/ *w-tick-alloc* *w-ticks*)))) "-")
+                      " alloc-rest-per-frame " (number->string (exact (round (/ *w-rest-alloc* n))))
                       " dither " (if (render-dither?) "on" "off")))
             (newline))
           (set! *w-frames* 0) (set! *w-frame* 0.0) (set! *w-cpu* 0.0) (set! *w-cpu-max* 0.0)
-          (set! *w-world* 0.0) (set! *w-post* 0.0))))
+          (set! *w-world* 0.0) (set! *w-post* 0.0)
+          (set! *w-ticks* 0) (set! *w-tick-alloc* 0) (set! *w-rest-alloc* 0))))
 
     (define (fixed2 x)
       (let* ((t (exact (round (* (abs x) 100))))
@@ -360,6 +369,8 @@
                            (list-ref v 4) (list-ref v 5) 0.0 (list-ref v 6)))
             (begin
               (set! *acc* (+ *acc* dt))
+              (set! *a-tick0* (alloc-mark))
+              (set! *n-tick0* *ticks*)
               (let loop ()
                 (when (>= *acc* TICK)
                   (set! *prev* *walker*)
@@ -371,6 +382,9 @@
                   (set! *ticks* (+ *ticks* 1))
                   (set! *acc* (- *acc* TICK))
                   (loop)))
+              (when *trace*
+                (set! *w-tick-alloc* (+ *w-tick-alloc* (- (alloc-mark) *a-tick0* *stats-cost*)))
+                (set! *w-ticks* (+ *w-ticks* (- *ticks* *n-tick0*))))
               (let ((a (/ *acc* TICK)) (p *prev*) (c *walker*))
                 (camera-set! *cam*
                              (lerp (walker-eye-x p) (walker-eye-x c) a)
@@ -381,6 +395,7 @@
                              (lerp (walker-roll p) (walker-roll c) a)
                              FOV))))
         (set! *frame-ms* (+ (* 0.9 *frame-ms*) (* 0.1 1000.0 dt)))
+        (set! *a-rest0* (alloc-mark))
         (when *play* ((vector-ref *play* 2) (/ *acc* TICK) *cam*))
         (begin-frame)
         (clear-screen 0.0 0.0 0.0)
@@ -395,6 +410,8 @@
               (refresh-hud! k))
             (draw-hud! k)))
         (end-frame)
+        (when *trace*
+          (set! *w-rest-alloc* (+ *w-rest-alloc* (- (alloc-mark) *a-rest0* *stats-cost*))))
         (let ((spent (/ (* 1000.0 (- (current-jiffy) t0)) (jiffies-per-second))))
           (set! *cpu-ms* (+ (* 0.9 *cpu-ms*) (* 0.1 spent)))
           (trace-frame! dt spent))))

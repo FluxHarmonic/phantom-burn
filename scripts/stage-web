@@ -1,0 +1,53 @@
+#!/bin/sh
+# Stage phantomburn.net (a private preview): the placeholder root from site/,
+# and the game under an unguessable path.
+#
+#   PHANTOM_WEB_DIR=build/remote-web-<sha> scripts/stage-web build/site
+#
+# The tree:
+#   /                 site/index.html: the title, and no link to the game
+#   /404.html         a real 404 for any missing path (without it Pages answers
+#                     a missing path with the root page and a 200:
+#                     topics/cloudflare-pages-serves-index-for-a-missing-path)
+#   /robots.txt       disallows everything; _headers says noindex everywhere
+#   /<slug>/          the game's web build (page, wasm, bridges, assets/)
+#
+# THE SLUG IS NOT IN THE REPO. It is read from $PHANTOM_SITE_SLUG, else from
+# ~/.config/phantomburn/slug (mode 600), and must be `p-` and 10 base32
+# characters. Nothing this script writes into the tree names it outside its
+# own path; scripts/check-site.mjs refuses a tree whose public files do.
+#
+# PHANTOM_WEB_DIR: the game build to stage (default build/web; a runner build
+# is build/remote-web-<sha>, which carries BUILD-SHA). Writes DIR.manifest
+# (scripts/tree-manifest, with a header naming HEAD and the build's commit).
+# Refuses a DIR that exists: remove it first.
+set -eu
+cd "$(dirname "$0")/.." || exit 1
+DIR="${1:?usage: stage-web DIR}"
+DIR="${DIR%/}"
+WEB="${PHANTOM_WEB_DIR:-build/web}"
+SLUG="${PHANTOM_SITE_SLUG:-$(cat "$HOME/.config/phantomburn/slug" 2>/dev/null || true)}"
+say() { echo "stage-web: $*" >&2; }
+printf '%s' "$SLUG" | grep -Eqx 'p-[a-z2-7]{10}' || { say "REFUSED: no slug (PHANTOM_SITE_SLUG or ~/.config/phantomburn/slug, p- and 10 base32 characters)"; exit 1; }
+[ ! -e "$DIR" ] || { say "REFUSED: $DIR exists; remove it to restage"; exit 1; }
+for f in index.html phantom-burn.wasm assets; do
+  [ -e "$WEB/$f" ] || { say "REFUSED: $WEB/$f missing (build the web config, or point PHANTOM_WEB_DIR at a runner build)"; exit 1; }
+done
+[ -f "$WEB/assets/floors/14-slice/floor.sexp" ] || { say "REFUSED: $WEB has no compiled floor 14"; exit 1; }
+for f in index.html 404.html robots.txt _headers; do [ -f "site/$f" ] || { say "REFUSED: site/$f missing"; exit 1; }; done
+
+mkdir -p "$DIR/$SLUG"
+cp site/index.html site/404.html site/robots.txt site/_headers "$DIR/"
+cp "$WEB/index.html" "$WEB/phantom-burn.wasm" "$DIR/$SLUG/"
+for f in "$WEB"/sigil-wasm-bridges.*; do [ -f "$f" ] && cp "$f" "$DIR/$SLUG/"; done
+cp -r "$WEB/assets" "$DIR/$SLUG/assets"
+
+BUILT="local build/web"
+[ -f "$WEB/BUILD-SHA" ] && BUILT="$(cat "$WEB/BUILD-SHA") (runner build)"
+{
+  echo "# head $(git rev-parse HEAD)"
+  echo "# built $BUILT"
+  echo "# wasm $(sha256sum "$WEB/phantom-burn.wasm" | cut -c1-16)"
+  scripts/tree-manifest "$DIR"
+} > "$DIR.manifest"
+say "staged $(grep -vc '^#' "$DIR.manifest") files ($(du -sh "$DIR" | cut -f1)) to $DIR; the game at /<slug>/; manifest $DIR.manifest"

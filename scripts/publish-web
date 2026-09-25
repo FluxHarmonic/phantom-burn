@@ -1,0 +1,126 @@
+#!/bin/sh
+# Publish phantomburn.net to Cloudflare Pages (project phantomburn): exactly
+# the tree scripts/check-site.mjs checked, or nothing. After Harkfell's
+# scripts/publish-web, without R2 and Functions (the wasm is ~10.5 MB, under
+# Pages' 25 MiB per-file cap, so it is a plain file).
+#
+#   scripts/publish-web DIR "<one line>" --preview    the preview branch only
+#                                                     (a pages.dev URL; public
+#                                                     but never phantomburn.net)
+#   scripts/publish-web DIR "<one line>"              preview, checked live, then
+#                                                     production (branch master)
+#   scripts/publish-web DIR --dry-run                 every check, nothing leaves
+#
+# The path: scripts/build-remote; PHANTOM_WEB_DIR=build/remote-web-<sha>
+# scripts/stage-web DIR; node scripts/check-site.mjs DIR; then this. It
+# refuses unless, NOW: DIR still hashes to DIR.manifest; DIR.verified names
+# that manifest's sha256, the gate files it names still hash to what they
+# were when the check started, and the check ran at HEAD on a clean checkout;
+# the tree was staged at HEAD; the working tree has no tracked changes.
+#
+# Then the tree is COPIED into a deploy directory this script owns (an empty
+# temp dir, no wrangler config anywhere above it: wrangler 4 reads and edits
+# the config it finds in its cwd), checked again against the manifest, and
+# `wrangler pages deploy` runs from there. Without --preview the same copy
+# goes to the preview branch first; scripts/verify-live.mjs checks its URL;
+# production is deployed only if that is green, and then checked the same way.
+#
+# Needs wrangler on PATH, CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (the
+# one token scripts/cloudflare-setup names), and the project that
+# `scripts/cloudflare-setup --create` makes. Never touches DNS or the
+# project's settings.
+set -eu
+cd "$(dirname "$0")/.." || exit 1
+# Credentials: sourced from $PHANTOM_ENV_FILE (default ~/Ops/.env-phantomburn,
+# David's; this script only sources it and never prints it). ONE token covers
+# setup and publish: Pages Edit on the account, DNS Edit and Zone Read on
+# phantomburn.net.
+ENV_FILE="${PHANTOM_ENV_FILE:-$HOME/Ops/.env-phantomburn}"
+if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
+
+say() { echo "publish-web: $*" >&2; }
+PROJECT="${PHANTOM_PAGES_PROJECT:-phantomburn}"
+
+DIR=""; MESSAGE=""; DRY=0; ONLY_PREVIEW=0
+for a in "$@"; do
+  case "$a" in
+    --dry-run) DRY=1 ;;
+    --preview) ONLY_PREVIEW=1 ;;
+    -*) say "unknown flag $a"; exit 2 ;;
+    *) if [ -z "$DIR" ]; then DIR="$a"; elif [ -z "$MESSAGE" ]; then MESSAGE="$a"; else say "too many arguments"; exit 2; fi ;;
+  esac
+done
+[ -n "$DIR" ] || { say "give the staged directory"; exit 2; }
+DIR="${DIR%/}"
+[ -n "$MESSAGE" ] || [ "$DRY" = 1 ] || { say "give the deploy a one-line message"; exit 2; }
+for f in "$DIR/index.html" "$DIR.manifest" "$DIR.verified"; do
+  [ -f "$f" ] || { say "REFUSED: $f missing (stage-web, then check-site.mjs, first)"; exit 1; }
+done
+
+WANT="$(grep -v '^#' "$DIR.manifest")"
+same() {   # dir label
+  got="$(scripts/tree-manifest "$1")" || { say "REFUSED: tree-manifest refused $2"; exit 1; }
+  [ "$WANT" = "$got" ] || { say "REFUSED: $2 no longer matches $DIR.manifest; restage and recheck"; exit 1; }
+}
+same "$DIR" "$DIR"
+MSHA="$(sha256sum "$DIR.manifest" | cut -d' ' -f1)"
+grep -qx "manifest-sha256 $MSHA" "$DIR.verified" || { say "REFUSED: $DIR.verified is not for this manifest; rerun check-site.mjs"; exit 1; }
+NGATE=0
+while read -r kw h g; do
+  [ "$kw" = gate ] || continue
+  NGATE=$((NGATE+1))
+  [ -f "$g" ] && [ "$(sha256sum "$g" | cut -d' ' -f1)" = "$h" ] || { say "REFUSED: $g is not the file that checked $DIR; rerun check-site.mjs"; exit 1; }
+done < "$DIR.verified"
+[ "$NGATE" -ge 3 ] || { say "REFUSED: $DIR.verified names $NGATE gate files, not 3"; exit 1; }
+HEAD_FULL="$(git rev-parse HEAD)"
+grep -qx "gate-head $HEAD_FULL" "$DIR.verified" || { say "REFUSED: $DIR was checked at another commit; rerun check-site.mjs at HEAD"; exit 1; }
+grep -qx "gate-clean yes" "$DIR.verified" || { say "REFUSED: $DIR was checked from a checkout with tracked changes"; exit 1; }
+[ "$(sed -n 's/^# head //p' "$DIR.manifest")" = "$HEAD_FULL" ] || { say "REFUSED: $DIR was staged at another commit; restage and recheck"; exit 1; }
+[ -z "$(git status --porcelain --untracked-files=no)" ] || { say "REFUSED: the working tree has tracked changes"; exit 1; }
+say "$DIR matches its manifest ($(echo "$MSHA" | cut -c1-16)), checked at HEAD $(git rev-parse --short=12 HEAD) on a clean checkout; game $(sed -n 's/^# built //p' "$DIR.manifest")"
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/phantomburn-publish-XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+D="$WORK/deploy"
+mkdir -p "$D/tree"
+cp -a "$DIR/." "$D/tree/"
+same "$D/tree" "the deploy directory's copy"
+p="$WORK"
+while :; do
+  [ ! -e "$p/wrangler.json" ] && [ ! -e "$p/wrangler.jsonc" ] && [ ! -e "$p/wrangler.toml" ] && [ ! -e "$p/.wrangler/deploy/config.json" ] \
+    || { say "REFUSED: $p holds a wrangler config or deploy redirect"; exit 1; }
+  [ "$p" = / ] && break
+  p="$(dirname "$p")"
+done
+BIG="$(cd "$D/tree" && find . -type f -size +26214400c)"
+[ -z "$BIG" ] || { say "REFUSED: over Pages' 25 MiB cap: $BIG"; exit 1; }
+NFILES="$(find "$D/tree" -type f | wc -l)"
+
+if [ "$DRY" = 1 ]; then
+  say "dry run: would deploy $NFILES files ($(du -sh "$D/tree" | cut -f1)) from $D to Pages project $PROJECT: branch preview, verify-live on its URL$([ "$ONLY_PREVIEW" = 1 ] || echo ", then branch master and verify-live again")"
+  say "dry run: nothing left the box"
+  exit 0
+fi
+command -v wrangler > /dev/null || { say "wrangler not on PATH"; exit 1; }
+
+deploy() {   # branch -> the deployment URL on stdout
+  same "$D/tree" "the deploy directory (just before deploying to $1)"
+  set +e
+  (cd "$D" && wrangler pages deploy tree --project-name "$PROJECT" --branch "$1" \
+     --commit-hash "$HEAD_FULL" --commit-message "$MESSAGE") > "$WORK/deploy-$1.log" 2>&1
+  drc=$?
+  set -e
+  cat "$WORK/deploy-$1.log" >&2
+  [ "$drc" = 0 ] || { say "wrangler pages deploy to $1 failed (rc=$drc)"; exit 1; }
+  url="$(grep -o 'https://[a-z0-9.-]*\.pages\.dev' "$WORK/deploy-$1.log" | tail -1)"
+  [ -n "$url" ] || { say "the deploy to $1 printed no pages.dev URL; check it by hand: node scripts/verify-live.mjs <url> $DIR"; exit 1; }
+  echo "$url"
+}
+
+URL="$(deploy preview)"
+say "preview deployed to $URL; checking it against $DIR.manifest"
+node scripts/verify-live.mjs "$URL" "$DIR" || { say "the preview FAILED verify-live; production NOT deployed"; exit 1; }
+if [ "$ONLY_PREVIEW" = 1 ]; then say "preview only: $URL (verify-live green); the game is at $URL/<slug>/"; exit 0; fi
+URL="$(deploy master)"
+say "production deployed to $URL; checking it against $DIR.manifest"
+node scripts/verify-live.mjs "$URL" "$DIR"
