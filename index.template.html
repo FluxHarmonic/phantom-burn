@@ -109,6 +109,9 @@
   //     half a look stick, each ("move"|"lookstick", "x,y") in -1..1; the C
   //     button is ("press", "c"); the LAB button (top left) opens the style
   //     lab's keys as buttons, each ("press", KEY), for the phone.
+  //   window.phantomDispatch("replay", SCRIPT): gate 5's driver hands the game
+  //     a replay script ((phantom floor replay)'s text form); the game prints
+  //     "phantom-burn: replay LINE" per tick, then "phantom-burn: replay-done N".
   (function () {
     "use strict";
     var params = new URLSearchParams(location.search);
@@ -251,6 +254,13 @@
       var lastTouch = 0;
       lab.addEventListener("touchstart", function (e) { lastTouch = Date.now(); labTap(e); }, { passive: false });
       lab.addEventListener("click", function (e) { if (Date.now() - lastTouch > 800) labTap(e); });
+      // gate 5 (determinism): a driver hands the game a replay script. An
+      // explicit allowlist: only these event types can be sent this way.
+      var DRIVER_EVENTS = ["replay"];
+      window.phantomDispatch = function (type, payload) {
+        if (DRIVER_EVENTS.indexOf(type) < 0) throw new Error("phantomDispatch: " + type + " is not a driver event");
+        app.dispatch(type, String(payload));
+      };
       var crouch = document.getElementById("crouch");
       crouch.addEventListener("touchstart", function (e) {
         crouch.classList.add("down"); app.dispatch("press", "c"); e.preventDefault();
