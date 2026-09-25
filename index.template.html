@@ -44,11 +44,17 @@
   // wasm, forwards keydown/keyup and runs the frame loop. This page adds:
   //   the query, sent to the game as ("params", QUERY) before anything loads:
   //     ?floor=NAME   the floor under assets/NAME/ (default stand-in)
-  //     ?view=K       start at the floor's view K (0 arrival, 1 overlook, 2 office)
+  //     ?view=K       start at the floor's view K (0 arrival, 1 overlook, 2 office;
+  //                   the dark rooms: 3 lobby-dark, 4 office-night, 5 corridor-dark)
+  //     ?night=N      the dark rooms' ambient floor (1 default; , . on the keyboard)
+  //     ?lift=0       no black-level lift (G on the keyboard)
   //     ?shot=K       hold the camera at view K (floor shots)
   //     ?hud=0|1|2    the readout: off, stats, stats and keys
   //     ?dither=off   ?spread=S  ?bayer=4|8  ?palette=embers|ramped  ?fog=M
   //     ?snap=1 ?affine=1   PS1-style vertex snapping and affine textures (off by default)
+  //     ?trace        a console stats line every 120 frames, each also sent to the
+  //                   host (report?LINE, the host's log), so the phone's numbers
+  //                   need no transcribing; ?auto walks by itself
   //     ?card         the test card (a sweep of the colour cube) through the post pass
   //     ?touch        show the phone controls without a touch screen
   //   the collision (assets/NAME/floor14.collide.b64) as ("collide", BASE64);
@@ -65,6 +71,16 @@
       document.addEventListener("sigil-web-app-ready", function (e) { fn(e.detail); }, { once: true });
     }
     if (params.has("touch")) document.body.classList.add("touch");
+    if (params.has("trace")) {
+      var log = console.log.bind(console);
+      console.log = function () {
+        var line = Array.prototype.join.call(arguments, " ");
+        if (/^phantom-burn: (stats|pixel|ready)/.test(line)) {
+          fetch("report?" + encodeURIComponent(line + " | " + navigator.userAgent)).catch(function () {});
+        }
+        log.apply(null, arguments);
+      };
+    }
     withApp(function (app) {
       var canvas = document.getElementById("stage");
       var status = document.getElementById("status");
@@ -72,6 +88,8 @@
       var booted = app.ready && app.ready.then ? app.ready : Promise.resolve();
       booted.then(function () {
         app.dispatch("params", location.search.replace(/^\?/, ""));
+        app.dispatch("dpr", String(window.devicePixelRatio || 1));
+        window.addEventListener("resize", function () { app.dispatch("dpr", String(window.devicePixelRatio || 1)); });
         return fetch("assets/" + floor + "/floor14.collide.b64").then(function (r) {
         if (!r.ok) throw new Error("no floor " + floor + " (" + r.status + ")");
         return r.text();

@@ -2,9 +2,12 @@
 # gate-dither [native|web|both] [--expect-wrong spread|palette]
 #
 # The post pass reproduces Crash's ordered dither (D27) bit for bit. For each
-# of the floor's three views, on each target:
+# of the floor's three views and one dark room (view 4, office-night), on
+# each target:
 #   raw   the frame with the dither off (--dither off)
-#   dith  the same frame with the dither on (Bayer 4x4, spread 40, embers)
+#   dith  the same frame with the dither on (Bayer 4x4, embers), once per
+#         spread in $SPREADS (default "12 40": David's desktop pick and his
+#         phone pick, 2026-09-25)
 # and a fourth frame, the test card (--card / ?card=1: a sweep of the colour
 # cube; the views never reach the palette's warm near-blacks, so without it
 # a regression in the ember ramp would pass)
@@ -15,7 +18,7 @@
 # render, not a blank or a clear), dith differs from raw in at least a
 # quarter of its pixels (the pass ran), and dith uses only palette colours.
 #
-# --expect-wrong spread   want is made at spread 48 instead: must go RED
+# --expect-wrong spread   want is made at each spread + 8 instead: must go RED
 # --expect-wrong palette  want is made against the 47-colour palette: RED
 # (the assertion layer's sabotage; the product layer is a plant in the
 # shader, run by hand and logged in the task's Session Log).
@@ -29,49 +32,55 @@ TARGETS="${1:-both}"
 [ "$TARGETS" = both ] && TARGETS="native web"
 WRONG=""
 [ "${2:-}" = --expect-wrong ] && WRONG="${3:?--expect-wrong needs spread or palette}"
-SPREAD=40; PAL=scripts/art/palette-embers.png
+SPREADS="${SPREADS:-12 40}"; SKEW=0; PAL=scripts/art/palette-embers.png
 case "$WRONG" in
-  spread) SPREAD=48 ;;
+  spread) SKEW=8 ;;
   palette) PAL=scripts/art/palette-ramped.png ;;
   "") ;;
   *) echo "SETUP-FAILED: --expect-wrong $WRONG"; exit 2 ;;
 esac
 OUT="$(mktemp -d /tmp/phantom-gate-dither.XXXXXX)"
-echo "gate-dither: targets $TARGETS; want at spread $SPREAD against $PAL; files in $OUT"
+echo "gate-dither: targets $TARGETS; spreads $SPREADS (want made at +$SKEW) against $PAL; files in $OUT"
 PAL_HEX="$(convert scripts/art/palette-embers.png -unique-colors txt:- | sed -n 's/.*\(#[0-9A-F]\{6\}\).*/\1/p' | sort -u)"
 pass=0; fail=0
 colours() { convert "$1" -unique-colors txt:- | sed -n 's/.*\(#[0-9A-F]\{6\}\).*/\1/p' | sort -u; }
 differ() { compare -metric AE "$1" "$2" null: 2>&1 || true; }
 
 for t in $TARGETS; do
-  for v in 0 1 2 card; do
+  for v in 0 1 2 4 card; do
     if [ "$v" = card ]; then NA="--card"; WQ="card=1"; else NA="--shot $v"; WQ="shot=$v"; fi
-    raw="$OUT/$t-$v-raw.png"; dith="$OUT/$t-$v-dith.png"; want="$OUT/$t-$v-want.png"
+    raw="$OUT/$t-$v-raw.png"
     if [ "$t" = native ]; then
       scripts/shot-native "$raw" $NA --hud 0 --dither off > "$OUT/$t-$v-raw.log" 2>&1 \
         || { cat "$OUT/$t-$v-raw.log"; echo "SETUP-FAILED: native shot $v raw"; exit 2; }
-      scripts/shot-native "$dith" $NA --hud 0 --dither on --spread 40 --bayer 4 --palette embers > "$OUT/$t-$v-dith.log" 2>&1 \
-        || { cat "$OUT/$t-$v-dith.log"; echo "SETUP-FAILED: native shot $v dith"; exit 2; }
     else
       node scripts/shot-web.mjs build/web "$raw" --query "$WQ&hud=0&dither=off" > "$OUT/$t-$v-raw.log" 2>&1 \
         || { cat "$OUT/$t-$v-raw.log"; echo "SETUP-FAILED: web shot $v raw"; exit 2; }
-      node scripts/shot-web.mjs build/web "$dith" --query "$WQ&hud=0&dither=on&spread=40&bayer=4&palette=embers" > "$OUT/$t-$v-dith.log" 2>&1 \
-        || { cat "$OUT/$t-$v-dith.log"; echo "SETUP-FAILED: web shot $v dith"; exit 2; }
     fi
     nraw="$(colours "$raw" | wc -l)"
     [ "$nraw" -ge 64 ] || { echo "SETUP-FAILED: $t view $v raw has $nraw colours (not a rendered frame)"; exit 2; }
-    moved="$(differ "$raw" "$dith")"
-    [ "${moved%%.*}" -ge 32400 ] || { echo "SETUP-FAILED: $t view $v: the dither changed only $moved pixels"; exit 2; }
-    stray="$(colours "$dith" | while read -r c; do printf '%s\n' "$PAL_HEX" | grep -qx "$c" || echo "$c"; done | wc -l)"
-    scripts/art/bayer.sh "$raw" "$want" "$PAL" o4x4 "$SPREAD" > "$OUT/$t-$v-want.log" 2>&1 \
-      || { cat "$OUT/$t-$v-want.log"; echo "SETUP-FAILED: bayer.sh"; exit 2; }
-    bad="$(differ "$want" "$dith")"
-    if [ "$stray" -eq 0 ] && [ "${bad%%.*}" -eq 0 ]; then
-      pass=$((pass + 1)); echo "  ok   $t view $v: raw $nraw colours, dither moved $moved px, 0 px differ from bayer.sh"
-    else
-      fail=$((fail + 1)); echo "  FAIL $t view $v: $bad px differ from bayer.sh, $stray colours outside the palette"
-      convert "$want" "$dith" -compose difference -composite -threshold 0 "$OUT/$t-$v-diff.png" || true
-    fi
+    for sp in $SPREADS; do
+      dith="$OUT/$t-$v-s$sp-dith.png"; want="$OUT/$t-$v-s$sp-want.png"
+      if [ "$t" = native ]; then
+        scripts/shot-native "$dith" $NA --hud 0 --dither on --spread "$sp" --bayer 4 --palette embers > "$OUT/$t-$v-s$sp.log" 2>&1 \
+          || { cat "$OUT/$t-$v-s$sp.log"; echo "SETUP-FAILED: native shot $v spread $sp"; exit 2; }
+      else
+        node scripts/shot-web.mjs build/web "$dith" --query "$WQ&hud=0&dither=on&spread=$sp&bayer=4&palette=embers" > "$OUT/$t-$v-s$sp.log" 2>&1 \
+          || { cat "$OUT/$t-$v-s$sp.log"; echo "SETUP-FAILED: web shot $v spread $sp"; exit 2; }
+      fi
+      moved="$(differ "$raw" "$dith")"
+      [ "${moved%%.*}" -ge 32400 ] || { echo "SETUP-FAILED: $t view $v spread $sp: the dither changed only $moved pixels"; exit 2; }
+      stray="$(colours "$dith" | while read -r c; do printf '%s\n' "$PAL_HEX" | grep -qx "$c" || echo "$c"; done | wc -l)"
+      scripts/art/bayer.sh "$raw" "$want" "$PAL" o4x4 "$((sp + SKEW))" > "$OUT/$t-$v-s$sp-want.log" 2>&1 \
+        || { cat "$OUT/$t-$v-s$sp-want.log"; echo "SETUP-FAILED: bayer.sh"; exit 2; }
+      bad="$(differ "$want" "$dith")"
+      if [ "$stray" -eq 0 ] && [ "${bad%%.*}" -eq 0 ]; then
+        pass=$((pass + 1)); echo "  ok   $t view $v spread $sp: raw $nraw colours, dither moved $moved px, 0 px differ from bayer.sh"
+      else
+        fail=$((fail + 1)); echo "  FAIL $t view $v spread $sp: $bad px differ from bayer.sh, $stray colours outside the palette"
+        convert "$want" "$dith" -compose difference -composite -threshold 0 "$OUT/$t-$v-s$sp-diff.png" || true
+      fi
+    done
   done
 done
 if [ "$fail" -eq 0 ]; then echo "GREEN: $pass pass, 0 fail"; exit 0; fi

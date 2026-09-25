@@ -3,7 +3,10 @@
 ;;;   phantom-burn [--floor DIR] [--size WxH] [--frames N] [--seconds S] [--view K]
 ;;;                [--shot K] [--hud 0|1|2] [--dither on|off] [--spread S]
 ;;;                [--bayer 4|8] [--palette NAME] [--fog M] [--card]
-;;;                [--snap] [--affine]
+;;;                [--snap] [--affine] [--trace] [--auto] [--night N] [--no-lift]
+;;;
+;;; --trace prints a stats line every 120 frames (frame, CPU, world and post
+;;; pass CPU, draws, allocations per frame); --auto walks forward, turning.
 ;;;
 ;;; --floor names the floor's directory (default assets/stand-in, the G0
 ;;; export: floor14.sgm, city.sgm, the textures, floor14.collide). The
@@ -13,7 +16,8 @@
 ;;; world, through the same post pass (scripts/gate-dither's fourth frame).
 ;;; --frames and --seconds quit after that many frames or seconds of play.
 ;;; --view starts at one of the floor's views (0 arrival, 1 overlook,
-;;; 2 office); --shot holds the camera exactly there, for floor shots.
+;;; 2 office, then the dark rooms: 3 lobby-dark, 4 office-night, 5
+;;; corridor-dark); --shot holds the camera exactly there, for floor shots.
 ;;;
 ;;; Click to capture the mouse for looking (sigil-desktop 0.12's cursor
 ;;; capture); Escape gives it back, and quits when it is not captured.
@@ -66,7 +70,8 @@
 
     ;; The keys whose presses the game reads (style lab, crouch, views).
     (define PRESS-KEYS
-      (map string->symbol '("c" "p" "[" "]" "b" "n" "-" "=" "h" "v" "x" "7" "8" "9")))
+      (map string->symbol '("c" "p" "[" "]" "/" "b" "n" "-" "=" "h" "v" "x" "7" "8" "9"
+                            "j" "k" "l" "1" "2" "3" "4" "0" "," "." "g")))
 
     (define (pressed-keys)
       (let loop ((ks PRESS-KEYS) (acc '()))
@@ -87,6 +92,10 @@
         (when (member "--card" args) (render-card! #t))
         (when (member "--snap" args) (render-snap! 1.0))
         (when (member "--affine" args) (render-affine! #t))
+        (when (member "--trace" args) (game-set-trace! #t))
+        (let ((n (string->number (arg-value args "--night" "none")))) (when n (render-night! n)))
+        (when (member "--no-lift" args) (render-lift! #f))
+        (when (member "--auto" args) (game-set-auto! #t))
         (when s (render-spread! s))
         (when b (render-bayer! b))
         (when p (render-palette! (string->symbol p)))

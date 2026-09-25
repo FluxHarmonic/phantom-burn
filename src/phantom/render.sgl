@@ -29,6 +29,9 @@
           render-bayer render-bayer! render-palette render-palette!
           render-fog render-fog! render-card? render-card!
           render-snap render-snap! render-affine? render-affine!
+          render-spread-auto? render-spread-auto! render-set-dpr! render-pixel-css auto-spread
+          render-levels render-levels! render-night render-night!
+          render-lift? render-lift!
           render-world-ms render-post-ms
           make-camera camera-set!)
 
@@ -36,7 +39,7 @@
 
     (define VIEW-W 480)
     (define VIEW-H 270)
-    (define NLIGHTS 16)
+    (define NLIGHTS 24)
     ;; C-BG, the colour the distance fades to and the clear colour
     (define BG-R (/ 13.0 255.0))
     (define BG-G (/ 10.0 255.0))
@@ -49,10 +52,10 @@
       "uniform mat4 view_proj;
 uniform mat4 model;
 uniform vec4 eye;           // xyz camera, w fog distance
-uniform vec4 lights[16];    // xyz, radius (design coordinates)
-uniform vec4 light_rgb[16]; // rgb, circuit
+uniform vec4 lights[24];    // xyz, radius (design coordinates)
+uniform vec4 light_rgb[24]; // rgb, circuit (0 c1, 1 c2, 2 c3, 3 emergency; 4 and up: always lit)
 uniform vec4 levels;        // each circuit's level
-uniform vec4 ambient;
+uniform vec4 ambient;       // what reaches everywhere: the night's floor plus bounce from the lit circuits
 uniform vec4 retro;         // x: snap vertices to a grid of this many view pixels (0 off), y: 1 affine textures
 in vec3 position;
 in vec2 uv;
@@ -67,15 +70,23 @@ void main() {
   vec3 wp = (model * vec4(position, 1.0)).xyz;
   vec3 wn = mat3(model) * normal;
   vec3 lit = ambient.rgb;
-  for (int i = 0; i < 16; i++) {
+  // an emissive vertex within 0.9 m of a light belongs to that light's
+  // fixture (a ceiling panel, the exit sign, the lamp): it dims with its
+  // circuit (the stand-in carries no circuit per vertex; the compiled floor will)
+  float enear = 0.9;
+  float elevel = 1.0;
+  for (int i = 0; i < 24; i++) {
     vec3 d = lights[i].xyz - wp;
     float dist = length(d);
     float att = clamp(1.0 - dist / max(lights[i].w, 0.001), 0.0, 1.0);
     float ndl = max(dot(wn, d / max(dist, 0.001)), 0.0);
-    lit += light_rgb[i].rgb * (att * att * (0.3 + 0.7 * ndl)) * levels[int(light_rgb[i].a)];
+    int c = int(light_rgb[i].a + 0.5);
+    float level = c > 3 ? 1.0 : levels[c];
+    lit += light_rgb[i].rgb * (att * att * (0.3 + 0.7 * ndl)) * level;
+    if (dist < enear) { enear = dist; elevel = level; }
   }
-  // an emissive surface shows its hue at full strength, whatever the light
-  v_color = mix(color.rgb * lit, emission.rgb, emission.a);
+  // an emissive surface shows its hue at full strength while its fixture is on
+  v_color = mix(color.rgb * lit, emission.rgb, emission.a * elevel);
   v_uv = uv;
   v_fog = clamp(length(wp - eye.xyz) / eye.w, 0.0, 1.0);
   vec4 clip = view_proj * vec4(wp, 1.0);
@@ -90,6 +101,7 @@ void main() {
 
     (define WORLD-FRAGMENT
       "uniform vec4 fog_color;
+uniform vec4 lift;          // rgb the black level (C-BG), a 1 to lift
 uniform float alpha;
 uniform vec4 retro;
 uniform sampler2D tex;
@@ -101,7 +113,11 @@ out vec4 frag_color;
 void main() {
   vec2 uv = retro.y > 0.5 ? v_uvw.xy / v_uvw.z : v_uv;
   vec3 c = texture(tex, uv).rgb * v_color;
-  frag_color = vec4(mix(c, fog_color.rgb, v_fog * v_fog), alpha);
+  c = mix(c, fog_color.rgb, v_fog * v_fog);
+  // black maps to C-BG and the rest is scaled into what is left, so shading
+  // below the palette's darkest colour still reads (the dark rooms, D26)
+  if (lift.a > 0.5) c = lift.rgb + c * (vec3(1.0) - lift.rgb);
+  frag_color = vec4(c, alpha);
 }
 ")
 
@@ -118,7 +134,51 @@ void main() {
     (define *city* #f)
     (define *draws* '())      ; ((first count texture-or-#f glass?) ...)
 
+    ;; The circuits' levels (c1 office, c2 lobby/mezzanine/corridor, c3 FM
+    ;; office, the emergency exit light), and the ambient they imply: a
+    ;; night floor everywhere, plus bounce light in proportion to how much
+    ;; of c1 to c3 is lit. *night* scales the floor (the style lab's dark
+    ;; ramp knob: how much of a dark room still reads).
+    (define *levels* (vector 1.0 1.0 1.0 1.0))
+    (define *night* 1.0)
+    (define NIGHT '(0.045 0.032 0.085))
+    (define BOUNCE '(0.155 0.108 0.255))
+    (define (sync-light!)
+      (when *opaque*
+        (let* ((lit (/ (+ (vector-ref *levels* 0) (vector-ref *levels* 1) (vector-ref *levels* 2)) 3.0))
+               (amb (map (lambda (n b) (+ (* *night* n) (* lit b))) NIGHT BOUNCE)))
+          (both (lambda (p)
+                  (set-pipeline-uniform! p 'levels (vector->list *levels*))
+                  (set-pipeline-uniform! p 'ambient (append amb '(1.0))))))))
+    (define (render-levels) (vector->list *levels*))
+    (define (render-levels! ls)
+      (let loop ((ls ls) (i 0))
+        (when (and (pair? ls) (< i 4))
+          (vector-set! *levels* i (* 1.0 (car ls)))
+          (loop (cdr ls) (+ i 1))))
+      (sync-light!))
+    ;; The black-level lift: with it, the world fogs to black and black
+    ;; then maps to C-BG; without it, the world fogs to C-BG and anything
+    ;; darker than C-BG snaps to it in the dither.
+    (define *lift* #t)
+    (define (sync-lift!)
+      (when *opaque*
+        (both (lambda (p)
+                (set-pipeline-uniform! p 'fog_color (if *lift* '(0.0 0.0 0.0 1.0) (list BG-R BG-G BG-B 1.0)))
+                (set-pipeline-uniform! p 'lift (list BG-R BG-G BG-B (if *lift* 1.0 0.0)))))))
+    (define (render-lift?) *lift*)
+    (define (render-lift! on?) (set! *lift* on?) (sync-lift!))
+    (define (render-night) *night*)
+    (define (render-night! n) (set! *night* (max 0.0 (min 4.0 (* 1.0 n)))) (sync-light!))
+
     (define *dither* #t)
+    ;; The spread follows the size of one game pixel on the screen, in CSS
+    ;; pixels (device pixels per game pixel / devicePixelRatio; natively the
+    ;; ratio is taken as 1, sigil-desktop has no content scale): David found
+    ;; 40 right on his phone and 8 to 16 on a desktop, the same frame.
+    (define *spread-auto* #t)
+    (define *dpr* 1.0)
+    (define *pixel-css* 0.0)
     (define *spread* dither-spread-default)
     (define *bayer* dither-size-default)
     (define *palette* 'embers)
@@ -150,7 +210,20 @@ void main() {
     (define (render-dither?) *dither*)
     (define (render-dither! on?) (set! *dither* on?))
     (define (render-spread) *spread*)
-    (define (render-spread! s) (set! *spread* (max 0.0 (min 255.0 (* 1.0 s)))) (sync-post!))
+    (define (render-spread! s)
+      (set! *spread-auto* #f)
+      (set! *spread* (max 0.0 (min 64.0 (* 1.0 s))))
+      (sync-post!))
+    (define (render-spread-auto?) *spread-auto*)
+    (define (render-spread-auto! on?) (set! *spread-auto* on?) (set! *pixel-css* 0.0))
+    (define (render-set-dpr! d) (when (and (number? d) (> d 0)) (set! *dpr* (* 1.0 d))))
+    (define (render-pixel-css) *pixel-css*)
+    ;; 40 at 1.5 CSS px per game pixel or less (a phone), 12 at 4 or more (a
+    ;; desktop at 4x), straight between, to the nearest multiple of 4
+    (define (auto-spread css)
+      (let* ((t (max 0.0 (min 1.0 (/ (- css 1.5) 2.5))))
+             (s (+ 40.0 (* t -28.0))))
+        (* 4.0 (round (/ s 4.0)))))
     (define (render-bayer) *bayer*)
     (define (render-bayer! n) (set! *bayer* (if (= n 8) 8 4)) (sync-post!))
     (define (render-palette) *palette*)
@@ -222,13 +295,12 @@ void main() {
       (f32! *model* 9 -1.0) (f32! *model* 10 0.0)
       (both (lambda (p)
               (set-pipeline-uniform! p 'model *model*)
-              ;; the world ambient #21173D at 0.6, lifted a little so a dark room reads
-              (set-pipeline-uniform! p 'ambient '(0.2 0.14 0.34 1.0))
-              (set-pipeline-uniform! p 'fog_color (list BG-R BG-G BG-B 1.0))
-              (set-pipeline-uniform! p 'levels '(1.0 1.0 1.0 1.0))))
+              #t))
+      (sync-lift!)
+      (sync-light!)
       (sync-retro!)
       (set-pipeline-uniform! *opaque* 'alpha 1.0)
-      (set-pipeline-uniform! *glass* 'alpha 0.3))
+      (set-pipeline-uniform! *glass* 'alpha 0.18))
 
     (define (pad-lights ls n)
       (cond ((= n 0) '())
@@ -355,6 +427,16 @@ void main() {
     ;; fits, centred; returns the scale.
     (define (render-composite! w h)
       (let* ((k (max 1 (exact (floor (min (/ w VIEW-W) (/ h VIEW-H))))))
+             (css (/ k *dpr*))
+             (_ (when (and *spread-auto* (not (= css *pixel-css*)))
+                  (set! *pixel-css* css)
+                  (set! *spread* (auto-spread css))
+                  (sync-post!)
+                  (display (string-append "phantom-burn: pixel scale " (number->string k)
+                                          " dpr " (number->string *dpr*)
+                                          " css-px " (number->string css)
+                                          " spread " (number->string *spread*) " (auto)"))
+                  (newline)))
              (ox (exact (floor (/ (- w (* VIEW-W k)) 2))))
              (oy (exact (floor (/ (- h (* VIEW-H k)) 2)))))
         (draw-render-target (if (or *dither* *card*) *post* *view*) ox oy (* VIEW-W k) (* VIEW-H k))

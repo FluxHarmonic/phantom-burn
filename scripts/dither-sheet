@@ -1,0 +1,64 @@
+#!/bin/sh
+# dither-sheet OUTDIR
+#
+# The style lab's before/after sheets (D26, D27), from the native game's
+# shots of the floor's three views (arrival, overlook, office: the export's
+# cameras and lenses) beside the look test's Blender renders of the same
+# cameras:
+#   OUTDIR/p0-dither-before-after.png
+#     one row per view: Blender (Cycles, before the palette; cropped from
+#     look-6-sheet-before-palette.png), Blender + Bayer 4x4 (look-9/10/11),
+#     the game with the dither off, the game with the dither on
+#   OUTDIR/p0-dither-variants.png
+#     the arrival view through the post pass's knobs: spread 24, 40, 64;
+#     Bayer 8x8; the 47-colour palette (no warm near-blacks); the colour
+#     cube test card at the default settings
+# Every cell is the 480x270 frame at 2x, point-scaled. Needs SHOT_DISPLAY
+# (your own Xvfb) and build/dev, and the look test's pictures in LOOK
+# (default ~/Ops/attachments/stealth-game-design).
+set -eu
+cd "$(dirname "$0")/.."
+OUT="${1:?usage: dither-sheet OUTDIR}"
+LOOK="${LOOK:-$HOME/Ops/attachments/stealth-game-design}"
+mkdir -p "$OUT"
+T="$(mktemp -d /tmp/phantom-dither-sheet.XXXXXX)"
+trap 'rm -rf "$T"' EXIT
+FONT="-font DejaVu-Sans -pointsize 22 -fill #CCE6FF -background #0D0A1A"
+
+cell() {  # cell IN.png LABEL OUT.png: 480x270 at 2x, labelled underneath
+  convert "$1" -filter point -resize 960x540! $FONT -gravity center label:"$2" -append "$3"
+}
+
+set -- arrival 0 9 4+4 overlook 1 10 972+4 office 2 11 4+552
+rows=""
+while [ $# -gt 0 ]; do
+  name=$1; v=$2; look=$3; crop=$4; shift 4
+  scripts/shot-native "$T/$name-raw.png" --shot "$v" --hud 0 --dither off > /dev/null
+  scripts/shot-native "$T/$name-dith.png" --shot "$v" --hud 0 --dither on > /dev/null
+  convert "$LOOK/look-6-sheet-before-palette.png" -crop "960x540+${crop}" +repage -resize 480x270! "$T/$name-cycles.png"
+  convert "$LOOK/look-$look-bayer4-$name.png" -filter point -resize 480x270! "$T/$name-cycles-bayer.png"
+  cell "$T/$name-cycles.png" "$name: Blender (Cycles), before the palette" "$T/c1-$name.png"
+  cell "$T/$name-cycles-bayer.png" "$name: Blender + Bayer 4x4 (look test)" "$T/c2-$name.png"
+  cell "$T/$name-raw.png" "$name: the game, dither off" "$T/c3-$name.png"
+  cell "$T/$name-dith.png" "$name: the game, Bayer 4x4, spread 40, 51 colours" "$T/c4-$name.png"
+  convert "$T/c1-$name.png" "$T/c2-$name.png" "$T/c3-$name.png" "$T/c4-$name.png" -background '#0D0A1A' -splice 8x0 +append "$T/row-$name.png"
+  rows="$rows $T/row-$name.png"
+done
+convert $rows -background '#0D0A1A' -splice 0x8 -append +repage -depth 8 "$OUT/p0-dither-before-after.png"
+
+scripts/shot-native "$T/v-24.png" --shot 0 --hud 0 --spread 24 > /dev/null
+scripts/shot-native "$T/v-40.png" --shot 0 --hud 0 --spread 40 > /dev/null
+scripts/shot-native "$T/v-64.png" --shot 0 --hud 0 --spread 64 > /dev/null
+scripts/shot-native "$T/v-b8.png" --shot 0 --hud 0 --bayer 8 > /dev/null
+scripts/shot-native "$T/v-ramped.png" --shot 0 --hud 0 --palette ramped > /dev/null
+scripts/shot-native "$T/v-card.png" --card --hud 0 > /dev/null
+cell "$T/v-24.png" "spread 24" "$T/w1.png"
+cell "$T/v-40.png" "spread 40 (D27, the default)" "$T/w2.png"
+cell "$T/v-64.png" "spread 64" "$T/w3.png"
+cell "$T/v-b8.png" "Bayer 8x8, spread 40" "$T/w4.png"
+cell "$T/v-ramped.png" "47 colours (no warm near-blacks)" "$T/w5.png"
+cell "$T/v-card.png" "test card: the colour cube, Bayer 4x4, 51 colours" "$T/w6.png"
+convert "$T/w1.png" "$T/w2.png" "$T/w3.png" -background '#0D0A1A' -splice 8x0 +append "$T/wr1.png"
+convert "$T/w4.png" "$T/w5.png" "$T/w6.png" -background '#0D0A1A' -splice 8x0 +append "$T/wr2.png"
+convert "$T/wr1.png" "$T/wr2.png" -background '#0D0A1A' -splice 0x8 -append +repage -depth 8 "$OUT/p0-dither-variants.png"
+identify "$OUT/p0-dither-before-after.png" "$OUT/p0-dither-variants.png"

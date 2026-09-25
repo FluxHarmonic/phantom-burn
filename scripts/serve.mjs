@@ -22,7 +22,13 @@ if (!host || host === "0.0.0.0") { console.error("serve: no wg0 address; refusin
 const MIME = { html: "text/html; charset=utf-8", js: "text/javascript", wasm: "application/wasm", json: "application/json",
   css: "text/css", png: "image/png", sgm: "application/octet-stream", b64: "text/plain", txt: "text/plain; charset=utf-8" };
 function handler(req, res) {
-  const urlPath = decodeURIComponent(new URL(req.url, "http://x").pathname);
+  const u = new URL(req.url, "http://x");
+  // a page's ?trace lines (phone numbers without transcribing), to this log
+  if (u.pathname.endsWith("/report")) {
+    console.log(`report ${new Date().toISOString()} ${req.socket.remoteAddress} ${decodeURIComponent(u.search.slice(1)).slice(0, 600)}`);
+    res.writeHead(204); res.end(); return;
+  }
+  const urlPath = decodeURIComponent(u.pathname);
   let fp = path.normalize(path.join(root, urlPath));
   if (!fp.startsWith(root)) { res.writeHead(403); res.end(); return; }
   try { if (fs.statSync(fp).isDirectory()) fp = path.join(fp, "index.html"); } catch { /* the read reports it */ }

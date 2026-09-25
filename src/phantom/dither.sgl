@@ -17,7 +17,14 @@
 ;;; The palettes are listed in the order `convert PALETTE.png
 ;;; -unique-colors` gives, which is bayer.sh's order and so its tie
 ;;; order. `embers` (51) is the ruled one (look-palette-ramped-embers.png,
-;;; experimental); `ramped` (47) is the one before the warm near-blacks.
+;;; experimental); `ramped` (47) is the one before the warm near-blacks;
+;;; `crash` (29) is Crash The Stack's own (its assets/palette.png at
+;;; 262a0e0), with no dark ramps at all.
+;;;
+;;; The spread: 12 by default (David, 2026-09-25, on a desktop: 8 to 16
+;;; looked best), but the game sets it from the size of one game pixel on
+;;; the screen (render.sgl's auto spread). Any multiple of 4 up to 64 keeps
+;;; the 4x4 pass bit-exact (every term stays a multiple of 1/64 below 2^18).
 ;;;
 ;;; The pass: a full-screen triangle drawn into a second 480x270 target,
 ;;; reading the 3D target by texelFetch (one texel per pixel, so the
@@ -33,7 +40,7 @@
   (begin
 
     (define PALETTE-MAX 60)       ; 60 vec4s + params + opts = 992 bytes, under the 1 KiB block
-    (define dither-spread-default 40.0)
+    (define dither-spread-default 12.0)
     (define dither-size-default 4)
 
     (define PALETTES
@@ -51,7 +58,12 @@
          "#3D4052" "#2A7270" "#AD541A" "#B6721A" "#F2731A" "#CC3340" "#9E5761" "#FF5959"
          "#1A8C4D" "#FF9F1A" "#FFCC33" "#B89E5C" "#583681" "#5C4D8C" "#636D81" "#6B7085"
          "#1A73D9" "#8C40B3" "#814EBA" "#B641A0" "#B36BFF" "#FF59D9" "#3AACA0" "#7380A6"
-         "#4DF2D9" "#8A8FA0" "#93A4BA" "#DBE0E6" "#CCE6FF" "#F0F0F0" "#FAFCFF")))
+         "#4DF2D9" "#8A8FA0" "#93A4BA" "#DBE0E6" "#CCE6FF" "#F0F0F0" "#FAFCFF")
+        (crash
+         "#0D0A1A" "#17122E" "#21173D" "#2A2D3A" "#4A5A2B" "#2E1C4D" "#1F3A4D" "#3D4052"
+         "#F2731A" "#CC3340" "#9E5761" "#FF5959" "#1A8C4D" "#FF9F1A" "#FFCC33" "#B89E5C"
+         "#5C4D8C" "#6B7085" "#1A73D9" "#8C40B3" "#B36BFF" "#FF59D9" "#7380A6" "#4DF2D9"
+         "#8A8FA0" "#DBE0E6" "#CCE6FF" "#F0F0F0" "#FAFCFF")))
 
     (define (palette-names) (map car PALETTES))
 

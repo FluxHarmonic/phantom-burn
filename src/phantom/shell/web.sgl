@@ -9,11 +9,12 @@
 ;;;
 ;;; The page's events, besides the loader's keydown and keyup:
 ;;;   ("params", "k=v&...")  the page's query: floor, view, shot, hud,
-;;;                          dither, spread, bayer, palette, fog, card, snap, affine
+;;;                          dither, spread, bayer, palette, fog, card, snap, affine, trace, auto
 ;;;   ("look", "dx,dy")      pointer-locked mouse motion, CSS pixels
 ;;;   ("move", "x,y")        the left stick, -1..1, y down
 ;;;   ("lookstick", "x,y")   the right stick
 ;;;   ("press", "KEY")       a button on the page (the crouch button sends c)
+;;;   ("dpr", "N")           window.devicePixelRatio, at boot and on a resize
 
 (define-library (phantom shell web)
   (import (sigil core)
@@ -109,6 +110,10 @@
         (when (param "card") (render-card! #t))
         (when (param "snap") (render-snap! (or (string->number (param "snap")) 1.0)))
         (when (param "affine") (render-affine! #t))
+        (when (param "trace") (game-set-trace! #t))
+        (when (param "lift") (render-lift! (not (string=? (param "lift") "0"))))
+        (when (param "night") (render-night! (or (string->number (param "night")) 1.0)))
+        (when (param "auto") (game-set-auto! #t))
         (when s (render-spread! s))
         (when b (render-bayer! b))
         (when p (render-palette! (string->symbol p)))
@@ -213,6 +218,10 @@
              (set! *params* (split-query payload))
              (set! *params-seen* #t)
              (when (param "floor") (set! *floor* (param "floor")))
+             0)
+            ((string=? type "dpr")
+             (render-set-dpr! (string->number payload))
+             (render-spread-auto! (render-spread-auto?))
              0)
             ((string=? type "collide")
              (set! *collide* payload)
