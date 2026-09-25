@@ -1,0 +1,123 @@
+;;; P2's hearing on floor 14 ((phantom guard hearing), through (phantom play
+;;; core) as the game runs it): sound goes room to room through the floor's
+;;; openings, gait and surface set its level, distance fades it.
+;;;
+;;; The gate (P2): a scripted run across the lobby is heard two rooms away,
+;;; in the office, and the same walk sneaked is not.
+
+(import (sigil test)
+        (sigil math)
+        (sigil fs)
+        (phantom detmath)
+        (phantom soup)
+        (phantom walker)
+        (phantom play data)
+        (phantom play core)
+        (phantom guard guard)
+        (phantom guard hearing))
+
+(define DIR "assets/floors/14-slice/")
+(define C (pbc1->collision (read-file-bytes (string-append DIR "collide"))))
+(define INFO (floor-info-from-string (read-file-string (string-append DIR "floor.sexp"))))
+(define DATA (play-data-from-string (read-file-string (string-append DIR "play.sexp"))))
+(define CIRCUITS (cdr (assq 'circuits INFO)))
+(define (on-set names) (lambda (c) (and (memq c names) #t)))
+(define DARK (on-set '(emergency screens city)))
+
+(define (room name)
+  (let loop ((i 0))
+    (cond ((>= i (room-count DATA)) (error "no room" name))
+          ((eq? (room-name (vector-ref (play-rooms DATA) i)) name) i)
+          (else (loop (+ i 1))))))
+
+(define H (make-hearing DATA))
+(define (path from fx fy to tx ty)
+  (hear-path! H (room from) fx fy (room to) tx ty)
+  (list (hear-gain H) (hear-path-m H) (hear-muffled? H)))
+
+(define (near? a b eps) (< (abs (- a b)) eps))
+
+(test-group "rooms by place"
+  (test "the room grid names the room under a point, and the mezzanine over the lobby"
+    (assert-true (= (room-at DATA 7.0 4.0 0.0) (room 'lobby)))
+    (assert-true (= (room-at DATA 7.0 8.5 0.0) (room 'lobby)))
+    (assert-true (= (room-at DATA 7.0 8.5 3.0) (room 'mezzanine)))
+    (assert-true (= (room-at DATA 17.0 9.5 0.0) (room 'corridor)))
+    (assert-true (= (room-at DATA 19.0 17.0 0.0) (room 'office)))
+    (assert-true (= (room-at DATA 24.0 19.5 0.0) (room 'fm-office)))
+    (assert-true (= (room-at DATA 18.5 9.8 3.0) (room 'duct)))))
+
+(test-group "paths"
+  (test "lobby to office passes the arch and the door, 0.9, not muffled, walked through the openings"
+    (let ((r (path 'lobby 10.0 6.0 'office 19.0 17.0)))
+      (display (list 'lobby->office r)) (newline)
+      (assert-true (near? (car r) 0.9 1e-9))
+      (assert-false (caddr r))
+      ;; the straight line is ~14 m; through the arch and the door ~15.4 m
+      (assert-true (> (cadr r) 15.0))))
+  (test "the office and the FM office: the door (0.9) beats the glass (0.3)"
+    (let ((r (path 'office 21.0 16.0 'fm-office 24.0 19.5)))
+      (assert-true (near? (car r) 0.9 1e-9))
+      (assert-false (caddr r))))
+  (test "the lobby and the mezzanine are one air volume: gain 1, the straight line"
+    (let ((r (path 'lobby 7.0 4.0 'mezzanine 7.0 8.5)))
+      (assert-true (near? (car r) 1.0 1e-9))
+      (assert-true (near? (cadr r) 4.5 1e-6))))
+  (test "the duct to the office through the hatch is muffled (0.8)"
+    (let ((r (path 'duct 21.0 13.0 'office 21.0 16.0)))
+      (display (list 'duct->office r)) (newline)
+      (assert-true (near? (car r) 0.8 1e-9))
+      (assert-true (caddr r)))))
+
+(test-group "noise"
+  (test "surfaces and gait: marble louder than carpet; a run twice a walk, a sneak half"
+    (let* ((tag (lambda (name) (let loop ((i 0)) (if (eq? (car (vector-ref (play-surface-noise DATA) i)) name) i (loop (+ i 1))))))
+           (marble (tag 'marble)) (carpet (tag 'carpet)))
+      (assert-true (> (step-noise DATA marble 'walk) (step-noise DATA carpet 'walk)))
+      (assert-true (near? (step-noise DATA marble 'run) (* 2.0 (step-noise DATA marble 'walk)) 1e-9))
+      (assert-true (near? (step-noise DATA marble 'sneak) (* 0.5 (step-noise DATA marble 'walk)) 1e-9))))
+  (test "distance fades: the same step 3 m away is louder than 15 m away"
+    (hear-path! H (room 'lobby) 10.0 6.0 (room 'lobby) 7.0 6.0)
+    (let ((near (heard-level H 1.0)))
+      (hear-path! H (room 'lobby) 10.0 6.0 (room 'office) 19.0 17.0)
+      (assert-true (> near (* 3.0 (heard-level H 1.0)))))))
+
+;; --- the gate: heard two rooms away running, not sneaking -----------------------
+
+;; The runner crosses the lobby toward the arch for 3 s at a gait; the guard
+;; is held in the office facing away (north), with the lights off, so only
+;; hearing can raise its awareness. Returns (loudest-level awareness heard?).
+(define (cross gait)
+  (let* ((p (play-reset! (make-play C DATA CIRCUITS)))
+         (g (play-guard p))
+         (gw (play-guard-world p))
+         (in (make-input 0.0 1.0 0.0 0.0 (eq? gait 'sneak) (eq? gait 'run) #f 0))
+         (east (- (/ PI 2.0))))
+    (guard-reset! g gw 0)
+    (let loop ((i 0) (w (make-walker 3.0 6.0 0.0 east)) (loud 0.0) (aware 0.0) (heard #f))
+      (if (>= i 180)
+          (list loud aware heard)
+          (let ((w (walker-step w in TICK C)))
+            (guard-place! g 19.0 17.0 0.0 1.0)
+            (play-tick! p w DARK 1.0 2.0)
+            (loop (+ i 1) w (max loud (play-last-heard p)) (max aware (guard-awareness g))
+                  (or heard (guard-heard? g))))))))
+
+(test-group "the P2 gate: hearing"
+  (test "a run across the lobby is heard in the office, two rooms away"
+    (let ((r (cross 'run)))
+      (display (list 'gate-run r 'threshold (hearing-threshold DATA))) (newline)
+      (assert-true (caddr r))
+      (assert-true (> (car r) (hearing-threshold DATA)))
+      (assert-true (>= (cadr r) 0.3))))
+  (test "the same crossing sneaked is not heard"
+    (let ((r (cross 'sneak)))
+      (display (list 'gate-sneak r)) (newline)
+      (assert-false (caddr r))
+      (assert-true (< (car r) (hearing-threshold DATA)))
+      (assert-true (= (cadr r) 0.0))))
+  (test "walking is between: louder than sneaking, quieter than running"
+    (let ((walk (cross 'walk)) (run (cross 'run)) (sneak (cross 'sneak)))
+      (display (list 'gate-walk walk)) (newline)
+      (assert-true (> (car walk) (car sneak)))
+      (assert-true (< (car walk) (car run))))))

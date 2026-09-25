@@ -56,7 +56,9 @@
 
 ;; --- running an attempt -------------------------------------------------------
 
-(define (fresh-play) (play-reset! (make-play C DATA CIRCUITS)))
+;; These are P1's sight, nav and capture tests: hearing (P2,
+;; test/test-hearing.sgl) is off, so each measures sight alone.
+(define (fresh-play) (play-set-hearing! (play-reset! (make-play C DATA CIRCUITS)) #f))
 
 ;; Step the walker with input-of (tick -> input) and the play, n ticks;
 ;; returns (walker . outcomes seen).

@@ -30,7 +30,7 @@
           play-badge? play-outcome play-ticks play-start-walker
           play-near-exit? GUARD-START-LEG PICKUP-REACH EXIT-REACH
           play-hearing play-take-steps! play-last-heard play-runner-room
-          play-guard-path!)
+          play-guard-path! play-set-hearing!)
 
   (begin
 
@@ -50,8 +50,10 @@
     ;;  last x y  19 the steps for playback since it last took them, newest
     ;;  first: ((surface gait foot) ...)  20 the hearing threshold
     ;;  21 the loudest step the guard received this tick (a level)
-    ;;  22 your room
-    (define (play? p) (and (vector? p) (= (vector-length p) 23) (eq? (vector-ref p 0) 'play)))
+    ;;  22 your room  23 hearing on? (the sight gates turn it off, to
+    ;;  measure sight alone)
+    (define (play? p) (and (vector? p) (= (vector-length p) 24) (eq? (vector-ref p 0) 'play)))
+    (define (play-set-hearing! p on?) (vector-set! p 23 on?) p)
     (define (play-hearing p) (vector-ref p 15))
     (define (play-last-heard p) (vector-ref p 21))
     (define (play-runner-room p) (vector-ref p 22))
@@ -77,7 +79,7 @@
       (let* ((gw (make-guard-world coll data))
              (p (vector 'play data gw (make-guard gw GUARD-START-LEG) (make-light-state) (make-target)
                         circuits #f 'playing 0 0.0 0.0 0.0 0.0 #f
-                        (make-hearing data) (make-steps) #f #f '() (hearing-threshold data) 0.0 -1)))
+                        (make-hearing data) (make-steps) #f #f '() (hearing-threshold data) 0.0 -1 #t)))
         p))
 
     ;; A new attempt: the guard back at its start, the badge on the desk.
@@ -125,7 +127,7 @@
                    (hear-path! h room x y rg (guard-x g) (guard-y g))
                    (let ((level (heard-level h (step-noise data tag gait))))
                      (vector-set! p 21 (max (vector-ref p 21) level))
-                     (guard-hear! g level (vector-ref p 20) x y)))))
+                     (when (vector-ref p 23) (guard-hear! g level (vector-ref p 20) x y))))))
              events)))))
 
     ;; The walker at the floor's arrival spot, facing as the floor says.
