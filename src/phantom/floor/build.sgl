@@ -1,0 +1,887 @@
+;;; (phantom floor build) - The architecture: a floor's rooms, openings and
+;;; stairs turned into render batches, the collision soup, the sector graph's
+;;; edges, and the problems gates 1, 2 and 6 find on the way.
+;;;
+;;; The order:
+;;;   1. the plan: every room outline and hatch square overlaid (phantom floor plan)
+;;;   2. heights: each face's intervals and columns (phantom floor stack)
+;;;   3. openings: each found on the plan edges its two rooms share, as a HOLE
+;;;      (a rectangle along the edge) that the walls leave open
+;;;   4. walls: for each side of each plan edge, whatever air that side has
+;;;      that does not continue across the edge (into the same room, a room of
+;;;      the same volume, or through a hole) is wall
+;;;   5. floors and ceilings: the bottom and top of each column of each face
+;;;   6. stairs, rails, frames, skirting
+;;;
+;;; Things (props, lifts, the exit door, light panels) are placed by
+;;; (phantom floor dress), which reads the same context.
+;;;
+;;; Render surfaces are split at a half-metre grid (so per-vertex light holds
+;;; up: design section 7, "Keeping it on the GPU"); collision surfaces are not.
+;;;
+;;; Pure: no platform.
+
+(define-library (phantom floor build)
+  (import (sigil core)
+          (sigil struct)
+          (sigil list)
+          (sigil math)
+          (sigil string)
+          (phantom floor problem)
+          (phantom floor format)
+          (phantom floor poly)
+          (phantom floor plan)
+          (phantom floor stack)
+          (phantom floor mesh)
+          (phantom floor shapes))
+
+  (export make-ctx build-architecture!
+          ctx? ctx-floor ctx-legend ctx-props ctx-mats ctx-soup ctx-plan ctx-owners ctx-groups
+          ctx-ivs ctx-cols ctx-problems ctx-emitters ctx-gedges ctx-holes ctx-landings ctx-rails
+          ctx-footprints ctx-placed ctx-tags ctx-stair-boxes
+          ctx-batches add-problem! batch-for mat tag-of room-by-name room-id
+          face-ivs side-normal side-right side-faces iv-of edge-point
+          edges-at-point pair-side owner-room-of fmt-pt num->str
+          GRID CLEARANCE)
+
+  (begin
+    (define GRID 0.5)            ; render surfaces split at half a metre
+    (define DOOR-W 1.0)
+    (define DOOR-H 2.1)
+    (define STEP-MAX 0.17)       ; the tallest riser a stair may have
+    (define RAIL-H 1.0)
+    (define LANDING-TOL 0.06)    ; gate 6 lands a stair within 5 cm of an open edge; its rail gives way within this
+    (define FRAME-W 0.08)
+    (define FRAME-D 0.2)
+    (define CLEARANCE 0.3)       ; a body's radius, for waypoints and the like
+
+    (define-struct ctx
+      (floor default: #f) (legend default: #f) (props default: '()) (mats default: '())
+      (batches default: #f)          ; #(alist) of (material-name . batch), in creation order
+      (soup default: #f) (plan default: #f) (owners default: #f) (groups default: #f)
+      (ivs default: #f) (cols default: #f)
+      (problems default: #f) (emitters default: #f) (gedges default: #f)
+      (holes default: #f)            ; vector per plan edge: list of #(t0 t1 zlo zhi kind)
+      (landings default: #f)         ; growable of (p q) stair landings
+      (rails default: #f)            ; growable of #(p q z line) rails, generated and declared
+      (footprints default: #f)       ; growable of (label poly) for props and stairs
+      (placed default: #f)           ; growable of #(prop xform top-z room)
+      (stair-boxes default: #f)      ; growable of (poly ztop) per step, for gate checks
+      (tags default: '()))           ; ((name noise sight) ...), a surface tag's index is its position
+
+    ;; --- the context --------------------------------------------------------------------
+
+    (define (make-ctx fl lg props)
+      (let* ((mats (map (lambda (m) (cons (material-name m) (make-matinfo m))) (legend-materials lg)))
+             (tags (append (map (lambda (s) (list (surface-name s) (surface-noise s) 'blocks)) (legend-surfaces lg))
+                           (list (list 'wall #f 'blocks) (list 'ceiling #f 'blocks) (list 'glass #f 'passes)
+                                 (list 'prop #f 'blocks) (list 'trim #f 'blocks)))))
+        (ctx floor: fl legend: lg props: props mats: mats
+             batches: (vector '()) soup: (make-soup)
+             problems: (make-growable 16) emitters: (make-growable 32) gedges: (make-growable 16)
+             landings: (make-growable 4) rails: (make-growable 8) footprints: (make-growable 16)
+             placed: (make-growable 16) stair-boxes: (make-growable 32) tags: tags)))
+
+    (define (add-problem! c gate line msg)
+      (growable-push! (ctx-problems c)
+                      (problem path: (floor-path (ctx-floor c)) line: line message: msg gate: gate)))
+
+    (define (tag-of c name)
+      (let loop ((ts (ctx-tags c)) (i 0))
+        (cond ((null? ts) 0)
+              ((eq? (caar ts) name) i)
+              (else (loop (cdr ts) (+ i 1))))))
+
+    (define (mat c name)
+      (let ((p (assq name (ctx-mats c))))
+        (if p (cdr p) (cdar (ctx-mats c)))))
+
+    (define (batch-for c name)
+      (let* ((box (ctx-batches c)) (p (assq name (vector-ref box 0))))
+        (if p (cdr p)
+            (let ((b (make-batch name)))
+              (vector-set! box 0 (append (vector-ref box 0) (list (cons name b))))
+              b))))
+
+    (define (room-by-name c name)
+      (find (lambda (r) (eq? (room-name r) name)) (floor-rooms (ctx-floor c))))
+
+    (define (room-id c name)
+      (let ((r (room-by-name c name))) (and r (room-index r))))
+
+    (define (surface-of c name)
+      (find (lambda (s) (eq? (surface-name s) name)) (legend-surfaces (ctx-legend c))))
+
+    (define (floor-material c r)
+      (let ((s (surface-of c (room-surface r)))) (if s (surface-material s) 'wall)))
+
+    (define (wall-material c r)
+      (let ((s (surface-of c (room-surface r))))
+        (or (and s (surface-walls s)) (legend-default (ctx-legend c) 'walls))))
+
+    (define (ceiling-material c r)
+      (let ((s (surface-of c (room-surface r))))
+        (or (and s (surface-ceiling s)) (legend-default (ctx-legend c) 'ceilings))))
+
+    (define (owner-room-of c id)
+      (let ((o (vector-ref (ctx-owners c) id)))
+        (and (eq? (owner-kind o) 'room) (owner-room o))))
+
+    ;; Not written as (if (< f 0) (quote ()) (vector-ref (ctx-ivs c) f)): sigil 0.22.7's native
+    ;; backend matches any 2-argument function with a tail (vector-ref (field arg0)
+    ;; arg1) as a plain vector-field accessor and drops the other branch, so the
+    ;; guard vanished in release builds (cps-emit-native.c,
+    ;; detect_simple_vector_field_accessor). ivs-at takes the vector itself, which
+    ;; that rule does not match.
+    (define (face-ivs c f) (ivs-at (ctx-ivs c) f))
+    (define (ivs-at v f) (if (< f 0) (quote ()) (vector-ref v f)))
+
+    (define (iv-of c f id)
+      (find (lambda (iv) (= (iv-owner iv) id)) (face-ivs c f)))
+
+    ;; (this-face . other-face) for a side of an edge.
+    (define (side-faces e side)
+      (if (eq? side 'left) (cons (edge-left e) (edge-right e)) (cons (edge-right e) (edge-left e))))
+
+    ;; The 2D unit normal pointing into the side's face.
+    (define (side-normal e side)
+      (let ((d (edge-dir e)))
+        (if (eq? side 'left) (cons (- (py d)) (px d)) (cons (py d) (- (px d))))))
+
+    ;; The viewer's right, standing on the side and facing the wall.
+    (define (side-right e side)
+      (let ((n (side-normal e side))) (cons (- (py n)) (px n))))
+
+    (define (edge-point e t) (pt+ (edge-a e) (pt* (edge-dir e) t)))
+
+    (define (flip side) (if (eq? side 'left) 'right 'left))
+
+    ;; --- the plan and heights ----------------------------------------------------------------
+
+    (define (hatch-openings fl) (filter (lambda (o) (eq? (opening-kind o) 'hatch)) (floor-openings fl)))
+
+    ;; A hatch's lower and upper room, by floor height, or #f.
+    (define (hatch-rooms c o)
+      (let ((a (room-by-name c (opening-a o))) (b (room-by-name c (opening-b o))))
+        (and a b (opening-at o)
+             (if (<= (room-floor a) (room-floor b)) (cons a b) (cons b a)))))
+
+    (define (build-plan! c)
+      (let* ((fl (ctx-floor c))
+             (rooms (floor-rooms fl))
+             (hatches (filter-map (lambda (o) (let ((lu (hatch-rooms c o)))
+                                                  (and lu (list o (room-index (car lu)) (room-index (cdr lu))))))
+                                  (hatch-openings fl)))
+             (owners (make-owners rooms hatches))
+             (pl (build-plan (map (lambda (o) (cons (owner-id o) (owner-poly o))) (vector->list owners))))
+             (groups (room-groups rooms))
+             (nf (vector-length (plan-faces pl)))
+             (ivs (make-vector nf '()))
+             (cols (make-vector nf '())))
+        (checkpoint! "arrangement built")
+        (let loop ((i 0))
+          (when (< i nf)
+            (let* ((f (vector-ref (plan-faces pl) i))
+                   (iv (face-intervals owners (face-cover f))))
+              (vector-set! ivs i iv)
+              (vector-set! cols i (face-columns owners groups iv)))
+            (loop (+ i 1))))
+        (ctx c plan: pl owners: owners groups: groups ivs: ivs cols: cols
+             holes: (make-vector (vector-length (plan-edges pl)) '()))))
+
+    ;; --- openings ------------------------------------------------------------------------------
+
+    ;; Which side of edge e has room a (by id) with b on the other side (b #f:
+    ;; the outside, no air overlapping a's), or #f.
+    (define (pair-side c e a b)
+      (let ((l (edge-left e)) (r (edge-right e)))
+        (define (has? f id) (and (>= f 0) (memv id (face-cover (vector-ref (plan-faces (ctx-plan c)) f))) #t))
+        (define (outside? f a-face)
+          (let ((aiv (iv-of c a-face a)))
+            (not (any (lambda (iv) (and aiv (< (max (iv-lo iv) (iv-lo aiv)) (min (iv-hi iv) (iv-hi aiv)))))
+                      (face-ivs c f)))))
+        (cond ((and (has? l a) (if b (has? r b) (outside? r l))) 'left)
+              ((and (has? r a) (if b (has? l b) (outside? l r))) 'right)
+              (else #f))))
+
+    (define (edges-at-point c p)
+      (let ((es (plan-edges (ctx-plan c))))
+        (filter (lambda (i) (let ((e (vector-ref es i))) (< (point-seg-dist p (edge-a e) (edge-b e)) 1e-3)))
+                (iota (vector-length es)))))
+
+    ;; Edges lying on the infinite line through origin along dir.
+    (define (collinear-edges c origin dir)
+      (let ((es (plan-edges (ctx-plan c))))
+        (define (off p) (abs (pt-cross dir (pt- p origin))))
+        (filter (lambda (i) (let ((e (vector-ref es i))) (and (< (off (edge-a e)) 1e-4) (< (off (edge-b e)) 1e-4))))
+                (iota (vector-length es)))))
+
+    (define (s-of origin dir p) (pt-dot (pt- p origin) dir))
+
+    ;; For each edge on the line: (edge-index a-side smin smax) where the pair
+    ;; holds, a-side being the side of the edge with room a, given a-side along
+    ;; the line (line-side, relative to dir).
+    (define (pair-edges-on-line c origin dir line-side a b)
+      (filter-map (lambda (i)
+                    (let* ((e (vector-ref (plan-edges (ctx-plan c)) i))
+                           (same? (> (pt-dot (edge-dir e) dir) 0.0))
+                           (side (if same? line-side (flip line-side)))
+                           (ps (pair-side c e a b)))
+                      (and (eq? ps side)
+                           (let ((sa (s-of origin dir (edge-a e))) (sb (s-of origin dir (edge-b e))))
+                             (list i side (min sa sb) (max sa sb))))))
+                  (collinear-edges c origin dir)))
+
+    ;; Contiguous runs of (lo hi) ranges, merged.
+    (define (merge-ranges rs)
+      (let loop ((rs (list-sort (lambda (x y) (< (car x) (car y))) rs)) (acc '()))
+        (cond ((null? rs) (reverse acc))
+              ((and (pair? acc) (<= (car (car rs)) (+ (cdar acc) 1e-6)))
+               (loop (cdr rs) (cons (cons (caar acc) (max (cdar acc) (cdr (car rs)))) (cdr acc))))
+              (else (loop (cdr rs) (cons (cons (car (car rs)) (cdr (car rs))) acc))))))
+
+    ;; The vertical extent of an opening's hole on one edge, or #f.
+    (define (hole-heights c o kind e a-side a b)
+      (let* ((fs (side-faces e a-side))
+             (aiv (iv-of c (car fs) a))
+             (biv (and b (iv-of c (cdr fs) b))))
+        (and aiv (or biv (not b))
+             (let* ((lo (if biv (max (iv-lo aiv) (iv-lo biv)) (iv-lo aiv)))
+                    (hi (if biv (min (iv-hi aiv) (iv-hi biv)) (iv-hi aiv)))
+                    (r (case kind
+                         ((door) (cons lo (min hi (+ lo (or (opening-height o) DOOR-H)))))
+                         ((arch grate glass) (cons lo (if (opening-height o) (min hi (+ lo (opening-height o))) hi)))
+                         ((window) (cons (+ (iv-lo aiv) (or (opening-sill o) 0.9))
+                                         (min hi (+ (iv-lo aiv) (or (opening-head o) 2.1)))))
+                         ((exit) (let ((pr (assq 'exit-door (ctx-props c))))
+                                   (cons lo (min hi (+ lo (if (and pr (prop-opening (cdr pr))) (cdr (prop-opening (cdr pr))) 2.2))))))
+                         (else (cons lo hi)))))
+               (and (< (car r) (- (cdr r) 1e-6)) r)))))
+
+    (define (kind-name o) (symbol->string (opening-kind o)))
+
+    (define (describe-opening o)
+      (string-append "the " (kind-name o)
+                     (if (opening-b o)
+                         (string-append " between " (symbol->string (opening-a o)) " and " (symbol->string (opening-b o)))
+                         (string-append " in " (symbol->string (opening-a o))))))
+
+    (define (fmt-pt p) (string-append "(" (num->str (px p)) " " (num->str (py p)) ")"))
+    (define (num->str x)
+      (let ((r (/ (round (* x 1000.0)) 1000.0)))
+        (if (= r (round r)) (number->string (exact (round r))) (number->string r))))
+
+    ;; Place one opening (not a hatch). Records holes, a graph edge, frames and
+    ;; panes; reports gate 1 and 2 problems.
+    (define (resolve-opening! c o)
+      (let* ((a (room-id c (opening-a o)))
+             (b (and (opening-b o) (room-id c (opening-b o))))
+             (kind (opening-kind o))
+             (line (opening-line o))
+             (what (describe-opening o)))
+        (when (and a (or b (not (opening-b o))))
+          (if (opening-at o)
+              (let* ((p (opening-at o))
+                     (hosts (edges-at-point c p))
+                     (es (plan-edges (ctx-plan c)))
+                     (host (find (lambda (i) (pair-side c (vector-ref es i) a b)) hosts)))
+                (if (not host)
+                    (let ((onto-void (find (lambda (i)
+                                             (let ((e (vector-ref es i)))
+                                               (or (and (memv a (cover-of c (edge-left e))) (< (edge-right e) 0))
+                                                   (and (memv a (cover-of c (edge-right e))) (< (edge-left e) 0))
+                                                   (and b (memv b (cover-of c (edge-left e))) (< (edge-right e) 0))
+                                                   (and b (memv b (cover-of c (edge-right e))) (< (edge-left e) 0)))))
+                                           hosts)))
+                      (add-problem! c 1 line (string-append what " at " (fmt-pt p) " is not on a wall "
+                                                            (if b "the two rooms share" "of the room with the outside beyond it")))
+                      (when (and onto-void b)
+                        (add-problem! c 2 line (string-append what " at " (fmt-pt p) " opens onto nothing: the void is behind that wall"))))
+                    (let* ((e (vector-ref es host))
+                           (a-side (pair-side c e a b))
+                           (origin (edge-a e)) (dir (edge-dir e))
+                           (runs (pair-edges-on-line c origin dir a-side a b))
+                           (sc (s-of origin dir p))
+                           (merged (merge-ranges (map (lambda (r) (cons (caddr r) (cadddr r))) runs)))
+                           (run (find (lambda (m) (and (<= (car m) (+ sc 1e-6)) (>= (cdr m) (- sc 1e-6)))) merged))
+                           (w (cond ((opening-width o) (opening-width o))
+                                    ((eq? kind 'door) DOOR-W)
+                                    ((eq? kind 'exit)
+                                     (let ((pr (assq 'exit-door (ctx-props c))))
+                                       (if (and pr (prop-opening (cdr pr))) (car (prop-opening (cdr pr))) DOOR-W)))
+                                    ((memq kind '(arch grate)) #f)
+                                    (else DOOR-W)))
+                           (s0 (if w (- sc (* 0.5 w)) (and run (car run))))
+                           (s1 (if w (+ sc (* 0.5 w)) (and run (cdr run)))))
+                      (cond
+                        ((not run)
+                         ;; within 1 mm of the wall's line, but past the end of the wall the rooms share
+                         (add-problem! c 1 line (string-append what " at " (fmt-pt p) " is past the end of the wall "
+                                                               (if b "the two rooms share" "of the room"))))
+                        (else
+                         (when (or (< s0 (- (car run) 1e-6)) (> s1 (+ (cdr run) 1e-6)))
+                           (add-problem! c 1 line (string-append what " at " (fmt-pt p) " is " (num->str (- s1 s0))
+                                                                 " m wide, wider than the wall there ("
+                                                                 (num->str (- (cdr run) (car run))) " m)")))
+                         (cut-holes! c o kind runs origin dir a-side a b (max s0 (car run)) (min s1 (cdr run)) p))))))
+              ;; along: glass, window
+              (let* ((seg (opening-along o))
+                     (p (car seg)) (q (cadr seg))
+                     (dir (pt-norm (pt- q p)))
+                     (on (plan-edges-on-segment (ctx-plan c) p q 1e-3))
+                     (es (plan-edges (ctx-plan c)))
+                     (host (find (lambda (i) (pair-side c (vector-ref es i) a b)) on)))
+                (if (not host)
+                    (add-problem! c 1 line (string-append what " along " (fmt-pt p) "-" (fmt-pt q) " is not on a wall "
+                                                          (if b "the two rooms share" "of the room with the outside beyond it")))
+                    (let* ((e (vector-ref es host))
+                           (a-side0 (pair-side c e a b))
+                           (a-side (if (> (pt-dot (edge-dir e) dir) 0.0) a-side0 (flip a-side0)))
+                           (runs (pair-edges-on-line c p dir a-side a b))
+                           (s0 0.0) (s1 (pt-dist p q))
+                           (merged (merge-ranges (map (lambda (r) (cons (caddr r) (cadddr r))) runs)))
+                           (covered (find (lambda (m) (and (<= (car m) (+ s0 1e-6)) (>= (cdr m) (- s1 1e-6)))) merged)))
+                      (unless covered
+                        (add-problem! c 1 line (string-append what " along " (fmt-pt p) "-" (fmt-pt q)
+                                                              " runs past the wall they share")))
+                      (cut-holes! c o kind runs p dir a-side a b s0 s1 (pt* (pt+ p q) 0.5)))))))))
+
+    (define (cover-of c f)
+      (if (< f 0) '() (face-cover (vector-ref (plan-faces (ctx-plan c)) f))))
+
+    ;; Cut the hole s0..s1 into every edge of runs it overlaps; add the pane,
+    ;; frames and the graph edge.
+    (define (cut-holes! c o kind runs origin dir line-side a b s0 s1 centre)
+      (let* ((es (plan-edges (ctx-plan c)))
+             (zs '()))
+        (for-each
+          (lambda (r)
+            (let* ((i (car r)) (side (cadr r)) (lo (max s0 (caddr r))) (hi (min s1 (cadddr r))))
+              (when (> hi (+ lo 1e-6))
+                (let* ((e (vector-ref es i))
+                       (same? (> (pt-dot (edge-dir e) dir) 0.0))
+                       (sa (s-of origin dir (edge-a e)))
+                       (t0 (if same? (- lo sa) (- sa hi)))
+                       (t1 (if same? (- hi sa) (- sa lo)))
+                       (h (hole-heights c o kind e side a b)))
+                  (when h
+                    (set! zs (cons h zs))
+                    (vector-set! (ctx-holes c) i (cons (vector t0 t1 (car h) (cdr h) kind) (vector-ref (ctx-holes c) i)))
+                    (when (memq kind '(glass window))
+                      (emit-pane! c e t0 t1 (car h) (cdr h) a))
+                    (when (eq? kind 'window)
+                      (city-light! c e side t0 t1 (car h) (cdr h))))))))
+          runs)
+        (when (null? zs)
+          (add-problem! c 1 (opening-line o)
+                        (string-append (describe-opening o) " at " (fmt-pt centre) " cuts no hole: "
+                                       (if (eq? kind 'window)
+                                           "its sill and head leave no opening within the room's height"
+                                           "the rooms' heights do not overlap on the wall there"))))
+        (when (pair? zs)
+          (let ((zlo (fold-left min 1e30 (map car zs)))
+                (zhi (fold-left max -1e30 (map cdr zs))))
+            (when (memq kind '(door arch exit grate))
+              (emit-frame! c o kind origin dir s0 s1 zlo zhi a b line-side))
+            (when (eq? kind 'window)
+              (emit-mullions! c origin dir s0 s1 zlo zhi a line-side))
+            (add-gedge! c kind (opening-a o) (or (opening-b o) 'exterior) centre (- s1 s0) zlo zhi
+                        (opening-reader o) (opening-line o))))))
+
+    ;; --- the sector graph's edges ----------------------------------------------------------------
+
+    ;; walk sight sound: how much each passes, 0 to 1 (P0 has no door leaves,
+    ;; so a door is an open doorway; the exit is locked by its reader).
+    (define (pass-factors kind)
+      (case kind
+        ((arch stairs) '(1.0 1.0 1.0))
+        ((door) '(1.0 1.0 0.9))
+        ((glass) '(0.0 1.0 0.3))
+        ((grate) '(1.0 0.5 0.8))
+        ((hatch) '(1.0 1.0 0.8))
+        ((window) '(0.0 1.0 0.1))
+        ((exit) '(1.0 0.0 0.3))
+        ((open) '(0.0 1.0 1.0))
+        (else '(0.0 0.0 0.0))))
+
+    ;; #(kind a b at width zlo zhi walk sight sound needs line)
+    (define (add-gedge! c kind a b at width zlo zhi needs line)
+      (let ((f (pass-factors kind)))
+        (growable-push! (ctx-gedges c)
+                        (vector kind a b at width zlo zhi (car f) (cadr f) (caddr f) needs line))))
+
+    ;; --- panes, frames, mullions ---------------------------------------------------------------------
+
+    ;; A glass pane filling a hole: one quad in the glass batch (drawn with cull
+    ;; none), and both faces in the soup.
+    (define (emit-pane! c e t0 t1 z0 z1 a)
+      (let* ((p (edge-point e t0)) (q (edge-point e t1))
+             (n2 (side-normal e 'left))
+             (n (v3 (px n2) (py n2) 0))
+             (ps (list (v3 (px p) (py p) z0) (v3 (px q) (py q) z0) (v3 (px q) (py q) z1) (v3 (px p) (py p) z1)))
+             (m (legend-default (ctx-legend c) 'rails)))
+        (emit-poly! (batch-for c 'pane) (mat c 'pane) ps n a)
+        (emit-poly-soup! (ctx-soup c) ps n (tag-of c 'glass) a #t)))
+
+    ;; The city through a window (design section 6: "magenta: the city's neon
+    ;; through the windows"): lights on the reserved circuit city, every
+    ;; CITY-STEP along the window, CITY-OUT outside the glass at 60% of its
+    ;; height. The pane is glass, so they reach in.
+    (define CITY-STEP 3.0)
+    (define CITY-OUT 1.5)
+    (define CITY-RGB (list (/ 255 255.0) (/ 89 255.0) (/ 217 255.0)))   ; #FF59D9
+
+    (define (city-light! c e side t0 t1 z0 z1)
+      (let* ((n (side-normal e side))
+             (len (- t1 t0))
+             (k (max 1 (exact (round (/ len CITY-STEP)))))
+             (z (+ z0 (* 0.6 (- z1 z0)))))
+        (for-each (lambda (i)
+                    (let ((p (pt- (edge-point e (+ t0 (* len (/ (+ i 0.5) k)))) (pt* n CITY-OUT))))
+                      (growable-push! (ctx-emitters c)
+                                      (vector (px p) (py p) z 9.0 0.55 'city
+                                              (car CITY-RGB) (cadr CITY-RGB) (caddr CITY-RGB) #f))))
+                  (iota k))))
+
+    ;; Along the line: the local frame for trim at s, on the line, facing
+    ;; line-side's normal.
+    (define (line-xform origin dir s z)
+      (let ((p (pt+ origin (pt* dir s))))
+        (xform origin: (v3 (px p) (py p) z) ax: dir ay: (cons (- (py dir)) (px dir)))))
+
+    ;; Jambs at both ends of a hole, and a head when there is wall above it.
+    (define (emit-frame! c o kind origin dir s0 s1 zlo zhi a b line-side)
+      (let* ((m (legend-default (ctx-legend c) 'frames))
+             (bt (batch-for c m)) (mi (mat c m))
+             (so (ctx-soup c)) (tag (tag-of c 'trim))
+             (fw (if (eq? kind 'grate) 0.04 FRAME-W))
+             (h (- zhi zlo))
+             ;; the lowest ceiling over the hole, on either side
+             (room-top (fold-left min 1e30
+                                  (filter-map (lambda (id) (let ((r (and id (owner-room-of c id)))) (and r (room-ceiling r))))
+                                              (list a b))))
+             (head? (> room-top (+ zhi fw 0.02))))
+        (for-each (lambda (s)
+                    (let ((xf (line-xform origin dir s 0.0))
+                          (cc (v3 0 0 (+ zlo (* 0.5 h))))
+                          (sz (v3 fw FRAME-D h)))
+                      (emit-box! bt mi xf cc sz a)
+                      (emit-box-soup! so xf cc sz tag a)))
+                  (list (- s0 (* 0.5 fw)) (+ s1 (* 0.5 fw))))
+        (when head?
+          (let ((xf (line-xform origin dir (* 0.5 (+ s0 s1)) 0.0))
+                (cc (v3 0 0 (+ zhi (* 0.5 fw))))
+                (sz (v3 (+ (- s1 s0) (* 2 fw)) FRAME-D fw)))
+            (emit-box! bt mi xf cc sz a)
+            (emit-box-soup! so xf cc sz tag a)))))
+
+    ;; A window's mullions, sill and head (design section 7's detail rule).
+    (define (emit-mullions! c origin dir s0 s1 zlo zhi a line-side)
+      (let* ((m (legend-default (ctx-legend c) 'trim))
+             (bt (batch-for c m)) (mi (mat c m))
+             (so (ctx-soup c)) (tag (tag-of c 'trim))
+             (len (- s1 s0))
+             (n (max 1 (exact (ceiling (/ len 1.8)))))
+             (h (- zhi zlo)))
+        (for-each (lambda (k)
+                    (let ((xf (line-xform origin dir (+ s0 (* len (/ k n))) 0.0))
+                          (cc (v3 0 0 (+ zlo (* 0.5 h))))
+                          (sz (v3 0.1 0.16 h)))
+                      (emit-box! bt mi xf cc sz a)
+                      (emit-box-soup! so xf cc sz tag a)))
+                  (iota (+ n 1)))
+        (for-each (lambda (z)
+                    (let ((xf (line-xform origin dir (* 0.5 (+ s0 s1)) 0.0))
+                          (cc (v3 0 0 z))
+                          (sz (v3 len 0.2 0.08)))
+                      (emit-box! bt mi xf cc sz a)))
+                  (list (+ zlo 0.04) (- zhi 0.04)))))
+
+    ;; --- hatches -------------------------------------------------------------------------------------
+
+    ;; Does the square (its corners) lie inside room r? Every corner inside
+    ;; or on the outline (flush to any wall alike), no outline edge crossing
+    ;; a side, and no outline corner strictly inside it (a notch poking in).
+    (define (square-in-room? r corners)
+      (let* ((cs (room-corners r))
+             (cen (poly-centroid corners))
+             (ring (lambda (ps) (map cons ps (append (cdr ps) (list (car ps))))))
+             (sides (ring corners)))
+        (and (every (lambda (q) (point-in-poly? (pt+ q (pt* (pt-norm (pt- cen q)) 1e-5)) cs)) corners)
+             (not (any (lambda (re) (any (lambda (se) (proper-cross? (car re) (cdr re) (car se) (cdr se))) sides))
+                       (ring cs)))
+             (not (any (lambda (v) (and (point-in-poly? v corners)
+                                        (every (lambda (se) (> (point-seg-dist v (car se) (cdr se)) 1e-5)) sides)))
+                       cs)))))
+
+    ;; Do segments a-b and c-d cross at a point inside both (not at an end)?
+    (define (proper-cross? a b c d)
+      (let* ((r (pt- b a)) (s (pt- d c)) (den (pt-cross r s)))
+        (and (> (abs den) 1e-12)
+             (let* ((ca (pt- c a)) (t (/ (pt-cross ca s) den)) (u (/ (pt-cross ca r) den)))
+               (and (> t 1e-6) (< t (- 1.0 1e-6)) (> u 1e-6) (< u (- 1.0 1e-6)))))))
+
+    (define (resolve-hatch! c o)
+      (let* ((lu (hatch-rooms c o))
+             (line (opening-line o))
+             (what (describe-opening o)))
+        (when lu
+          (let* ((lower (car lu)) (upper (cdr lu))
+                 (p (opening-at o))
+                 (s (* 0.5 (or (opening-size o) HATCH-SIZE)))
+                 (axes (hatch-axes o upper))
+                 (corners (hatch-square o upper))
+                 (inside? (lambda (r q) (point-in-poly? q (room-corners r)))))
+            (cond ((not (and (inside? lower p) (inside? upper p)))
+                   (add-problem! c 1 line (string-append what " at " (fmt-pt p) " is not inside both rooms' footprints")))
+                  ((not (and (square-in-room? lower corners) (square-in-room? upper corners)))
+                   (add-problem! c 1 line (string-append what " at " (fmt-pt p) ": its " (num->str (* 2 s))
+                                                         " m square runs outside "
+                                                         (symbol->string (room-name (if (square-in-room? upper corners) lower upper)))
+                                                         " (it is too near a wall)")))
+                  ((< (room-floor upper) (- (room-ceiling lower) 1e-6))
+                   (add-problem! c 1 line (string-append what ": " (symbol->string (room-name upper))
+                                                         "'s floor is below " (symbol->string (room-name lower)) "'s ceiling")))
+                  (else
+                   ;; a frame round the hole, in the lower room's ceiling
+                   (let* ((m 'grate) (bt (batch-for c m)) (mi (mat c m))
+                          (z (- (room-ceiling lower) 0.02))
+                          (xf (xform origin: (v3 (px p) (py p) 0) ax: (car axes) ay: (cdr axes))))
+                     (for-each (lambda (b)
+                                 (emit-box! bt mi xf (car b) (cdr b) (room-index lower)))
+                               (list (cons (v3 0 (- (+ s 0.03)) z) (v3 (+ (* 2 s) 0.12) 0.06 0.04))
+                                     (cons (v3 0 (+ s 0.03) z) (v3 (+ (* 2 s) 0.12) 0.06 0.04))
+                                     (cons (v3 (- (+ s 0.03)) 0 z) (v3 0.06 (* 2 s) 0.04))
+                                     (cons (v3 (+ s 0.03) 0 z) (v3 0.06 (* 2 s) 0.04)))))
+                   (add-gedge! c 'hatch (room-name lower) (room-name upper) p (* 2 s)
+                               (room-ceiling lower) (room-floor upper) #f line)))))))
+
+    ;; --- walls ------------------------------------------------------------------------------------------
+
+    (define (uniq-sorted xs)
+      (let loop ((xs (list-sort < xs)) (acc '()))
+        (cond ((null? xs) (reverse acc))
+              ((and (pair? acc) (< (abs (- (car xs) (car acc))) 1e-6)) (loop (cdr xs) acc))
+              (else (loop (cdr xs) (cons (car xs) acc))))))
+
+    (define (between xs lo hi) (filter (lambda (x) (and (> x (+ lo 1e-6)) (< x (- hi 1e-6)))) xs))
+
+    ;; Multiples of step strictly inside lo..hi.
+    (define (multiples lo hi step)
+      (let loop ((k (exact (ceiling (/ lo step)))) (acc '()))
+        (let ((x (* k step)))
+          (if (>= x (- hi 1e-6)) (reverse acc)
+              (loop (+ k 1) (if (> x (+ lo 1e-6)) (cons x acc) acc))))))
+
+    (define (wall-side! c ei side)
+      (let* ((pl (ctx-plan c))
+             (e (vector-ref (plan-edges pl) ei))
+             (fs (side-faces e side))
+             (mine (face-ivs c (car fs)))
+             (theirs (face-ivs c (cdr fs))))
+        (when (pair? mine)
+          (let* ((owners (ctx-owners c)) (groups (ctx-groups c))
+                 (cont (apply append
+                              (map (lambda (a)
+                                     (filter-map (lambda (b)
+                                                   (and (linked? owners groups (iv-owner a) (iv-owner b))
+                                                        (let ((lo (max (iv-lo a) (iv-lo b))) (hi (min (iv-hi a) (iv-hi b))))
+                                                          (and (> hi (+ lo 1e-6)) (cons lo hi)))))
+                                                 theirs))
+                                   mine)))
+                 (holes (vector-ref (ctx-holes c) ei))
+                 (len (edge-len e))
+                 (n2 (side-normal e side))
+                 (n (v3 (px n2) (py n2) 0))
+                 (right (side-right e side))
+                 (tb (uniq-sorted (append (list 0.0 len)
+                                          (filter (lambda (t) (and (> t 0.0) (< t len)))
+                                                  (apply append (map (lambda (h) (list (vector-ref h 0) (vector-ref h 1))) holes))))))
+                 (zb (uniq-sorted (append (apply append (map (lambda (iv) (list (iv-lo iv) (iv-hi iv))) mine))
+                                          (apply append (map (lambda (x) (list (car x) (cdr x))) cont))
+                                          (apply append (map (lambda (h) (list (vector-ref h 2) (vector-ref h 3))) holes)))))
+                 (owner-at (lambda (z) (find (lambda (iv) (and (> z (iv-lo iv)) (< z (iv-hi iv)))) mine)))
+                 (wall? (lambda (t z)
+                          (and (owner-at z)
+                               (not (any (lambda (x) (and (> z (car x)) (< z (cdr x)))) cont))
+                               (not (any (lambda (h) (and (> t (vector-ref h 0)) (< t (vector-ref h 1))
+                                                          (> z (vector-ref h 2)) (< z (vector-ref h 3))))
+                                         holes)))))
+                 (P (lambda (t z) (let ((q (edge-point e t))) (v3 (px q) (py q) z))))
+                 (quad (lambda (t0 t1 z0 z1) (list (P t0 z0) (P t1 z0) (P t1 z1) (P t0 z1))))
+                 ;; u(t) = (a.right + t d.right) / GRID: grid lines where u is whole
+                 (ua (pt-dot (edge-a e) right))
+                 (ud (pt-dot (edge-dir e) right))
+                 (tgrid (let ((u0 (min ua (+ ua (* ud len)))) (u1 (max ua (+ ua (* ud len)))))
+                          (map (lambda (u) (/ (- u ua) ud)) (multiples u0 u1 GRID))))
+                 (tf (uniq-sorted (append tb tgrid)))
+                 (zmin (fold-left min 1e30 zb)) (zmax (fold-left max -1e30 zb))
+                 (zf (uniq-sorted (append zb (multiples zmin zmax GRID))))
+                 (skirting (legend-default (ctx-legend c) 'skirting)))
+            ;; collision and skirting: the coarse cells
+            (let tloop ((ts tb))
+              (when (pair? (cdr ts))
+                (let zloop ((zs zb))
+                  (when (pair? (cdr zs))
+                    (let* ((t0 (car ts)) (t1 (cadr ts)) (z0 (car zs)) (z1 (cadr zs))
+                           (tc (* 0.5 (+ t0 t1))) (zc (* 0.5 (+ z0 z1))))
+                      (when (wall? tc zc)
+                        (let* ((iv (owner-at zc)) (id (iv-owner iv)))
+                          (emit-poly-soup! (ctx-soup c) (quad t0 t1 z0 z1) n (tag-of c 'wall) (room-or-none c id) #f)
+                          ;; skirting where the wall meets its room's floor
+                          (when (and (< (abs (- z0 (iv-lo iv))) 1e-6) (owner-room-of c id) (> (- t1 t0) 0.05))
+                            (let* ((p0 (pt+ (edge-point e t0) (pt* n2 0.01)))
+                                   (p1 (pt+ (edge-point e t1) (pt* n2 0.01)))
+                                   (zt (+ z0 (min 0.1 (- z1 z0)))))
+                              (emit-poly! (batch-for c skirting) (mat c skirting)
+                                          (list (v3 (px p0) (py p0) z0) (v3 (px p1) (py p1) z0)
+                                                (v3 (px p1) (py p1) zt) (v3 (px p0) (py p0) zt))
+                                          n id))))))
+                    (zloop (cdr zs))))
+                (tloop (cdr ts))))
+            ;; render: the fine cells
+            (let tloop ((ts tf))
+              (when (pair? (cdr ts))
+                (let zloop ((zs zf))
+                  (when (pair? (cdr zs))
+                    (let* ((t0 (car ts)) (t1 (cadr ts)) (z0 (car zs)) (z1 (cadr zs))
+                           (tc (* 0.5 (+ t0 t1))) (zc (* 0.5 (+ z0 z1))))
+                      (when (wall? tc zc)
+                        (let* ((id (iv-owner (owner-at zc)))
+                               (r (owner-room-of c id))
+                               (m (if r (wall-material c r) (legend-default (ctx-legend c) 'walls))))
+                          (emit-poly! (batch-for c m) (mat c m) (quad t0 t1 z0 z1) n (room-or-none c id)))))
+                    (zloop (cdr zs))))
+                (tloop (cdr ts))))))))
+
+    ;; A room index for an owner (a hatch's walls belong to its lower room).
+    (define (room-or-none c id)
+      (let ((o (vector-ref (ctx-owners c) id)))
+        (if (eq? (owner-kind o) 'room) id (or (owner-lower o) -1))))
+
+    ;; --- floors and ceilings -------------------------------------------------------------------------------
+
+    ;; Triangles (2D, ccw) split at the half-metre grid, as convex pieces.
+    (define (grid-pieces tris)
+      (apply append
+             (map (lambda (t)
+                    (let* ((bb (poly-bbox t))
+                           (x0 (* GRID (floor (/ (car bb) GRID)))) (y0 (* GRID (floor (/ (cadr bb) GRID))))
+                           (x1 (caddr bb)) (y1 (cadddr bb)))
+                      (let xl ((x x0) (acc '()))
+                        (if (>= x x1) acc
+                            (xl (+ x GRID)
+                                (let yl ((y y0) (acc acc))
+                                  (if (>= y y1) acc
+                                      (yl (+ y GRID)
+                                          (let ((piece (clip-convex-rect t x y (+ x GRID) (+ y GRID))))
+                                            (if (and (>= (length piece) 3) (> (abs (poly-area piece)) 1e-9))
+                                                (cons piece acc)
+                                                acc))))))))))
+                  tris)))
+
+    (define (floors-and-ceilings! c)
+      (let* ((pl (ctx-plan c)) (faces (plan-faces pl)) (so (ctx-soup c)))
+        (let loop ((i 0))
+          (when (< i (vector-length faces))
+            (let* ((f (vector-ref faces i))
+                   (tris (face-triangles f))
+                   (pieces (grid-pieces tris)))
+              (for-each
+                (lambda (col)
+                  (let* ((lo (car col)) (hi (cadr col))
+                         (bot (owner-room-of c (caddr col)))
+                         (top (owner-room-of c (cadddr col))))
+                    (when bot
+                      (let* ((m (floor-material c bot)) (b (batch-for c m)) (mi (mat c m)) (up (v3 0 0 1))
+                             (tag (tag-of c (room-surface bot))))
+                        (for-each (lambda (pc) (emit-poly! b mi (map (lambda (q) (v3 (px q) (py q) lo)) pc) up (room-index bot)))
+                                  pieces)
+                        (for-each (lambda (t) (emit-poly-soup! so (map (lambda (q) (v3 (px q) (py q) lo)) t) up tag (room-index bot) #f))
+                                  tris)))
+                    (when top
+                      (let* ((m (ceiling-material c top)) (b (batch-for c m)) (mi (mat c m)) (down (v3 0 0 -1)))
+                        (for-each (lambda (pc) (emit-poly! b mi (map (lambda (q) (v3 (px q) (py q) hi)) pc) down (room-index top)))
+                                  pieces)
+                        (for-each (lambda (t) (emit-poly-soup! so (map (lambda (q) (v3 (px q) (py q) hi)) t) down
+                                                               (tag-of c 'ceiling) (room-index top) #f))
+                                  tris)))))
+                (vector-ref (ctx-cols c) i)))
+            (loop (+ i 1))))))
+
+    ;; --- stairs -------------------------------------------------------------------------------------------
+
+    (define (build-stair! c s)
+      (let* ((lower (room-by-name c (stair-from s)))
+             (upper (room-by-name c (stair-to s)))
+             (line (stair-line s)))
+        (when (and lower upper)
+          (let* ((p (stair-start s)) (q (stair-end s))
+                 (len (pt-dist p q))
+                 (d (pt-norm (pt- q p)))
+                 (side (cons (- (py d)) (px d)))
+                 (w (stair-width s))
+                 (rise (- (room-floor upper) (room-floor lower)))
+                 (n (max 1 (exact (ceiling (- (/ rise STEP-MAX) 1e-9)))))
+                 (run (/ len n))
+                 (z0 (room-floor lower))
+                 (surf (or (stair-surface s) (room-surface lower)))
+                 (m (let ((sf (surface-of c surf))) (if sf (surface-material sf) 'marble)))
+                 (b (batch-for c m)) (mi (mat c m)) (so (ctx-soup c)) (tag (tag-of c surf))
+                 (id (room-index lower))
+                 (xf (xform origin: (v3 (px p) (py p) 0) ax: side ay: d))
+                 (corner (lambda (x y) (pt+ p (pt+ (pt* side x) (pt* d y))))))
+            (cond ((<= rise 0.0)
+                   (add-problem! c 6 line (string-append "the stair from " (symbol->string (room-name lower)) " to "
+                                                         (symbol->string (room-name upper)) " does not rise")))
+                  ((< len 0.5) (add-problem! c 6 line "the stair is shorter than half a metre"))
+                  (else
+                   ;; step k (1..n): its box from the floor to its tread, full width
+                   (let loop ((k 1))
+                     (when (<= k n)
+                       (let* ((y0 (* run (- k 1))) (y1 (* run k))
+                              (h (* rise (/ k n)))
+                              (cc (v3 0 (* 0.5 (+ y0 y1)) (+ z0 (* 0.5 h))))
+                              (sz (v3 w run h)))
+                         (emit-box! b mi xf cc sz id)
+                         (emit-box-soup! so xf cc sz tag id)
+                         (growable-push! (ctx-stair-boxes c)
+                                         (list (list (corner (* -0.5 w) y0) (corner (* 0.5 w) y0)
+                                                     (corner (* 0.5 w) y1) (corner (* -0.5 w) y1))
+                                               (+ z0 h))))
+                       (loop (+ k 1))))
+                   (growable-push! (ctx-footprints c)
+                                   (list "the stairs" (list (corner (* -0.5 w) 0.0) (corner (* 0.5 w) 0.0)
+                                                            (corner (* 0.5 w) len) (corner (* -0.5 w) len))))
+                   (growable-push! (ctx-landings c) (list (corner (* -0.5 w) len) (corner (* 0.5 w) len) line
+                                                          (room-index upper) (room-index lower) d))
+                   (add-gedge! c 'stairs (room-name lower) (room-name upper) (pt* (pt+ p q) 0.5) w
+                               z0 (room-floor upper) #f line)))))))
+
+    ;; --- rails --------------------------------------------------------------------------------------------
+
+    ;; Rails along an open room's open edges (edge: glass-rail), left open where
+    ;; a stair lands; and the rails a floor declares in things:.
+    (define (open-edge-rails! c)
+      (let* ((pl (ctx-plan c)) (es (plan-edges pl))
+             (owners (ctx-owners c)) (groups (ctx-groups c))
+             (opens (vector (quote ()))))   ; ((u-name b-name longest-edge total-width z top line) ...)
+        (let loop ((i 0))
+          (when (< i (vector-length es))
+            (let ((e (vector-ref es i)))
+              (for-each
+                (lambda (side)
+                  (let* ((fs (side-faces e side))
+                         (mine (face-ivs c (car fs))) (theirs (face-ivs c (cdr fs))))
+                    (for-each
+                      (lambda (a)
+                        (let ((u (owner-room-of c (iv-owner a))))
+                          (when (and u (room-edge u) (not (iv-of c (cdr fs) (iv-owner a))))
+                            (let ((b (find (lambda (b) (and (not (= (iv-owner b) (iv-owner a)))
+                                                            (linked? owners groups (iv-owner a) (iv-owner b))
+                                                            (<= (iv-lo b) (+ (iv-lo a) 1e-6))
+                                                            (>= (iv-hi b) (+ (iv-lo a) RAIL-H))))
+                                           theirs)))
+                              (when b
+                                (let* ((z (iv-lo a))
+                                       (spans (subtract-landings c e (list (cons 0.0 (edge-len e))))))
+                                  (for-each (lambda (sp)
+                                              (let ((p (edge-point e (car sp))) (q (edge-point e (cdr sp))))
+                                                (emit-rail! c p q z (iv-owner a) #f)))
+                                            spans)
+                                  (note-open! opens (room-name u) (room-name (owner-room-of c (iv-owner b))) e
+                                              z (min (iv-hi a) (iv-hi b)) #f (room-line u))))))))
+                      mine)))
+                '(left right)))
+            (loop (+ i 1))))
+        ;; one open edge in the sector graph per pair of rooms, at the middle of
+        ;; the longest stretch, as wide as all of them together
+        (for-each (lambda (o)
+                    (let ((e (list-ref o 2)))
+                      (add-gedge! c (quote open) (list-ref o 0) (list-ref o 1) (pt* (pt+ (edge-a e) (edge-b e)) 0.5)
+                                  (list-ref o 3) (list-ref o 4) (list-ref o 5) (list-ref o 6) (list-ref o 7))))
+                  (reverse (vector-ref opens 0)))
+        ;; declared rails
+        (for-each (lambda (t)
+                    (when (eq? (thing-kind t) 'rail)
+                      (let* ((seg (thing-field t 'along))
+                             (r (and (thing-field t 'in) (room-by-name c (thing-field t 'in))))
+                             (z (if r (room-floor r) (lowest-floor-at c (pt* (pt+ (car seg) (cadr seg)) 0.5)))))
+                        (emit-rail! c (car seg) (cadr seg) z (if r (room-index r) -1) (thing-line t)))))
+                  (floor-things (ctx-floor c)))))
+
+    ;; Gather an open edge: per (u b), the longest plan edge and the total width.
+    (define (note-open! opens u b e z top needs line)
+      (let ((hit (find (lambda (o) (and (eq? (car o) u) (eq? (cadr o) b))) (vector-ref opens 0))))
+        (vector-set! opens 0
+                     (if hit
+                         (map (lambda (o) (if (eq? o hit)
+                                              (list u b (if (> (edge-len e) (edge-len (list-ref o 2))) e (list-ref o 2))
+                                                    (+ (list-ref o 3) (edge-len e)) (list-ref o 4) (list-ref o 5) needs line)
+                                              o))
+                              (vector-ref opens 0))
+                         (cons (list u b e (edge-len e) z top needs line) (vector-ref opens 0))))))
+
+    ;; Remove the stretches of edge e that a stair's landing covers.
+    (define (subtract-landings c e spans)
+      (let ((ls (vector->list (growable-data (ctx-landings c)) 0 (growable-count (ctx-landings c)))))
+        (fold-left
+          (lambda (spans l)
+            (let* ((p (car l)) (q (cadr l)))
+              (if (and (< (point-seg-dist p (edge-a e) (edge-b e)) LANDING-TOL) (< (point-seg-dist q (edge-a e) (edge-b e)) LANDING-TOL))
+                  (let* ((tp (* (seg-param p (edge-a e) (edge-b e)) (edge-len e)))
+                         (tq (* (seg-param q (edge-a e) (edge-b e)) (edge-len e)))
+                         (lo (min tp tq)) (hi (max tp tq)))
+                    (apply append
+                           (map (lambda (sp)
+                                  (filter (lambda (x) (> (- (cdr x) (car x)) 1e-3))
+                                          (list (cons (car sp) (min (cdr sp) lo)) (cons (max (car sp) hi) (cdr sp)))))
+                                spans)))
+                  spans)))
+          spans ls)))
+
+    (define (lowest-floor-at c p)
+      (let ((rs (filter (lambda (r) (point-in-poly? p (room-corners r))) (floor-rooms (ctx-floor c)))))
+        (if (null? rs) 0.0 (fold-left min 1e30 (map room-floor rs)))))
+
+    ;; A glass rail from p to q standing on z: the pane, a steel top rail, and a
+    ;; two-sided wall in the soup.
+    (define (emit-rail! c p q z room line)
+      (let* ((d (pt-norm (pt- q p))) (len (pt-dist p q))
+             (n2 (cons (- (py d)) (px d)))
+             (n (v3 (px n2) (py n2) 0))
+             (top (+ z RAIL-H))
+             (ps (list (v3 (px p) (py p) z) (v3 (px q) (py q) z) (v3 (px q) (py q) (- top 0.05)) (v3 (px p) (py p) (- top 0.05))))
+             (tm (legend-default (ctx-legend c) 'trim))
+             (rm (legend-default (ctx-legend c) 'rails)))
+        (growable-push! (ctx-rails c) (vector p q z line))
+        (emit-poly! (batch-for c rm) (mat c rm) ps n room)
+        (emit-box! (batch-for c tm) (mat c tm)
+                   (xform origin: (v3 (px p) (py p) 0) ax: d ay: n2)
+                   (v3 (* 0.5 len) 0 (- top 0.025)) (v3 len 0.05 0.05) room)
+        (emit-poly-soup! (ctx-soup c)
+                         (list (v3 (px p) (py p) z) (v3 (px q) (py q) z) (v3 (px q) (py q) top) (v3 (px p) (py p) top))
+                         n (tag-of c 'glass) room #t)))
+
+    ;; --- the whole architecture ----------------------------------------------------------------------------
+
+    (define (build-architecture! c0)
+      (let ((c (build-plan! c0)))
+        (checkpoint! "plan built")
+        (for-each (lambda (o) (unless (eq? (opening-kind o) 'hatch) (resolve-opening! c o)))
+                  (floor-openings (ctx-floor c)))
+        (for-each (lambda (o) (when (eq? (opening-kind o) 'hatch) (resolve-hatch! c o)))
+                  (floor-openings (ctx-floor c)))
+        (checkpoint! "openings cut")
+        (let loop ((i 0))
+          (when (< i (vector-length (plan-edges (ctx-plan c))))
+            (wall-side! c i 'left)
+            (wall-side! c i 'right)
+            (loop (+ i 1))))
+        (checkpoint! "walls built")
+        (floors-and-ceilings! c)
+        (checkpoint! "floors built")
+        (for-each (lambda (s) (build-stair! c s)) (floor-stairs (ctx-floor c)))
+        (checkpoint! "stairs built")
+        (open-edge-rails! c)
+        c))))

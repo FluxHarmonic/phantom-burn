@@ -6,7 +6,7 @@
   (import (sigil core))
   (cond-expand
     (wasm (import (phantom shell web)))
-    (else (import (phantom shell native))))
+    (else (import (phantom shell native) (phantom floor cli))))
 
   (export main sigil-web-dispatch-event)
 
@@ -19,6 +19,6 @@
          (web-dispatch type payload)))
       (else
        (define (main . args)
-         (apply native-main args))
+         (if (floor-command?) (floor-main) (apply native-main args)))
        (define (sigil-web-dispatch-event type payload)
          0)))))

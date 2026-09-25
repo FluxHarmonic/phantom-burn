@@ -1,0 +1,21 @@
+;; props/textures/wall.cells - 16x16 cells per half metre (design section 7), palette colours only.
+;; The same cells as the look test's (export-floor14.py TEX["wall"]).
+(texture wall
+  legend: (("|" "#17122E") ("w" "#2E1C4D") ("x" "#21173D") ("_" "#3D4052"))
+  cells:
+  ("|wwwwwwwwwwwwwww"
+   "|wwwwwwwxwwwwwww"
+   "|wwwwwwwwwwwwwww"
+   "|wwxwwwwwwwwwwww"
+   "|wwwwwwwwwwwwxww"
+   "|wwwwwwwwwwwwwww"
+   "|wwwwwxwwwwwwwww"
+   "|wwwwwwwwwwwwwww"
+   "|wwwwwwwwwwwwwww"
+   "|wwwwwwwwwxwwwww"
+   "|wwwwwwwwwwwwwww"
+   "|wxwwwwwwwwwwwww"
+   "|wwwwwwwwwwwwwww"
+   "|wwwwwwwwwwwwwxw"
+   "|wwwwwwwwwwwwwww"
+   "|wwwwxwwwwwwwwww"))

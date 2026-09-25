@@ -1,0 +1,471 @@
+;;; (phantom floor reach) - Gate 3, reach (design section 8): the exit is
+;;; reachable in each arrival state the floor below can produce, and
+;;; unreachable without this floor's credential; every route is proved by a
+;;; WITNESS, the exact input script that made it, replayed through the real
+;;; movement code: the shell's (phantom walker), stepped at its fixed TICK,
+;;; over the collision the game loads ((phantom collide)'s
+;;; collision-from-soup of the compiled floor's soup).
+;;;
+;;; P0 has no credentials yet, so (design section 8, "What P0 and S0 need"):
+;;; the stairwell reader is a closed edge unless the arrival state holds the
+;;; exit's tier (FACILITIES on the slice). With it, the exit must be reached
+;;; from start: (a fresh body at start:, facing facing:, on the lowest floor
+;;; there) and along each of the floor's routes: (on the slice, from the
+;;; badge avoiding the corridor: the duct, the grate, the mezzanine and the
+;;; stairs). Without it, the exit door must hold (bodies driven at it, six
+;;; ways, never pass its wall line), and nothing may reach the space behind
+;;; the door by any other way.
+;;;
+;;; The search:
+;;;   ANCHORS    places a body can stand at rest: candidates on a GRID over
+;;;              every walkable collision triangle (floors, treads, prop tops),
+;;;              each kept only if a walker put there and left alone for
+;;;              SETTLE ticks stays within 5 cm, grounded;
+;;;   EDGES      from an anchor to a neighbour within REACH metres: a closed-
+;;;              loop controller turns to face the neighbour each tick and
+;;;              pushes forward until the body rests within 15 cm of it, or
+;;;              gives up after MAX-TICKS; the walker's own mantle and forced
+;;;              crouch do the rest (the cabinet, the hatch, the duct);
+;;;   ROUTES     breadth-first over edges from a start anchor to any target
+;;;              anchor, optionally forbidding anchors in some rooms; a
+;;;              route from a plan point starts at the lowest anchor within
+;;;              PLACE-R of it where a body stands;
+;;;   WITNESS    the route is REALIZED from the real start (the controller run
+;;;              along it from where the body really is, every input
+;;;              recorded), the recording written as a script (the replay
+;;;              module's text), parsed back, and REPLAYED from a fresh walker
+;;;              made from the text alone: it must end exactly where
+;;;              realizing ended, within the target.
+;;;
+;;; The search is conservative: "unreachable" means no searched pattern
+;;; reached it (Harkfell's reach checker has the same honest limit).
+;;;
+;;; Pure: no platform.
+
+(define-library (phantom floor reach)
+  (import (sigil core)
+          (sigil list)
+          (sigil math)
+          (sigil string)
+          (phantom walker)
+          (phantom collide)
+          (phantom floor problem)
+          (phantom floor format)
+          (phantom floor poly)
+          (phantom floor build)
+          (phantom floor replay)
+          (phantom floor compile))
+
+  (export reach-check reach-report-lines reach-probe)
+
+  (begin
+    (define GRID 0.5)
+    (define SETTLE 20)
+    (define REACH 0.8)          ; neighbours up to this far apart in plan
+    (define MAX-TICKS 180)      ; 3 s per edge
+    (define ARRIVE 0.15)
+    (define PI 3.141592653589793)
+
+    ;; --- the collision the game uses -------------------------------------------------
+
+    (define (collision-of-floor cf)
+      (let ((col (compiled-floor-collision cf)))
+        (collision-from-soup (bytevector-copy (collision-tris col) 0 (* 36 (collision-count col)))
+                             (bytevector-copy (collision-surface col) 0 (collision-count col))
+                             (bytevector-copy (collision-room col) 0 (collision-count col)))))
+
+    ;; --- anchors ----------------------------------------------------------------------
+    ;;
+    ;; An anchor: #(id x y z state room). state: the settled walker.
+
+    ;; A body put at (x y z) and left alone. Where a standing body would not
+    ;; fit under the ceiling (the duct), it crouches first, as a player must
+    ;; (C): the walker never shrinks a standing body to fit.
+    (define CROUCH-PRESS (make-input 0.0 0.0 0.0 0.0 #f #f #t 0))
+
+    ;; Does a standing body at (x y z) have too little headroom?
+    (define (low-at? c x y z)
+      (and (collide-ceiling c x y (+ z 0.05) (+ z STAND 0.02)) #t))
+
+    (define (settle c x y z)
+      (let* ((low? (low-at? c x y z))
+             (w1 (if low? (crouched-walker x y z) (make-walker x y z 0.0))))
+        (let loop ((w w1) (k 0))
+          (if (>= k SETTLE) w (loop (walker-step w NO-INPUT TICK c) (+ k 1))))))
+
+    ;; A walker already crouched, for a low place (the duct), as a player
+    ;; arrives there: the walker's crouched constructor (shell 57f4493).
+    (define (crouched-walker x y z) (make-walker x y z 0.0 #t))
+
+    ;; The room whose air holds the feet at (x y z): of the rooms whose
+    ;; outline holds the point and whose height span holds z, the one with the
+    ;; highest floor (a mezzanine over the lobby, the duct over the corridor).
+    (define (room-at-point cf x y z)
+      (let ((rs (filter (lambda (r) (and (point-in-poly? (cons x y) (room-corners r))
+                                         (>= z (- (room-floor r) 0.05)) (< z (room-ceiling r))))
+                        (floor-rooms (ctx-floor* cf)))))
+        (if (null? rs) #f
+            (room-name (fold-left (lambda (a b) (if (> (room-floor b) (room-floor a)) b a)) (car rs) rs)))))
+
+    (define (ctx-floor* cf) (ctx-floor (compiled-floor-ctx cf)))
+
+    ;; Candidate spots: the centres of GRID cells over every upward collision
+    ;; triangle, at the triangle's height there.
+    (define (candidates cf)
+      (let* ((col (compiled-floor-collision cf))
+             (tr (collision-tris col)) (n (collision-count col)))
+        (define (f i k) (bytevector-ieee-single-ref tr (+ (* 36 i) (* 4 k))))
+        (let loop ((i 0) (acc '()))
+          (if (>= i n) acc
+              (let* ((ax (f i 0)) (ay (f i 1)) (az (f i 2))
+                     (bx (f i 3)) (by (f i 4)) (bz (f i 5))
+                     (cx (f i 6)) (cy (f i 7)) (cz (f i 8))
+                     (ux (- bx ax)) (uy (- by ay)) (uz (- bz az))
+                     (vx (- cx ax)) (vy (- cy ay)) (vz (- cz az))
+                     (nz (- (* ux vy) (* uy vx)))
+                     (nl (sqrt (+ (square (- (* uy vz) (* uz vy))) (square (- (* uz vx) (* ux vz))) (square nz)))))
+                (loop (+ i 1)
+                      (if (or (<= nl 1e-9) (< (/ nz nl) 0.9))
+                          acc
+                          (append (grid-points-in (list (cons ax ay) (cons bx by) (cons cx cy)) az bz cz) acc))))))))
+
+    ;; GRID-cell centres inside a triangle, with the triangle's height there.
+    (define (grid-points-in t az bz cz)
+      (let* ((bb (poly-bbox t))
+             (x0 (+ (* GRID (floor (/ (car bb) GRID))) (* 0.5 GRID)))
+             (y0 (+ (* GRID (floor (/ (cadr bb) GRID))) (* 0.5 GRID))))
+        (let xl ((x x0) (acc '()))
+          (if (> x (caddr bb)) acc
+              (xl (+ x GRID)
+                  (let yl ((y y0) (acc acc))
+                    (if (> y (cadddr bb)) acc
+                        (yl (+ y GRID)
+                            (let ((p (cons x y)))
+                              (if (point-in-poly? p t)
+                                  (cons (list x y (max az bz cz)) acc)
+                                  acc))))))))))
+
+    ;; An anchor is where a body put at a candidate comes to rest: grounded,
+    ;; not climbing, and still (its last settling tick moved it under 1 mm).
+    ;; In a narrow place (the duct, under the hatch) the walker's own
+    ;; collision pushes the body to where it fits, and that settled spot is
+    ;; the anchor. Anchors within 0.2 m (and 5 cm in height) are one.
+    (define (make-anchors cf c)
+      (let loop ((cs (candidates cf)) (acc '()) (id 0))
+        (if (null? cs) (list->vector (reverse acc))
+            (let* ((p (car cs)) (x (car p)) (y (cadr p)) (z (caddr p))
+                   (w0 (settle c x y (+ z 0.01)))
+                   (w (walker-step w0 NO-INPUT TICK c))
+                   (sx (walker-x w)) (sy (walker-y w)) (sz (walker-z w)))
+              (if (and (walker-grounded? w) (not (walker-mantling? w))
+                       (< (+ (abs (- sx (walker-x w0))) (abs (- sy (walker-y w0))) (abs (- sz (walker-z w0)))) 0.001)
+                       (not (any (lambda (a) (and (< (sqrt (+ (square (- (vector-ref a 1) sx)) (square (- (vector-ref a 2) sy)))) 0.2)
+                                                  (< (abs (- (vector-ref a 3) sz)) 0.05)))
+                                 acc)))
+                  (loop (cdr cs) (cons (vector id sx sy sz w (room-at-point cf sx sy sz) (list x y (+ z 0.01) 0.0 (low-at? c x y (+ z 0.01)))) acc) (+ id 1))
+                  (loop (cdr cs) acc id))))))
+
+    ;; --- the controller ------------------------------------------------------------------
+
+    (define (wrap-angle a)
+      (cond ((> a PI) (wrap-angle (- a (* 2 PI))))
+            ((< a (- PI)) (wrap-angle (+ a (* 2 PI))))
+            (else a)))
+
+    ;; One tick's input toward (tx, ty): turn to face it (yaw 0 is north,
+    ;; growing anticlockwise; forward is (-sin yaw, cos yaw)), push forward.
+    (define (input-toward w tx ty)
+      (let* ((dx (- tx (walker-x w))) (dy (- ty (walker-y w)))
+             (want (atan (- dx) dy))
+             (turn (wrap-angle (- want (walker-yaw w)))))
+        (make-input 0.0 1.0 turn 0.0 #f #f #f 0)))
+
+    (define (at-rest-near? w b)
+      (and (walker-grounded? w) (not (walker-mantling? w))
+           (< (sqrt (+ (square (- (walker-x w) (vector-ref b 1))) (square (- (walker-y w) (vector-ref b 2))))) ARRIVE)
+           (< (abs (- (walker-z w) (vector-ref b 3))) 0.1)))
+
+    ;; Drive w toward anchor b: (final-walker . inputs-reversed), or #f. On the
+    ;; first tick the crouch toggle is pressed when the body and b's settled
+    ;; body differ in crouching (into the duct crouched, out of it upright).
+    (define (drive c w b)
+      (let ((press? (not (eq? (walker-crouching? w) (walker-crouching? (vector-ref b 4))))))
+        (let loop ((w w) (k 0) (ins '()))
+          (cond ((at-rest-near? w b) (cons w ins))
+                ((>= k MAX-TICKS) #f)
+                (else (let* ((in0 (input-toward w (vector-ref b 1) (vector-ref b 2)))
+                             (in (if (and press? (= k 0))
+                                     (make-input 0.0 1.0 (input-look-yaw in0) 0.0 #f #f #t 0)
+                                     in0)))
+                        (loop (walker-step w in TICK c) (+ k 1) (cons in ins))))))))
+
+    ;; --- the search --------------------------------------------------------------------------
+
+    (define (neighbours anchors a)
+      (filter (lambda (b)
+                (and (not (= (vector-ref a 0) (vector-ref b 0)))
+                     (<= (sqrt (+ (square (- (vector-ref a 1) (vector-ref b 1))) (square (- (vector-ref a 2) (vector-ref b 2))))) REACH)
+                     (<= (abs (- (vector-ref a 3) (vector-ref b 3))) 2.0)))
+              (vector->list anchors)))
+
+    ;; Breadth-first from anchor s to any anchor target? holds for, never
+    ;; entering an anchor whose room is in forbidden. Edges are tried from each
+    ;; anchor's settled state. Returns the route as a list of anchors, or #f,
+    ;; and counts edges tried in stats (a vector #(tried found)).
+    (define (route c anchors s target? forbidden stats)
+      (let* ((n (vector-length anchors))
+             (prev (make-vector n #f))
+             (seen (make-vector n #f)))
+        (vector-set! seen (vector-ref s 0) #t)
+        (vector-set! stats 2 seen)
+        (let loop ((queue (list s)))
+          (cond ((null? queue) #f)
+                ((target? (car queue))
+                 (let back ((a (car queue)) (acc '()))
+                   (if (not a) acc (back (vector-ref prev (vector-ref a 0)) (cons a acc)))))
+                (else
+                 (let* ((a (car queue))
+                        (next (filter (lambda (b)
+                                        (and (not (vector-ref seen (vector-ref b 0)))
+                                             (not (memq (vector-ref b 5) forbidden))
+                                             (begin (vector-set! stats 0 (+ 1 (vector-ref stats 0)))
+                                                    (and (drive c (vector-ref a 4) b)
+                                                         (begin (vector-set! stats 1 (+ 1 (vector-ref stats 1))) #t)))))
+                                      (neighbours anchors a))))
+                   (for-each (lambda (b) (vector-set! seen (vector-ref b 0) #t) (vector-set! prev (vector-ref b 0) a)) next)
+                   (loop (append (cdr queue) next))))))))
+
+    ;; --- places ------------------------------------------------------------------------------
+
+    ;; A floor's facing (degrees, 0 east, anticlockwise) as a walker yaw
+    ;; (radians, 0 north, anticlockwise).
+    (define (facing->yaw deg) (* (- deg 90.0) (/ PI 180.0)))
+
+    ;; The lowest room floor under plan point p, or #f.
+    (define (floor-under fl p)
+      (let ((rs (filter (lambda (r) (point-in-poly? p (room-corners r))) (floor-rooms fl))))
+        (and (pair? rs) (fold-left min 1e30 (map room-floor rs)))))
+
+    ;; The anchor a route from plan point p starts at: of the anchors within
+    ;; PLACE-R of p in plan where a body stands (crouched ones only when none
+    ;; stands there: the duct), the lowest (to 10 cm), then the nearest. #f
+    ;; when there is none. Standing first, because the nearest low spot to a
+    ;; desk's badge is under the desk, where a crouched body is boxed in.
+    (define PLACE-R 1.5)
+
+    (define (anchor-near anchors p)
+      (let* ((d (lambda (a) (sqrt (+ (square (- (vector-ref a 1) (px p))) (square (- (vector-ref a 2) (py p)))))))
+             (near (filter (lambda (a) (<= (d a) PLACE-R)) (vector->list anchors)))
+             (standing (filter (lambda (a) (not (walker-crouching? (vector-ref a 4)))) near))
+             (pool (if (pair? standing) standing near)))
+        (and (pair? pool)
+             (let* ((zmin (fold-left min 1e30 (map (lambda (a) (vector-ref a 3)) pool)))
+                    (low (filter (lambda (a) (< (vector-ref a 3) (+ zmin 0.1))) pool)))
+               (fold-left (lambda (b a) (if (< (d a) (d b)) a b)) (car low) low)))))
+
+    ;; --- witnesses -----------------------------------------------------------------------------
+
+    ;; Gate 3's proof of a route: the controller is run along route rt (a list
+    ;; of anchors) from a fresh walker made from `start` (a script start line
+    ;; as a list, (x y z yaw crouched?)) after the `prefix` inputs, recording
+    ;; every input. The recording is then written as a script, parsed back,
+    ;; and replayed from a fresh walker made from the text alone. Returns
+    ;; #(arrived? ticks x y z proved? text): arrived? when every leg arrived;
+    ;; proved? when, as well, the replay from the text ends exactly where the
+    ;; run ended and that end is a target.
+    (define (witness cf c start prefix rt target?)
+      (let loop ((w (fold-left (lambda (w in) (walker-step w in TICK c)) (replay-walker start) prefix))
+                 (rest rt)
+                 (ins (reverse prefix)))
+        (if (null? rest)
+            (let* ((text (script->string start (reverse ins)))
+                   (s (parse-script text))
+                   (end (and s (fold-left (lambda (w in) (walker-step w in TICK c)) (replay-walker (car s)) (cdr s))))
+                   (proved? (and end
+                                 (= (walker-x end) (walker-x w)) (= (walker-y end) (walker-y w))
+                                 (= (walker-z end) (walker-z w))
+                                 (target? (vector -1 (walker-x end) (walker-y end) (walker-z end) end
+                                                  (room-at-point cf (walker-x end) (walker-y end) (walker-z end)))))))
+              (vector #t (length ins) (walker-x w) (walker-y w) (walker-z w) proved? text))
+            (let ((r (drive c w (car rest))))
+              (if r
+                  (loop (car r) (cdr rest) (append (cdr r) ins))
+                  (vector #f (length ins) (walker-x w) (walker-y w) (walker-z w) #f #f))))))
+
+    (define (settle-prefix) (make-list (+ SETTLE 1) NO-INPUT))
+
+    ;; --- the exit door -------------------------------------------------------------------------
+
+    ;; The exit's wall: (p n d), p the exit's point on the wall line, n the
+    ;; wall's normal pointing out of the exit's room, d along the wall.
+    (define (exit-wall fl exit)
+      (let* ((p (opening-at exit))
+             (r (find (lambda (r) (eq? (room-name r) (opening-a exit))) (floor-rooms fl)))
+             (cs (room-corners r))
+             (segs (map cons cs (append (cdr cs) (list (car cs)))))
+             (s (fold-left (lambda (b s) (if (< (point-seg-dist p (car s) (cdr s)) (point-seg-dist p (car b) (cdr b))) s b))
+                           (car segs) segs))
+             (d (pt-norm (pt- (cdr s) (car s))))
+             (n0 (cons (py d) (- (px d))))
+             (n (if (point-in-poly? (pt+ p (pt* n0 0.1)) cs) (pt* n0 -1.0) n0)))
+        (list p n d)))
+
+    ;; Does the exit door hold? A body at anchor a, in front of the door, is
+    ;; driven at points 2 m past the doorway (straight through, and 0.4 m to
+    ;; either side), standing and crouched, for MAX-TICKS each. Returns #f
+    ;; when every body stays behind the wall line, or (x y z) where one got
+    ;; 0.1 m past it. Without a leaf, the first body walks out through the hole.
+    (define (door-breach c a wall)
+      (let ((p (car wall)) (n (cadr wall)) (d (caddr wall)))
+        (let try ((cases (apply append (map (lambda (lat) (list (cons lat #f) (cons lat #t))) '(0.0 -0.4 0.4)))))
+          (if (null? cases)
+              #f
+              (let* ((lat (caar cases)) (crouch? (cdar cases))
+                     (tp (pt+ (pt+ p (pt* n 2.0)) (pt* d lat))))
+                (let run ((w (vector-ref a 4)) (k 0))
+                  (cond ((> (pt-dot (pt- (cons (walker-x w) (walker-y w)) p) n) 0.1)
+                         (list (walker-x w) (walker-y w) (walker-z w)))
+                        ((>= k MAX-TICKS) (try (cdr cases)))
+                        (else
+                         (let* ((in0 (input-toward w (px tp) (py tp)))
+                                (in (if (and crouch? (= k 0))
+                                        (make-input 0.0 1.0 (input-look-yaw in0) 0.0 #f #f #t 0)
+                                        in0)))
+                           (run (walker-step w in TICK c) (+ k 1)))))))))))
+
+    ;; --- the gate ------------------------------------------------------------------------------
+
+    (define (dist2 a p) (sqrt (+ (square (- (vector-ref a 1) (px p))) (square (- (vector-ref a 2) (py p))))))
+
+    ;; Returns (lines problems witnesses): witnesses, ((name . script-text)
+    ;; ...), "start" first, then each route that was proved, for gate 5.
+    (define (reach-check cf)
+      (let* ((fl (ctx-floor* cf))
+             (path (compiled-floor-path cf))
+             (c (collision-of-floor cf))
+             (anchors (make-anchors cf c))
+             (exit (find (lambda (o) (eq? (opening-kind o) 'exit)) (floor-openings fl)))
+             (exit-at (and exit (opening-at exit)))
+             (exit-room (and exit (opening-a exit)))
+             (tier (symbol->string (or (and exit (opening-reader exit)) 'none)))
+             (start-p (floor-start fl))
+             (start-z (and start-p (floor-under fl start-p)))
+             (start (and start-p (anchor-near anchors start-p)))
+             (badge (find (lambda (t) (eq? (thing-kind t) 'badge)) (floor-things fl)))
+             (stats (vector 0 0 #f))
+             (lines '()) (ps '()) (witnesses '()))
+        (define (say s) (set! lines (cons s lines)))
+        (define (bad line msg) (set! ps (cons (problem path: path line: line message: msg gate: 3) ps)))
+        (define (near-exit? a)
+          (and exit-at (eq? (vector-ref a 5) exit-room) (< (dist2 a exit-at) 1.0)))
+        (define (proof-line what r wt)
+          (string-append what ": " (number->string (length r)) " anchors, witness " (number->string (vector-ref wt 1))
+                         " ticks, " (if (vector-ref wt 5) "replayed from its text" "FAILED")))
+        (say (string-append "anchors " (number->string (vector-length anchors))))
+        (cond
+          ((not exit) (bad (floor-line fl) "the floor has no exit to reach"))
+          ((not exit-at) (bad (opening-line exit) "the exit has no at: point"))
+          ((not start-z) (bad (floor-line fl) "start: is in no room"))
+          ((not start) (bad (floor-line fl) (string-append "start: has no anchor within " (number->string PLACE-R) " m")))
+          (else
+           ;; 1. with the tier: from start:, as the player arrives there
+           (let ((r (route c anchors start near-exit? '() stats))
+                 (what (string-append "with " tier ", from the start")))
+             (if (not r)
+                 (bad (floor-line fl) (string-append what ": the exit is not reached"))
+                 (let* ((sx (px start-p)) (sy (py start-p)) (sz (+ start-z 0.01))
+                        (wt (witness cf c (list sx sy sz (facing->yaw (floor-facing fl)) (low-at? c sx sy sz))
+                                     (settle-prefix) r near-exit?)))
+                   (when (vector-ref wt 6) (set! witnesses (cons (cons "start" (vector-ref wt 6)) witnesses)))
+                   (say (proof-line what r wt))
+                   (unless (vector-ref wt 5)
+                     (bad (floor-line fl) (string-append what ": the route to the exit does not replay from its witness"))))))
+           ;; 2. with the tier: each declared route
+           (for-each
+             (lambda (rt)
+               (let* ((name (symbol->string (route-name rt)))
+                      (from (route-from rt))
+                      (p (cond ((eq? from 'start) start-p)
+                               ((eq? from 'badge) (and badge (thing-field badge 'on-desk)))
+                               (else from)))
+                      (a0 (and p (anchor-near anchors p)))
+                      (what (string-append "with " tier ", route " name
+                                           (if (null? (route-avoid rt)) ""
+                                               (string-append " (avoiding " (string-join (map symbol->string (route-avoid rt)) ", ") ")")))))
+                 (if (not a0)
+                     (bad (route-line rt) (string-append "route " name ": from: has no anchor within " (number->string PLACE-R) " m"))
+                     (let ((r (route c anchors a0 near-exit? (route-avoid rt) stats)))
+                       (if (not r)
+                           (begin (bad (route-line rt) (string-append what ": the exit is not reached"))
+                                  (say (string-append "  " name " reached, by room and height: " (reach-summary anchors (vector-ref stats 2)))))
+                           (let ((wt (witness cf c (vector-ref a0 6) (settle-prefix) r near-exit?)))
+                             (when (vector-ref wt 6) (set! witnesses (cons (cons name (vector-ref wt 6)) witnesses)))
+                             (say (proof-line what r wt))
+                             (unless (vector-ref wt 5)
+                               (bad (route-line rt) (string-append what ": the route does not replay from its witness")))))))))
+             (floor-routes fl))
+           ;; 3. without the tier: the exit door holds, and nothing reaches
+           ;; the space behind it another way
+           (let* ((wall (exit-wall fl exit))
+                  (fronts (filter near-exit? (vector->list anchors)))
+                  (front (and (pair? fronts)
+                              (fold-left (lambda (b a) (if (< (dist2 a exit-at) (dist2 b exit-at)) a b)) (car fronts) fronts)))
+                  (behind? (lambda (a) (and (< (dist2 a exit-at) 3.0)
+                                            (> (pt-dot (pt- (cons (vector-ref a 1) (vector-ref a 2)) exit-at) (cadr wall)) 0.1))))
+                  (behind (filter behind? (vector->list anchors))))
+             (if (not front)
+                 (bad (opening-line exit) "the exit has no anchor in front of it")
+                 (let ((breach (door-breach c front wall)))
+                   (if breach
+                       (bad (opening-line exit)
+                            (string-append "without " tier ": a body driven at the exit door gets through it, to ("
+                                           (string-join (map (lambda (v) (num->str v)) breach) " ") ")"))
+                       (say (string-append "without " tier ": the exit door holds (6 drives at it, standing and crouched)")))))
+             (if (null? behind)
+                 (say "  nothing stands within 3 m behind the exit")
+                 (let ((r (route c anchors start behind? '() stats)))
+                   (if r
+                       (let ((e (list-ref r (- (length r) 1))))
+                         (bad (opening-line exit)
+                              (string-append "without " tier ": the space behind the exit is reached at ("
+                                             (num->str (vector-ref e 1)) " " (num->str (vector-ref e 2)) "), bypassing the reader")))
+                       (say (string-append "without " tier ": none of the " (number->string (length behind))
+                                           " anchors behind the exit is reached"))))))
+           (say (string-append "edges tried " (number->string (vector-ref stats 0)) ", found " (number->string (vector-ref stats 1))))))
+        (list (reverse lines) (reverse ps) (reverse witnesses))))
+
+    (define (reach-report-lines r) (car r))
+
+    ;; Debugging: a body put at (x y z), settled as an anchor would be, tick
+    ;; by tick: "tick x y z height grounded crouching mantling".
+    (define (reach-probe cf x y z)
+      (let* ((c (collision-of-floor cf))
+             (low? (collide-ceiling c x y (+ z 0.05) (+ z STAND 0.02)))
+             (w0 (if low? (crouched-walker x y z) (make-walker x y z 0.0))))
+        (define (line k w)
+          (string-append (number->string k) " " (number->string (walker-x w)) " " (number->string (walker-y w)) " "
+                         (number->string (walker-z w)) " h " (number->string (walker-height w))
+                         (if (walker-grounded? w) " grounded" " air")
+                         (if (walker-crouching? w) " crouching" "")
+                         (if (walker-mantling? w) " mantling" "")))
+        (let loop ((w w0) (k 0) (acc (list (string-append "low ceiling: " (if low? (number->string low?) "no")))))
+          (if (> k (+ SETTLE 2)) (reverse acc)
+              (loop (walker-step w NO-INPUT TICK c) (+ k 1) (cons (line k w) acc))))))
+
+    ;; "room@z reached/all ..." for every room and height (to 0.1 m) that has
+    ;; anchors: where a failed search got to.
+    (define (reach-summary anchors seen)
+      (let loop ((i 0) (acc '()))
+        (if (>= i (vector-length anchors))
+            (string-join (map (lambda (e) (string-append (car e) " " (number->string (cadr e)) "/" (number->string (caddr e))))
+                              (list-sort (lambda (a b) (string<? (car a) (car b))) acc))
+                         ", ")
+            (let* ((a (vector-ref anchors i))
+                   (key (string-append (if (vector-ref a 5) (symbol->string (vector-ref a 5)) "?") "@"
+                                       (number->string (/ (round (* 10 (vector-ref a 3))) 10.0))))
+                   (hit (and seen (vector-ref seen i)))
+                   (e (assoc key acc)))
+              (loop (+ i 1)
+                    (if e
+                        (map (lambda (x) (if (eq? x e) (list (car e) (+ (cadr e) (if hit 1 0)) (+ (caddr e) 1)) x)) acc)
+                        (cons (list key (if hit 1 0) 1) acc)))))))))

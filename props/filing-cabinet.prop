@@ -1,0 +1,12 @@
+;; props/filing-cabinet.prop - a four-drawer steel cabinet, 1.3 m: high enough
+;; to climb from into the hatch above it (the slice's ghost way). The drawers
+;; are on its front (-y).
+(prop filing-cabinet
+  parts: ((box  size: (0.5 0.6 1.3)     at: (0 0 0.65)        material: steel)
+          (box  size: (0.44 0.01 0.02)  at: (0 -0.305 0.33)   material: dark)
+          (box  size: (0.44 0.01 0.02)  at: (0 -0.305 0.65)   material: dark)
+          (box  size: (0.44 0.01 0.02)  at: (0 -0.305 0.97)   material: dark)
+          (box  size: (0.12 0.02 0.03)  at: (0 -0.31 0.5)     material: plastic)
+          (box  size: (0.12 0.02 0.03)  at: (0 -0.31 0.82)    material: plastic)
+          (box  size: (0.12 0.02 0.03)  at: (0 -0.31 1.14)    material: plastic))
+  hides: crouched)

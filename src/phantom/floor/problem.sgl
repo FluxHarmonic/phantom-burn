@@ -1,0 +1,37 @@
+;;; (phantom floor problem) - What a gate reports: a file, a line, a message,
+;;; and which of the design's gates found it (section 8: 1 parse and legend,
+;;; 2 sealed, 6 stacking and stairs; 0 for a file that cannot be read at all).
+;;;
+;;; Pure: no platform.
+
+(define-library (phantom floor problem)
+  (import (sigil core)
+          (sigil struct))
+
+  (export problem problem? problem-path problem-line problem-message problem-gate
+          problem->string problems-of-gate floor-debug! checkpoint!)
+
+  (begin
+    (define-struct problem
+      (path default: "")
+      (line default: #f)            ; 1-based, or #f when no line applies
+      (message default: "")
+      (gate default: 1))
+
+    ;; "FILE:LINE: message [gate N]"
+    (define (problem->string p)
+      (string-append (problem-path p)
+                     (if (problem-line p)
+                         (string-append ":" (number->string (problem-line p)))
+                         "")
+                     ": " (problem-message p)
+                     " [gate " (number->string (problem-gate p)) "]"))
+
+    ;; Debugging: after (floor-debug! #t), checkpoint! prints its stage.
+    (define *debug* (vector #f))
+    (define (floor-debug! on?) (vector-set! *debug* 0 on?))
+    (define (checkpoint! what)
+      (when (vector-ref *debug* 0) (display "floor compile: ") (display what) (newline)))
+
+    (define (problems-of-gate ps g)
+      (filter (lambda (p) (= (problem-gate p) g)) ps))))

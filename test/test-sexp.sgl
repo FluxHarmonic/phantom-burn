@@ -1,0 +1,28 @@
+;;; The line-tracking reader: lines of nested lists, atoms, errors.
+(import (sigil test)
+        (phantom floor sexp))
+
+(define text "(floor\n  level: 14 ; a comment (not a list)\n  rooms:\n  ((lobby corners: ((0 0) (12 0)))\n   (hall \"a \\\"q\\\" string\" #t)))\n")
+
+(test-group "reader"
+  (test "lines, atoms and nesting"
+    (let* ((ds (read-nodes text))
+           (f (car ds))
+           (items (node-items f))
+           (rooms (list-ref items 4)))
+      (assert-equal 1 (length ds))
+      (assert-equal 1 (node-line f))
+      (assert-equal 'floor (car items))
+      (assert-equal "level" (keyword->string (list-ref items 1)))
+      (assert-equal 14 (list-ref items 2))
+      (assert-equal 4 (node-line rooms))
+      (assert-equal 5 (node-line (cadr (node-items rooms))))
+      (assert-equal "a \"q\" string" (cadr (node-items (cadr (node-items rooms)))))
+      (assert-equal '(lobby corners: ((0 0) (12 0))) (node->datum (car (node-items rooms)))))))
+
+(test-group "reader errors"
+  (test "unclosed list names its opening line"
+    (assert-equal 2 (read-error-line (read-nodes "\n(a (b\n c)"))))
+  (test "stray closer" (assert-equal 1 (read-error-line (read-nodes "(a))"))))
+  (test "wrong bracket" (assert-true (read-error? (read-nodes "(a ]"))))
+  (test "unclosed string" (assert-true (read-error? (read-nodes "(a \"b)")))))

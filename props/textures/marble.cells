@@ -1,0 +1,21 @@
+;; props/textures/marble.cells - 16x16 cells per half metre (design section 7), palette colours only.
+;; The same cells as the look test's (export-floor14.py TEX["marble"]).
+(texture marble
+  legend: (("#" "#2A2D3A") ("o" "#6B7085") ("-" "#3D4052") ("^" "#8A8FA0"))
+  cells:
+  ("################"
+   "#ooooooooooooooo"
+   "#ooo-ooooooooooo"
+   "#oooo-ooooo^oooo"
+   "#ooooo-ooooooooo"
+   "#oooooo--ooooooo"
+   "#oooooooo-oooooo"
+   "#ooo^oooooo-oooo"
+   "#ooooooooooo-ooo"
+   "#oooooooooooo-oo"
+   "#oooooooooooooo-"
+   "#ooooooo^ooooooo"
+   "#ooooooooooooooo"
+   "#oooo-oooooooooo"
+   "#ooooo-ooooo^ooo"
+   "#ooooooooooooooo"))

@@ -1,0 +1,266 @@
+;;; (phantom floor shapes) - Emitting surfaces into the batches and the soup:
+;;; materials resolved to vertex colours, the UV rules, planar polygons (whose
+;;; winding is checked against the normal they are meant to have, so a wrong
+;;; corner order cannot flip a face), boxes, and the prop part shapes.
+;;;
+;;; UV rules (1 unit = half a metre, so a 16x16 text-cell texture covers half
+;;; a metre, design section 6; world-anchored, so neighbouring surfaces line
+;;; up):
+;;;   a vertical surface   u along the wall to the viewer's right, v = -z
+;;;   a horizontal one     u = x, v = -y
+;;;   anything else        the axis the normal is nearest to (box projection)
+;;;
+;;; A point here is a vector #(x y z); a normal the same.
+;;;
+;;; Pure: no platform.
+
+(define-library (phantom floor shapes)
+  (import (sigil core)
+          (sigil struct)
+          (sigil list)
+          (sigil math)
+          (phantom floor format)
+          (phantom floor poly)
+          (phantom floor mesh))
+
+  (export UV-SCALE
+          matinfo matinfo? matinfo-name matinfo-texture matinfo-colour matinfo-emission matinfo-glass?
+          make-matinfo matinfo-on-circuit EMIT-ALWAYS
+          v3 v3x v3y v3z v3+ v3- v3* v3dot v3cross v3len v3norm
+          uv-of emit-poly! emit-poly-soup! emit-box! emit-box-soup! emit-part!
+          xform xform? xform-origin xform-ax xform-ay floor-xform wall-xform xform-point xform-dir)
+
+  (begin
+    (define UV-SCALE 0.5)
+
+    ;; --- materials -------------------------------------------------------------------
+
+    ;; colour, emission: #(r g b a) 0..255.
+    (define-struct matinfo
+      (name default: #f) (texture default: #f)
+      (colour default: #f) (emission default: #f) (glass? default: #f))
+
+    (define (make-matinfo m)
+      (let* ((tex (material-texture m))
+             (rgb (if (material-colour m) (hex->rgb (material-colour m)) (list 255 255 255)))
+             (glass (material-glass m)))
+        (matinfo name: (material-name m)
+                 texture: tex
+                 colour: (if tex
+                             (vector 255 255 255 255)
+                             (vector (car rgb) (cadr rgb) (caddr rgb)
+                                     (if glass (exact (round (* 255 (max 0.0 (min 1.0 glass))))) 255)))
+                 emission: (if (material-emits m)
+                               (vector (car rgb) (cadr rgb) (caddr rgb) 255)
+                               (vector 0 0 0 0))
+                 glass?: (and glass #t))))
+
+    ;; Emission alpha: 0 not emissive; 128 + k emissive, lit while circuit k is
+    ;; on (the fixture switches with it); EMIT-ALWAYS emissive on no circuit.
+    (define EMIT-ALWAYS 255)
+
+    ;; The same material, its emission tagged with circuit k (an index into the
+    ;; circuit table), when it emits; unchanged when it does not.
+    (define (matinfo-on-circuit mi k)
+      (let ((e (matinfo-emission mi)))
+        (if (and k (> (vector-ref e 3) 0))
+            (matinfo mi emission: (vector (vector-ref e 0) (vector-ref e 1) (vector-ref e 2) (+ 128 k)))
+            mi)))
+
+    ;; --- 3-vectors -------------------------------------------------------------------
+
+    (define (v3 x y z) (vector (inexact x) (inexact y) (inexact z)))
+    (define (v3x v) (vector-ref v 0))
+    (define (v3y v) (vector-ref v 1))
+    (define (v3z v) (vector-ref v 2))
+    (define (v3+ a b) (vector (+ (v3x a) (v3x b)) (+ (v3y a) (v3y b)) (+ (v3z a) (v3z b))))
+    (define (v3- a b) (vector (- (v3x a) (v3x b)) (- (v3y a) (v3y b)) (- (v3z a) (v3z b))))
+    (define (v3* a k) (vector (* (v3x a) k) (* (v3y a) k) (* (v3z a) k)))
+    (define (v3dot a b) (+ (* (v3x a) (v3x b)) (* (v3y a) (v3y b)) (* (v3z a) (v3z b))))
+    (define (v3cross a b)
+      (vector (- (* (v3y a) (v3z b)) (* (v3z a) (v3y b)))
+              (- (* (v3z a) (v3x b)) (* (v3x a) (v3z b)))
+              (- (* (v3x a) (v3y b)) (* (v3y a) (v3x b)))))
+    (define (v3len a) (sqrt (v3dot a a)))
+    (define (v3norm a) (let ((l (v3len a))) (if (> l 0.0) (v3* a (/ 1.0 l)) a)))
+
+    ;; --- UVs ---------------------------------------------------------------------------
+
+    ;; (u . v) for point p on a surface with normal n.
+    (define (uv-of p n)
+      (let ((ax (abs (v3x n))) (ay (abs (v3y n))) (az (abs (v3z n))))
+        (cond ((> az 0.99)
+               (cons (/ (v3x p) UV-SCALE) (/ (- (v3y p)) UV-SCALE)))
+              ((< az 0.01)
+               ;; vertical: the viewer's right, facing -n with z up, is
+               ;; (-n) x z = (-ny, nx)
+               (let* ((rx (- (v3y n))) (ry (v3x n))
+                      (l (sqrt (+ (* rx rx) (* ry ry))))
+                      (u (/ (+ (* (v3x p) rx) (* (v3y p) ry)) l)))
+                 (cons (/ u UV-SCALE) (/ (- (v3z p)) UV-SCALE))))
+              ((and (>= ax ay) (>= ax az)) (cons (/ (v3y p) UV-SCALE) (/ (- (v3z p)) UV-SCALE)))
+              ((>= ay az) (cons (/ (v3x p) UV-SCALE) (/ (- (v3z p)) UV-SCALE)))
+              (else (cons (/ (v3x p) UV-SCALE) (/ (- (v3y p)) UV-SCALE))))))
+
+    ;; --- polygons ------------------------------------------------------------------------
+
+    ;; Newell's normal of a polygon (list of points), not normalised.
+    (define (newell ps)
+      (let loop ((a ps) (acc (v3 0 0 0)))
+        (if (null? a) acc
+            (let ((p (car a)) (q (if (null? (cdr a)) (car ps) (cadr a))))
+              (loop (cdr a)
+                    (v3+ acc (vector (* (- (v3y p) (v3y q)) (+ (v3z p) (v3z q)))
+                                     (* (- (v3z p) (v3z q)) (+ (v3x p) (v3x q)))
+                                     (* (- (v3x p) (v3x q)) (+ (v3y p) (v3y q))))))))))
+
+    ;; ps oriented counter-clockwise as seen from the side n points to.
+    (define (facing ps n)
+      (if (< (v3dot (newell ps) n) 0.0) (reverse ps) ps))
+
+    ;; A convex planar polygon into a batch, fanned from its first corner. n: the
+    ;; unit normal it should face. room: its room index.
+    (define (emit-poly! b mi ps n room)
+      (let* ((ps (facing ps n))
+             (ix (map (lambda (p)
+                        (let ((uv (uv-of p n)))
+                          (batch-vertex! b (v3x p) (v3y p) (v3z p) (car uv) (cdr uv)
+                                         (v3x n) (v3y n) (v3z n)
+                                         (matinfo-colour mi) (matinfo-emission mi) room)))
+                      ps)))
+        (let loop ((rest (cdr ix)))
+          (when (and (pair? rest) (pair? (cdr rest)))
+            (batch-tri! b (car ix) (car rest) (cadr rest))
+            (loop (cdr rest))))))
+
+    ;; The same polygon into the soup. two-sided? also adds the back face (glass,
+    ;; rails: air on both sides).
+    (define (emit-poly-soup! s ps n tag room two-sided?)
+      (let* ((ps (facing ps n))
+             (a (car ps)))
+        (let loop ((rest (cdr ps)))
+          (when (and (pair? rest) (pair? (cdr rest)))
+            (soup-tri! s a (car rest) (cadr rest) tag room)
+            (when two-sided? (soup-tri! s a (cadr rest) (car rest) tag room))
+            (loop (cdr rest))))))
+
+    ;; --- transforms -------------------------------------------------------------------------
+    ;;
+    ;; A placement: origin #(x y z), and the local x and y axes as 2D unit
+    ;; vectors in the floor plane (z stays up).
+
+    (define-struct xform
+      (origin default: #f) (ax default: (cons 1.0 0.0)) (ay default: (cons 0.0 1.0)))
+
+    ;; On the floor at (x y z), turned facing degrees anticlockwise.
+    ;; Quarter turns are exact (no libm), so a floor made of them compiles to
+    ;; the same bits on every target; other angles go through sin and cos.
+    (define (floor-xform x y z facing)
+      (let* ((q (/ facing 90.0))
+             (quarter? (= q (round q)))
+             (k (if quarter? (modulo (exact (round q)) 4) 0))
+             (a (/ (* facing 3.141592653589793) 180.0))
+             (c (if quarter? (vector-ref (vector 1.0 0.0 -1.0 0.0) k) (cos a)))
+             (s (if quarter? (vector-ref (vector 0.0 1.0 0.0 -1.0) k) (sin a))))
+        (xform origin: (v3 x y z) ax: (cons c s) ay: (cons (- s) c))))
+
+    ;; On a wall at p (2D) and height z: local x to the viewer's right, local y
+    ;; into the room (n, a 2D unit vector).
+    (define (wall-xform p z n)
+      (xform origin: (v3 (px p) (py p) z) ax: (cons (- (py n)) (px n)) ay: n))
+
+    (define (xform-point xf p)
+      (let ((o (xform-origin xf)) (ax (xform-ax xf)) (ay (xform-ay xf)))
+        (vector (+ (v3x o) (* (v3x p) (px ax)) (* (v3y p) (px ay)))
+                (+ (v3y o) (* (v3x p) (py ax)) (* (v3y p) (py ay)))
+                (+ (v3z o) (v3z p)))))
+
+    (define (xform-dir xf d)
+      (let ((ax (xform-ax xf)) (ay (xform-ay xf)))
+        (vector (+ (* (v3x d) (px ax)) (* (v3y d) (px ay)))
+                (+ (* (v3x d) (py ax)) (* (v3y d) (py ay)))
+                (v3z d))))
+
+    ;; --- boxes and parts ------------------------------------------------------------------
+
+    ;; The six faces of a box (local centre c, size s) as (corners . normal),
+    ;; bottom face last. The corners are in local space.
+    (define (box-faces c s)
+      (let* ((x0 (- (v3x c) (* 0.5 (v3x s)))) (x1 (+ (v3x c) (* 0.5 (v3x s))))
+             (y0 (- (v3y c) (* 0.5 (v3y s)))) (y1 (+ (v3y c) (* 0.5 (v3y s))))
+             (z0 (- (v3z c) (* 0.5 (v3z s)))) (z1 (+ (v3z c) (* 0.5 (v3z s)))))
+        (list (cons (list (v3 x1 y0 z0) (v3 x1 y1 z0) (v3 x1 y1 z1) (v3 x1 y0 z1)) (v3 1 0 0))
+              (cons (list (v3 x0 y1 z0) (v3 x0 y0 z0) (v3 x0 y0 z1) (v3 x0 y1 z1)) (v3 -1 0 0))
+              (cons (list (v3 x1 y1 z0) (v3 x0 y1 z0) (v3 x0 y1 z1) (v3 x1 y1 z1)) (v3 0 1 0))
+              (cons (list (v3 x0 y0 z0) (v3 x1 y0 z0) (v3 x1 y0 z1) (v3 x0 y0 z1)) (v3 0 -1 0))
+              (cons (list (v3 x0 y0 z1) (v3 x1 y0 z1) (v3 x1 y1 z1) (v3 x0 y1 z1)) (v3 0 0 1))
+              (cons (list (v3 x0 y0 z0) (v3 x0 y1 z0) (v3 x1 y1 z0) (v3 x1 y0 z0)) (v3 0 0 -1)))))
+
+    (define (place-faces xf faces)
+      (map (lambda (f) (cons (map (lambda (p) (xform-point xf p)) (car f)) (xform-dir xf (cdr f)))) faces))
+
+    ;; A box into a batch (and the soup, when tag is not #f).
+    (define (emit-box! b mi xf c s room)
+      (for-each (lambda (f) (emit-poly! b mi (car f) (cdr f) room))
+                (place-faces xf (box-faces c s))))
+
+    (define (emit-box-soup! so xf c s tag room)
+      (for-each (lambda (f) (emit-poly-soup! so (car f) (cdr f) tag room #f))
+                (place-faces xf (box-faces c s))))
+
+    ;; A prop part's faces in local space.
+    (define (part-faces pt)
+      (let ((at (part-at pt)))
+        (case (part-shape pt)
+          ((box) (box-faces (list->vector at) (list->vector (part-size pt))))
+          ((wedge)
+           ;; rises from the front (-y, z0) to the back (+y, z1)
+           (let* ((c at) (s (part-size pt))
+                  (x0 (- (car c) (* 0.5 (car s)))) (x1 (+ (car c) (* 0.5 (car s))))
+                  (y0 (- (cadr c) (* 0.5 (cadr s)))) (y1 (+ (cadr c) (* 0.5 (cadr s))))
+                  (z0 (- (caddr c) (* 0.5 (caddr s)))) (z1 (+ (caddr c) (* 0.5 (caddr s))))
+                  (slope (v3norm (v3 0 (- (- z1 z0)) (- y1 y0)))))
+             (list (cons (list (v3 x0 y0 z0) (v3 x0 y1 z0) (v3 x1 y1 z0) (v3 x1 y0 z0)) (v3 0 0 -1))
+                   (cons (list (v3 x1 y1 z0) (v3 x0 y1 z0) (v3 x0 y1 z1) (v3 x1 y1 z1)) (v3 0 1 0))
+                   (cons (list (v3 x0 y0 z0) (v3 x1 y0 z0) (v3 x1 y1 z1) (v3 x0 y1 z1)) slope)
+                   (cons (list (v3 x1 y0 z0) (v3 x1 y1 z0) (v3 x1 y1 z1)) (v3 1 0 0))
+                   (cons (list (v3 x0 y1 z0) (v3 x0 y0 z0) (v3 x0 y1 z1)) (v3 -1 0 0)))))
+          ((cylinder)
+           (let* ((r (part-radius pt)) (h (part-height pt)) (n (max 3 (part-sides pt)))
+                  (cx (car at)) (cy (cadr at)) (z0 (- (caddr at) (* 0.5 h))) (z1 (+ (caddr at) (* 0.5 h)))
+                  (ring (map (lambda (i)
+                               (let ((a (/ (* 2.0 3.141592653589793 i) n)))
+                                 (cons (+ cx (* r (cos a))) (+ cy (* r (sin a))))))
+                             (iota n))))
+             (append
+               (map (lambda (i)
+                      (let* ((p (list-ref ring i)) (q (list-ref ring (modulo (+ i 1) n)))
+                             (m (pt-norm (pt- (pt* (pt+ p q) 0.5) (cons cx cy)))))
+                        (cons (list (v3 (px p) (py p) z0) (v3 (px q) (py q) z0) (v3 (px q) (py q) z1) (v3 (px p) (py p) z1))
+                              (v3 (px m) (py m) 0))))
+                    (iota n))
+               (list (cons (map (lambda (p) (v3 (px p) (py p) z1)) ring) (v3 0 0 1))
+                     (cons (map (lambda (p) (v3 (px p) (py p) z0)) ring) (v3 0 0 -1))))))
+          ((extrude)
+           (let* ((ring (poly-ccw (part-outline pt))) (h (part-height pt))
+                  (ox (car at)) (oy (cadr at)) (z0 (caddr at)) (z1 (+ (caddr at) h))
+                  (n (length ring)) (rv (list->vector ring))
+                  (tris (ear-clip ring)))
+             (append
+               (map (lambda (i)
+                      (let* ((p (vector-ref rv i)) (q (vector-ref rv (modulo (+ i 1) n)))
+                             (d (pt-norm (pt- q p))))
+                        (cons (list (v3 (+ ox (px p)) (+ oy (py p)) z0) (v3 (+ ox (px q)) (+ oy (py q)) z0)
+                                    (v3 (+ ox (px q)) (+ oy (py q)) z1) (v3 (+ ox (px p)) (+ oy (py p)) z1))
+                              (v3 (py d) (- (px d)) 0))))
+                    (iota n))
+               (map (lambda (t) (cons (map (lambda (p) (v3 (+ ox (px p)) (+ oy (py p)) z1)) t) (v3 0 0 1))) tris)
+               (map (lambda (t) (cons (map (lambda (p) (v3 (+ ox (px p)) (+ oy (py p)) z0)) t) (v3 0 0 -1))) tris))))
+          (else '()))))
+
+    ;; A part into its material's batch and, with a tag, the soup.
+    (define (emit-part! b mi so tag xf pt room)
+      (for-each (lambda (f)
+                  (emit-poly! b mi (car f) (cdr f) room)
+                  (when tag (emit-poly-soup! so (car f) (cdr f) tag room #f)))
+                (place-faces xf (part-faces pt))))))

@@ -1,0 +1,11 @@
+;; props/server-rack.prop - a 42U rack, back to the wall, its grille and
+;; status LEDs to the front (-y). The LEDs glow a little onto the floor.
+(prop server-rack
+  parts: ((box  size: (0.6 1.0 2.1)    at: (0 0 1.05)         material: dark)
+          (box  size: (0.52 0.02 1.9)  at: (0 -0.505 1.05)    material: grate)    ; the grille
+          (box  size: (0.4 0.02 0.02)  at: (0 -0.52 1.75)     material: led)
+          (box  size: (0.4 0.02 0.02)  at: (0 -0.52 1.35)     material: led)
+          (box  size: (0.4 0.02 0.02)  at: (0 -0.52 0.95)     material: led)
+          (box  size: (0.4 0.02 0.02)  at: (0 -0.52 0.55)     material: led))
+  lamps: ((at: (0 -0.8 1.1)  colour: "#4DF2D9"  radius: 1.6  strength: 0.22  circuit: screens))
+  hides: standing)

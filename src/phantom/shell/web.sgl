@@ -28,7 +28,9 @@
           (phantom render)
           (phantom game)
           (phantom title)
-          (phantom stand-in))
+          (phantom stand-in)
+          (phantom walker)
+          (phantom floor replay))
 
   (export web-main web-dispatch)
 
@@ -41,6 +43,7 @@
     (define *params-seen* #f)    ; nothing is fetched before the page names the floor
     (define *fetches* '())       ; (name . handle)
     (define *collide* #f)        ; the base64 text, once the page sends it
+    (define *replay-text* #f)    ; a gate-5 script that came before the game started
     (define *started* #f)        ; #f, #t, or 'failed
     (define *said-ready* #f)
     (define *waited* 0.0)        ; seconds since the page named the floor, until start
@@ -147,7 +150,19 @@
       (game-init! load-mesh* load-texture* (pbc1->collision (base64->bytevector *collide*)) *info*)
       (set! *collide* #f)
       (apply-params!)
-      (set! *started* #t))
+      (set! *started* #t)
+      (when *replay-text* (run-replay! *replay-text*) (set! *replay-text* #f)))
+
+    ;; Gate 5: step a replay script through the real walker at TICK over the
+    ;; loaded floor's collision, one line per tick (the native tool prints the
+    ;; same lines; the gate compares them byte for byte).
+    (define (run-replay! text)
+      (let ((script (parse-script text)))
+        (if (not script)
+            (begin (display "phantom-burn: replay-error not a script") (newline))
+            (let ((lines (replay-trace (game-collision) script TICK)))
+              (for-each (lambda (l) (display (string-append "phantom-burn: replay " l)) (newline)) lines)
+              (display (string-append "phantom-burn: replay-done " (number->string (length lines)))) (newline)))))
 
     ;; ?title=1: the title screen, which needs no floor.
     (define *title-t* #f)
@@ -296,5 +311,8 @@
              0)
             ((string=? type "collide")
              (set! *collide* payload)
+             0)
+            ((string=? type "replay")
+             (if (eq? *started* #t) (run-replay! payload) (set! *replay-text* payload))
              0)
             (else 0)))))

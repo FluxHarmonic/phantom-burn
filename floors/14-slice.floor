@@ -1,0 +1,48 @@
+;; floors/14-slice.floor - the slice of floor 14 the prototype is built on
+;; (topics/stealth-game-design section 7, with the review's four slips fixed).
+;; Metres; x east, y north, z up. The compiler's rules are in
+;; src/phantom/floor/README.md; `phantom-burn --floor-check` checks this file.
+(floor
+  level: 14
+  intent: "carpet and cover; the first time the building works for you"
+  tier-in: staff  tier-out: facilities
+  ambient: (hvac 0.3 buzz 0.2 city 0.4)
+  rooms:
+  ((lobby      corners: ((0 0) (12 0) (14 2) (14 10) (0 10))
+               floor: 0    ceiling: 6.0  surface: marble  light: c2)
+   (mezzanine  corners: ((0 7) (12 7) (12 4) (14 4) (14 10) (0 10))
+               floor: 3.0  ceiling: 6.0  over: lobby  surface: tile  light: c2  edge: glass-rail)
+   (corridor   corners: ((14 5) (22 13) (19 13) (14 8))
+               floor: 0    ceiling: 2.8  surface: tile  light: c2)
+   (office     corners: ((16 13) (26 13) (26 17) (22 17) (22 21) (16 21))
+               floor: 0    ceiling: 2.7  surface: carpet  light: c1)
+   (fm-office  corners: ((22 17) (26 17) (26 21) (22 21))
+               floor: 0    ceiling: 2.7  surface: carpet  light: c3)
+   (duct       corners: ((14 5) (23.4 14.4) (22.4 14.4) (14 6))   ; 0.6 m longer than section 7's, so a hatch a body fits through fits over the office
+               floor: 3.0  ceiling: 4.0  over: (corridor office)  surface: duct  light: none  crouch-only: #t))
+  openings:
+  ((arch    between: (lobby corridor)    at: (14 6.5))
+   (door    between: (corridor office)   at: (20.5 13)  width: 1.2)
+   (glass   between: (office fm-office)  along: ((22 17) (22 21)))
+   (door    between: (office fm-office)  at: (24 17))
+   (grate   between: (mezzanine duct)    at: (14 5.5))
+   (hatch   between: (duct office)       at: (22.2 13.7))   ; 0.64 m square, square to the duct
+   (window  in: lobby  along: ((1 0) (11 0))  sill: 0.2  head: 5.8)
+   (exit    in: lobby  at: (3 10)  reader: facilities))       ; the stairwell door, under the mezzanine
+  stairs: ((from: lobby  to: mezzanine  start: (11 2)  end: (11 7)  width: 1.6))
+  lights: ((c1 level: 0.6) (c2 level: 0.8 panel: (16 10) needs: facilities) (c3 level: 0.3))
+  things: ((lifts   in: lobby  along: ((0 1) (0 6))  count: 3)
+           (guard   kind: patrol  route: ((2 2) (12.5 1.5) (20 16) (18 20))  waits: (3 0 2 0))
+           (desk    in: office     from: (corner 0 (2 5))  kind: office-desk)     ; (18 18)
+           (desk    in: fm-office  from: (centre (0 0))    kind: office-desk)     ; (24 19)
+           (cabinet in: office     from: (corner 0 (6.2 0.7))  kind: filing-cabinet  facing: 180)   ; (22.2 13.7), under the hatch
+           (badge   on-desk: (24 19)  tier: facilities))
+  views: ((establishing  at: (1 1 1.6)      look: (14 10 3))
+          (from-the-duct at: (19 10.5 3.4)  look: (22.2 13.7 2.7))
+          ;; the Blender export's three views (floor-14-export/README.txt), for floor-shot
+          (arrival       at: (1.3 1.3 1.6)  look: (10.0 7.2 2.2)   lens: 17)
+          (overlook      at: (4.2 9.3 4.6)  look: (7.0 -26.0 1.0)  lens: 19)
+          (office        at: (20.5 12.2 1.6) look: (19.4 18.8 1.0) lens: 17))
+  ;; gate 3 finds a route from start: to the exit, and each of these
+  routes: ((the-long-way  from: badge  avoid: (corridor)))   ; the duct, the grate, the mezzanine, the stairs
+  start: (1 3))

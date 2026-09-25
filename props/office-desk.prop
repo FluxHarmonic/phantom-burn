@@ -1,0 +1,14 @@
+;; props/office-desk.prop - design section 7's desk, with the look test's
+;; monitor. Local frame: origin on the floor under the middle, x across, y
+;; front (-y, where you sit) to back (+y), z up. at: is a part's centre.
+(prop office-desk
+  parts: ((box  size: (1.6 0.8 0.04)    at: (0 0 0.73)        material: laminate)
+          (box  size: (0.05 0.7 0.71)   at: (-0.75 0 0.355)   material: steel)
+          (box  size: (0.05 0.7 0.71)   at: (0.75 0 0.355)    material: steel)
+          (box  size: (1.5 0.02 0.4)    at: (0 0.35 0.5)      material: steel)
+          ;; the monitor, left on (its screen faces the chair)
+          (box  size: (0.6 0.04 0.35)   at: (0 0.14 1.025)    material: plastic)
+          (box  size: (0.54 0.02 0.29)  at: (0 0.11 1.025)    material: screen)
+          (box  size: (0.08 0.06 0.1)   at: (0 0.17 0.8)      material: plastic))
+  lamps: ((at: (0 -0.12 1.0)  colour: "#4DF2D9"  radius: 2.2  strength: 0.45  circuit: screens))
+  hides: crouched)   ; a crouched body behind it is out of sight
