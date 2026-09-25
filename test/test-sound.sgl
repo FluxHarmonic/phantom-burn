@@ -170,7 +170,7 @@
     (let* ((s (ready-sound))
            (_ (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0 0.6 'duct 1.1 #t) '()))
            (duct (car (sound-last-events s)))
-           (_ (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0 0.0 'tile 0.0 #f) (list (list 0.0 -4.0 0.5 0 #t))))
+           (_ (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0 0.0 'tile 0.0 #f) (list (list 0.0 -4.0 0.5 0 1.0 #t))))
            (g (car (sound-last-events s))))
       (assert-equal 'grate (cadr (car duct)))
       (assert-true (< (cadr duct) 0.12))
@@ -184,7 +184,7 @@
                      (let loop ((i 0))
                        (when (< i k)
                          (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0 0.0 'tile 0.0 #f)
-                                       (map (lambda (st) (list 20.0 20.0 0.0 st #f)) states))
+                                       (map (lambda (st) (list 20.0 20.0 0.0 st 1.0 #f)) states))
                          (sound-render! s out 533)
                          (loop (+ i 1)))))))
       (frames 120 '(0))
@@ -205,7 +205,7 @@
                     (let loop ((i 0))
                       (when (< i 360)
                         (sound-frame! s (/ 1 60.0) (list 0.0 0.0 (* 0.01 i) 0.04 (if (< i 180) 'carpet 'marble) 2.4 #f)
-                                      (list (list 6.0 (- 3.0 (* 0.02 i)) 0.022 (if (< i 200) 1 3) (< i 120))))
+                                      (list (list 6.0 (- 3.0 (* 0.02 i)) 0.022 (if (< i 200) 1 3) 1.0 (< i 120))))
                         (sound-render! s out 533)
                         (set! acc (cons (bytevector-copy out) acc))
                         (loop (+ i 1))))
@@ -251,3 +251,35 @@
         (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0 0.0 'tile 0.0 #f) '())
         (mixer-render! (sound-bed-mixer s) out 533)
         (assert-true (> (rms out) 0.001))))))
+
+;; --- the agreed API with P2 (topics/phantom-sound-api) -------------------------
+
+(test-group "the game's events"
+  (test "sound-step! plays that step's sample, centred; after it, a moving you makes no steps of its own"
+    (let ((s (ready-sound)))
+      (sound-step! s 'marble 'run 'toe)
+      (let ((e (car (sound-last-events s))))
+        (assert-equal '(step marble toe) (list (car (car e)) (cadr (car e)) (caddr (car e))))
+        (assert-true (< 0.9 (cadr e) 1.1))
+        (assert-true (near? (caddr e) 0.0 1e-9)))
+      (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0 0.6 'tile 2.4 #f) '())
+      (assert-equal '() (sound-last-events s))))
+  (test "a guard's step: atten scales it, path-m replaces the straight line, the pan stays"
+    (let* ((gain-of (lambda (g)
+                      (let ((s (ready-sound)))
+                        (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0) (list g))
+                        (car (sound-last-events s)))))
+           (a (gain-of (list 0.0 -4.0 0.5 0 1.0 #f)))
+           (b (gain-of (list 0.0 -4.0 0.5 0 0.5 #f)))
+           (c (gain-of (list 0.0 -4.0 0.5 0 1.0 #f 8.0))))
+      ;; the same seed, so the same variation: the gains are in exact ratio
+      (assert-true (near? (/ (cadr b) (cadr a)) 0.5 1e-9))
+      (assert-true (near? (/ (cadr c) (cadr a)) 0.5 1e-9))
+      (assert-true (near? (caddr c) 0.6 1e-9))))
+  (test "sound-event!: an unknown kind, and a kind with no sound yet, are silence"
+    (let ((s (ready-sound)))
+      (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0) '())
+      (sound-event! s 'no-such-kind 1.0 1.0 1.0 #f)
+      (assert-equal '() (sound-last-events s))
+      (sound-event! s 'door-open 1.0 1.0 1.0 #f)
+      (assert-equal '() (sound-last-events s)))))

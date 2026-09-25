@@ -43,7 +43,7 @@
           (phantom sound bank)
           (phantom sound mix)
           (phantom sound sections))
-  (export make-sound sound-start! sound-frame! sound-stop! sound-render! sound-trace
+  (export make-sound sound-start! sound-frame! sound-step! sound-event! sound-stop! sound-render! sound-trace
           sound-started? sound-bank sound-mixer sound-bed-mixer sound-last-events sound-section
           MUSIC-TUNE SURFACE-MAP)
   (begin
@@ -69,7 +69,9 @@
     ;; --- state ------------------------------------------------------------------------
     ;; #(rate loader headless? bank mixer you-steps guards music-rule seed
     ;;   ctx sfx-stream music-stream bed-started? music-player bed-mixer sections
-    ;;   last-events costs started?)
+    ;;   last-events costs started? steps-handed? listener)
+    ;; steps-handed?: the game has called sound-step! (playback stops deriving
+    ;; your steps); listener: (x y yaw) from the last frame, for placed events
     ;; The bed (the hum and the room air) is a loop in bed-mixer, from the bank
     ;; (bank-bed-loop), started once the bank is ready: no player of its own.
     ;; It shares the steps' stream.
@@ -78,7 +80,7 @@
       (vector rate loader (and (pair? opt) (car opt)) (make-bank rate) (make-mixer) (make-steps)
               '() (make-music-rule) 20260925
               #f #f #f #f #f (make-mixer) #f
-              '() (list (cons 'bank 0.0) (cons 'sfx 0.0) (cons 'music 0.0) (cons 'bed 0.0) (cons 'frames 0)) #f))
+              '() (list (cons 'bank 0.0) (cons 'sfx 0.0) (cons 'music 0.0) (cons 'bed 0.0) (cons 'frames 0)) #f #f (list 0.0 0.0 0.0)))
 
     (define (sound-bed-mixer s) (vector-ref s 14))
 
@@ -141,6 +143,41 @@
               ((= (car (car gs)) i) (cdr (car gs)))
               (else (loop (cdr gs))))))
 
+    ;; (gain . pan) for a sound at (x, y) from the last listener: the path's gain
+    ;; (atten, from the game's sector graph: no distance in it) times 2/d, d the
+    ;; walked path length when the game gives one, else the straight line; the
+    ;; pan on the straight line (the agreed API, topics/phantom-sound-api)
+    (define (placed s x y atten path-m)
+      (let* ((l (vector-ref s 20))
+             (sp (sound-space x y (car l) (cadr l) (caddr l)))
+             (dist-gain (if path-m (if (<= path-m 2.0) 1.0 (/ 2.0 path-m)) (car sp))))
+        (cons (* atten dist-gain) (cdr sp))))
+
+    ;; one of your steps: surface (bank surface) at its gain, heel or toe
+    (define (step! s surface surface-gain gait foot)
+      (let* ((k (if (eq? foot 'heel) (min 2 (exact (floor (* 3 (rand! s))))) (min 1 (exact (floor (* 2 (rand! s)))))))
+             (g (* surface-gain (if (eq? foot 'heel) (gait-heel gait) (gait-toe gait)) (+ 0.9 (* 0.2 (rand! s))))))
+        (play! s (list 'step surface foot k) g 0.0)))
+
+    ;; YOUR step, timed by the game ((phantom sound logic)'s steps-advance! on
+    ;; its tick): surface a floor surface name, gait sneak|walk|run, foot heel|toe.
+    ;; The first call switches playback's own derivation off for good.
+    (define (sound-step! s surface gait foot)
+      (vector-set! s 19 #t)
+      (let ((sf (surface-for surface)))
+        (step! s (car sf) (cdr sf) gait foot)))
+
+    ;; a placed one-shot the game fires (door-open door-close panel-on panel-off
+    ;; reader-ok reader-deny badge caught note): the bank's (event KIND) slot,
+    ;; its muffled variant (event KIND muffled) when there is one; a kind with no
+    ;; slot yet, or unknown, is silence (the game may fire it before its sound exists)
+    (define (sound-event! s kind x y atten muffled?)
+      (let* ((sp (placed s x y atten #f))
+             (bank (sound-bank s))
+             (key (or (and muffled? (bank-sample bank (list 'event kind 'muffled)) (list 'event kind 'muffled))
+                      (list 'event kind))))
+        (play! s key (car sp) (cdr sp))))
+
     (define (sound-frame! s dt you guards)
       (vector-set! s 16 '())
       ;; the bank renders ~BANK-MS a frame until it is complete (the title's
@@ -152,17 +189,16 @@
       (when (and (sound-started? s) (bank-ready? (sound-bank s)) (not (vector-ref s 12)))
         (mixer-loop! (sound-bed-mixer s) (bank-bed-loop (sound-bank s)) BED-GAIN)
         (vector-set! s 12 #t))
-      (let* ((lx (list-ref you 0)) (ly (list-ref you 1)) (yaw (list-ref you 2))
-             (moved (list-ref you 3)) (surface (surface-for (list-ref you 4)))
-             (gait (gait-for (list-ref you 5) (list-ref you 6))))
-        ;; your steps: at the listener, centred
-        (for-each
-          (lambda (ev)
-            (let* ((kind (car ev)) (k (if (eq? kind 'heel) (min 2 (exact (floor (* 3 (rand! s))))) (min 1 (exact (floor (* 2 (rand! s)))))))
-                   (g (* (cdr surface) (if (eq? kind 'heel) (gait-heel gait) (gait-toe gait)) (+ 0.9 (* 0.2 (rand! s))))))
-              (play! s (list 'step (car surface) kind k) g 0.0)))
-          (steps-advance! (vector-ref s 5) moved dt (car surface) gait))
-        ;; the guards: their steps positioned, a wall muffling them, their stings
+      (let* ((lx (list-ref you 0)) (ly (list-ref you 1)) (yaw (list-ref you 2)))
+        (vector-set! s 20 (list lx ly yaw))
+        ;; your steps, derived here only until the game hands them over
+        ;; (sound-step!), and only from a 7-field `you`
+        (when (and (not (vector-ref s 19)) (>= (length you) 7))
+          (let ((surface (surface-for (list-ref you 4)))
+                (gait (gait-for (list-ref you 5) (list-ref you 6))))
+            (for-each (lambda (ev) (step! s (car surface) (cdr surface) gait (car ev)))
+                      (steps-advance! (vector-ref s 5) (list-ref you 3) dt (car surface) gait))))
+        ;; the guards: their steps positioned, the path's gain, a wall muffling them, their stings
         (let loop ((gs guards) (i 0) (states '()))
           (if (null? gs)
               (let ((sec (vector-ref s 15)))
@@ -171,17 +207,20 @@
                   (sections-tick! sec)))
               (let* ((g (car gs)) (e (guard-entry s i))
                      (gx (list-ref g 0)) (gy (list-ref g 1)) (gmoved (list-ref g 2))
-                     (state (list-ref g 3)) (occluded? (list-ref g 4))
-                     (sp (sound-space gx gy lx ly yaw))
+                     (state (list-ref g 3))
+                     (atten (if (> (length g) 4) (list-ref g 4) 1.0))
+                     (muffled? (and (> (length g) 5) (list-ref g 5)))
+                     (path-m (and (> (length g) 6) (list-ref g 6)))
+                     (sp (placed s gx gy atten path-m))
                      (stride (if (>= state 3) GUARD-STRIDE-HUNT GUARD-STRIDE-WALK))
                      (sting (stings-for (vector-ref e 1) state)))
                 (for-each
                   (lambda (ev)
                     (when (eq? (car ev) 'heel)
-                      (play! s (list 'guard (if occluded? 'muffled 'clear) (min 2 (exact (floor (* 3 (rand! s))))))
+                      (play! s (list 'guard (if muffled? 'muffled 'clear) (min 2 (exact (floor (* 3 (rand! s))))))
                              (* GUARD-GAIN (car sp) (+ 0.9 (* 0.2 (rand! s)))) (cdr sp))))
                   (steps-advance! (vector-ref e 0) (* gmoved (/ 1.248 stride)) dt 'guard 'walk))
-                (when sting (play! s (list 'sting sting) (if (eq? sting 'there) 1.0 0.8) (cdr sp)))
+                (when sting (play! s (list 'sting sting) (* (car sp) (if (eq? sting 'there) 1.0 0.8)) (cdr sp)))
                 (vector-set! e 1 state)
                 (loop (cdr gs) (+ i 1) (cons state states))))))
       (unless (vector-ref s 2) (pump! s)))
