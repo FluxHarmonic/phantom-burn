@@ -17,9 +17,22 @@
 ;;;   (sting ?) (sting there)                           a guard noticing, a guard hunting
 ;;; Dry (no bus reverb): David asked for dry and close.
 ;;;
+;;; And the game's events, (event KIND) for KIND in EVENT-KINDS: each is its own
+;;; tune, assets/tunes/event-KIND.cts, COPIED byte for byte from the sketchbook
+;;; (David approved them as heard there, 2026-09-25: "Phantom sounds are
+;;; good"), rendered whole (EVENT-S) on a player of its own, one after another,
+;;; after the bed. They are longer than a slot and carry the sketchbook's small
+;;; reverb, so they are not slots.
+;;;
+;;; Stages, one player at a time: the slots, the bed, then each event. A sample
+;;; is usable as soon as its own stage is done (the steps do not wait for the
+;;; bed, nor the bed for the events).
+;;;
 ;;;   (bank-tune-text)       the bank's tune, as text
 ;;;   (bank-slots)           ((key . slot) ...)
-;;;   (make-bank rate)       a bank being rendered; (bank-render! b frames) renders up
+;;;   (make-bank rate [loader])  a bank being rendered; loader: (name) -> a tune's
+;;;                          text or #f, for the events (a kind it has no text for
+;;;                          is skipped: silence). (bank-render! b frames) renders up
 ;;;                          to that many frames and answers #t when complete
 ;;;   (bank-sample b key)    the key's mono f32 bytevector, or #f until rendered
 ;;;   (bank-render-for! b ms) the same, for about ms milliseconds of work (the frame budget)
@@ -36,7 +49,7 @@
           (motif tune player))
   (export bank-tune-text bank-slots make-bank bank-render! bank-render-for! bank-sample bank-ready? bank-rate
           bank-bed-loop crossfade-loop BED-TUNE-TEXT BED-LOOP-S
-          SLOT-S BANK-SURFACES)
+          SLOT-S BANK-SURFACES EVENT-KINDS EVENT-S)
   (begin
     (define SLOT-S 0.6)
     (define SLOT-ROWS 30)                 ; tempo 125, speed 1: a row is 20 ms
@@ -189,16 +202,25 @@
       (row 255 (2 \"...\" 0 0 \"B01\"))))
   (order 0 1))")
 
+    ;; --- the events --------------------------------------------------------------------------
+    ;; the kinds agreed with P2 (topics/phantom-sound-api); each tune is 125 rows
+    ;; of 20 ms, the event at row 0, and rendered whole
+    (define EVENT-KINDS '(door-open door-close panel-on panel-off reader-ok reader-deny badge caught note))
+    (define EVENT-S 2.5)
+
     ;; --- rendering -------------------------------------------------------------------------------
-    ;; Two stages, each one player opened once: the slots, then the bed.
-    ;; #(player rate mono done total samples slot-frames stage bed-loop)
-    ;;   stage: 'slots | 'bed | 'ready; during 'bed, mono/done/total are the bed's
-    (define (make-bank rate)
+    ;; Stages, each one player opened once: the slots, the bed, then each event.
+    ;; #(player rate mono done total samples slot-frames stage bed-loop slots loader kinds-left)
+    ;;   stage: 'slots | 'bed | (event KIND) | 'ready; mono/done/total are the
+    ;;   current stage's; samples: ((key . bv) ...), the cut slots and the events;
+    ;;   slots: the slots' buffer once that stage is done (mono again when ready)
+    (define (make-bank rate . opt)
       (let* ((t (read-tune-string (bank-tune-text)))
              (slots (length (plan)))
              (slot-frames (exact (round (* SLOT-S rate))))
              (total (* slots slot-frames)))
-        (vector (open-tune-player t rate) rate (make-bytevector (* 4 total) 0) 0 total '() slot-frames 'slots #f #f)))
+        (vector (open-tune-player t rate) rate (make-bytevector (* 4 total) 0) 0 total '() slot-frames 'slots #f #f
+                (if (pair? opt) (car opt) (lambda (name) #f)) EVENT-KINDS)))
 
     (define (bank-rate b) (vector-ref b 1))
     (define (bank-ready? b) (eq? (vector-ref b 7) 'ready))
@@ -238,30 +260,49 @@
             (fill (+ i 1))))
         loop-bv))
 
+    ;; open a stage: its player, a fresh buffer of `total` frames
+    (define (open-stage! b player total stage)
+      (vector-set! b 0 player)
+      (vector-set! b 2 (make-bytevector (* 4 total) 0))
+      (vector-set! b 3 0)
+      (vector-set! b 4 total)
+      (vector-set! b 7 stage))
+
+    ;; the next event the loader has a tune for, or ready when none is left
+    (define (next-event! b)
+      (let loop ()
+        (let ((left (vector-ref b 11)))
+          (if (null? left)
+              (begin (vector-set! b 0 #f)
+                     (vector-set! b 2 (vector-ref b 9))   ; the slots' buffer, as before the events
+                     (vector-set! b 7 'ready))
+              (let* ((kind (car left))
+                     (text ((vector-ref b 10) (string-append "event-" (symbol->string kind)))))
+                (vector-set! b 11 (cdr left))
+                (if text
+                    (let ((rate (vector-ref b 1)))
+                      (open-stage! b (open-tune-player (read-tune-string text) rate)
+                                   (exact (round (* EVENT-S rate))) (list 'event kind)))
+                    (loop)))))))
+
     ;; the stage's buffer is full: move on
     (define (next-stage! b)
       (player-close! (vector-ref b 0))
-      (case (vector-ref b 7)
-        ((slots)
-         (let* ((rate (vector-ref b 1))
-                (total (exact (round (* (+ BED-WARM-S BED-LOOP-S BED-XFADE-S) rate)))))
-           (vector-set! b 5 (list (cons 'slots (vector-ref b 2))))   ; keep the slots' buffer
-           (vector-set! b 0 (open-tune-player (read-tune-string BED-TUNE-TEXT) rate loop: #t))
-           (vector-set! b 2 (make-bytevector (* 4 total) 0))
-           (vector-set! b 3 0)
-           (vector-set! b 4 total)
-           (vector-set! b 7 'bed)))
-        ((bed)
-         (let* ((rate (vector-ref b 1))
-                (loop-bv (crossfade-loop (vector-ref b 2)
-                                         (exact (round (* BED-WARM-S rate)))
-                                         (exact (round (* BED-LOOP-S rate)))
-                                         (exact (round (* BED-XFADE-S rate))))))
-           (vector-set! b 0 #f)
-           (vector-set! b 2 (cdr (assq 'slots (vector-ref b 5))))
-           (vector-set! b 5 '())
-           (vector-set! b 8 loop-bv)
-           (vector-set! b 7 'ready)))))
+      (let ((stage (vector-ref b 7)) (rate (vector-ref b 1)))
+        (cond
+          ((eq? stage 'slots)
+           (vector-set! b 9 (vector-ref b 2))                      ; keep the slots' buffer
+           (open-stage! b (open-tune-player (read-tune-string BED-TUNE-TEXT) rate loop: #t)
+                        (exact (round (* (+ BED-WARM-S BED-LOOP-S BED-XFADE-S) rate))) 'bed))
+          ((eq? stage 'bed)
+           (vector-set! b 8 (crossfade-loop (vector-ref b 2)
+                                            (exact (round (* BED-WARM-S rate)))
+                                            (exact (round (* BED-LOOP-S rate)))
+                                            (exact (round (* BED-XFADE-S rate)))))
+           (next-event! b))
+          (else                                                    ; (event KIND): the whole render is the sample
+           (vector-set! b 5 (cons (cons stage (vector-ref b 2)) (vector-ref b 5)))
+           (next-event! b)))))
 
     ;; render up to `frames` more frames of the current stage(s); #t once complete
     (define (bank-render! b frames)
@@ -287,15 +328,15 @@
             (when (< (- (current-milliseconds) t0) ms) (loop))))
         (bank-ready? b)))
 
-    ;; the key's samples, cut from the rendered bank on first use
+    ;; the key's samples: an event's once its stage is done; a slot's cut from
+    ;; the slots' buffer on first use, once the slots' stage is done
     (define (bank-sample b key)
-      (and (bank-ready? b)
-           (let ((hit (assoc key (vector-ref b 5))))
-             (if hit (cdr hit)
-                 (let ((slot (assoc key (bank-slots))))
-                   (and slot
-                        (let* ((sf (vector-ref b 6))
-                               (s (make-bytevector (* 4 sf) 0)))
-                          (bytevector-copy! s 0 (vector-ref b 2) (* 4 sf (cdr slot)) (* 4 sf (+ 1 (cdr slot))))
-                          (vector-set! b 5 (cons (cons key s) (vector-ref b 5)))
-                          s)))))))))
+      (let ((hit (assoc key (vector-ref b 5))))
+        (if hit (cdr hit)
+            (let ((slot (assoc key (bank-slots))) (buf (vector-ref b 9)))
+              (and slot buf
+                   (let* ((sf (vector-ref b 6))
+                          (s (make-bytevector (* 4 sf) 0)))
+                     (bytevector-copy! s 0 buf (* 4 sf (cdr slot)) (* 4 sf (+ 1 (cdr slot))))
+                     (vector-set! b 5 (cons (cons key s) (vector-ref b 5)))
+                     s))))))))

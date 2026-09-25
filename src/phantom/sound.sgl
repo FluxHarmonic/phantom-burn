@@ -1,12 +1,24 @@
-;;; (phantom sound) - The game's sound: footsteps, the guard, the hum, the music
+;;; (phantom sound) - The game's sound: footsteps, the guard, the hum, the events
 ;;;
 ;;; S1 (tasks/phantom-burn-s1-sound), from S0's sketchbook. What the game calls:
 ;;;
-;;;   (make-sound rate loader [headless?])   loader: (name) -> a tune's text or #f
-;;;                                          ("track-low-embers"); headless: no sink,
-;;;                                          sound-render! mixes everything instead
-;;;   (sound-start! s)       on the first user gesture (the title's start press):
-;;;                          opens the audio context and the streams (not headless)
+;;;   (make-sound rate loader [headless? [music]])   loader: (name) -> a tune's text
+;;;                                          or #f ("event-KIND", and the music's name);
+;;;                                          headless: no sink, sound-render! mixes
+;;;                                          everything instead; music: a track's name,
+;;;                                          default MUSIC-TUNE, which is #f: NO MUSIC.
+;;;                                          David rejected Low Embers (2026-09-25: "a
+;;;                                          kind of clone of one of the other Crash
+;;;                                          songs ... it feels sloppy"); a Phantom track
+;;;                                          gets its own brief. The music's hooks (one
+;;;                                          player, its sections following the guards)
+;;;                                          stay, tested with Low Embers as a fixture.
+;;;   (sound-prepare! s)     a frame's slice of the bank's rendering, and nothing
+;;;                          else (the title's frames, before play)
+;;;   (sound-gesture! s)     every user gesture: the first starts the sound (opens
+;;;                          the audio context and the streams; not headless), the
+;;;                          rest resume the context if the browser suspended it
+;;;   (sound-start! s)       the start alone
 ;;;   (sound-frame! s dt you guards)          once a frame
 ;;;       you     (x y yaw moved surface speed crouched?)   moved: metres this frame;
 ;;;               surface: the floor's surface name (a symbol)
@@ -26,9 +38,10 @@
 ;;;   - a guard through a wall plays the muffled sample (S0's finding: a per-step
 ;;;     choice is enough for footsteps). Released motif (0.7.0) cannot move a
 ;;;     sounding voice's cutoff; this needs nothing from it;
-;;;   - ONE motif player, for the music (Low Embers, its sections from the guards
-;;;     by (phantom sound logic)); the hum and the room air are a seamless 10 s loop
-;;;     rendered into the bank and played by the mixer (1.86 ms a frame as a player).
+;;;   - at most ONE motif player, for a music track (none today, see make-sound),
+;;;     its sections from the guards by (phantom sound logic); the hum and the room
+;;;     air are a seamless 10 s loop rendered into the bank and played by the mixer
+;;;     (1.86 ms a frame as a player).
 ;;; Floor 14's duct has no S0 sound: it plays the grate's metal at half gain
 ;;; (the leader's approval, 2026-09-25; David's call later).
 
@@ -43,11 +56,12 @@
           (phantom sound bank)
           (phantom sound mix)
           (phantom sound sections))
-  (export make-sound sound-start! sound-frame! sound-step! sound-event! sound-stop! sound-render! sound-trace
-          sound-started? sound-bank sound-mixer sound-bed-mixer sound-last-events sound-section
+  (export make-sound sound-start! sound-gesture! sound-prepare! sound-frame! sound-step! sound-event! sound-stop!
+          sound-render! sound-trace sound-started? sound-bank sound-mixer sound-bed-mixer sound-last-events
+          sound-section sound-music-playing?
           MUSIC-TUNE SURFACE-MAP)
   (begin
-    (define MUSIC-TUNE "track-low-embers")
+    (define MUSIC-TUNE #f)                ; no track: Low Embers was rejected (see make-sound)
     (define BANK-MS 3)                    ; the bank renders ~3 ms a frame until complete
     (define SFX-DEPTH-S 0.1)              ; the steps' sink stays shallow: heard ~0.1 s late
     (define MUSIC-DEPTH-S 0.35)
@@ -69,18 +83,22 @@
     ;; --- state ------------------------------------------------------------------------
     ;; #(rate loader headless? bank mixer you-steps guards music-rule seed
     ;;   ctx sfx-stream music-stream bed-started? music-player bed-mixer sections
-    ;;   last-events costs started? steps-handed? listener)
+    ;;   last-events costs started? steps-handed? listener music)
+    ;; music: the track's name, or #f (no music: no player and no music stream)
     ;; steps-handed?: the game has called sound-step! (playback stops deriving
     ;; your steps); listener: (x y yaw) from the last frame, for placed events
     ;; The bed (the hum and the room air) is a loop in bed-mixer, from the bank
-    ;; (bank-bed-loop), started once the bank is ready: no player of its own.
+    ;; (bank-bed-loop), started once the bed's stage is done: no player of its own.
     ;; It shares the steps' stream.
     ;; guards: a vector per guard index: #(steps prev-state)
     (define (make-sound rate loader . opt)
-      (vector rate loader (and (pair? opt) (car opt)) (make-bank rate) (make-mixer) (make-steps)
+      (vector rate loader (and (pair? opt) (car opt)) (make-bank rate loader) (make-mixer) (make-steps)
               '() (make-music-rule) 20260925
               #f #f #f #f #f (make-mixer) #f
-              '() (list (cons 'bank 0.0) (cons 'sfx 0.0) (cons 'music 0.0) (cons 'bed 0.0) (cons 'frames 0)) #f #f (list 0.0 0.0 0.0)))
+              '() (list (cons 'bank 0.0) (cons 'sfx 0.0) (cons 'music 0.0) (cons 'bed 0.0) (cons 'frames 0)) #f #f (list 0.0 0.0 0.0)
+              (if (and (pair? opt) (pair? (cdr opt))) (cadr opt) MUSIC-TUNE)))
+
+    (define (sound-music-playing? s) (and (vector-ref s 13) #t))
 
     (define (sound-bed-mixer s) (vector-ref s 14))
 
@@ -101,25 +119,48 @@
       (let ((e (assq part (vector-ref s 17)))) (set-cdr! e (+ (cdr e) ms))))
 
     ;; --- start and stop -------------------------------------------------------------------
+    ;; the music's player, once its text has arrived (on the web the page
+    ;; fetches the tunes, so it may come after the start); none without a track
     (define (open-players! s)
-      (let ((text ((vector-ref s 1) MUSIC-TUNE)))
+      (let* ((name (vector-ref s 21))
+             (text (and name (not (vector-ref s 13)) ((vector-ref s 1) name))))
         (when text
           (let ((p (open-tune-player (read-tune-string text) (s-rate s) loop: #t)))
             (vector-set! s 13 p)
             (vector-set! s 15 (make-sections p))))))
 
+    (define (open-stream)
+      (guard (e (#t #f)) (open-audio-stream channels: 2 buffer-frames: BUFFER)))
+
     (define (sound-start! s)
       (unless (sound-started? s)
         (open-players! s)
         (unless (vector-ref s 2)
-          (let ((ctx (guard (e (#t #f)) (audio-context-open))))
-            (vector-set! s 9 ctx)
-            (when ctx (guard (e (#t #f)) (audio-context-resume ctx)))
-            (let ((open (lambda () (guard (e (#t #f)) (open-audio-stream channels: 2 buffer-frames: BUFFER)))))
-              (vector-set! s 10 (open))
-              (vector-set! s 11 (open)))
+          ;; one context for the sound's life: a stop closes the streams, not it
+          (unless (vector-ref s 9)
+            (vector-set! s 9 (guard (e (#t #f)) (audio-context-open))))
+          (let ((ctx (vector-ref s 9)))
+            (when ctx (guard (e (#t #f)) (audio-context-resume ctx))))
+          (vector-set! s 10 (open-stream))
+          (when (vector-ref s 21)
+            (vector-set! s 11 (open-stream))
             (when (vector-ref s 11) (set-audio-stream-volume! (vector-ref s 11) MUSIC-GAIN))))
         (vector-set! s 18 #t)))
+
+    ;; a user gesture: start, or resume a context the browser suspended
+    (define (sound-gesture! s)
+      (if (sound-started? s)
+          (let ((ctx (vector-ref s 9)))
+            (when (and ctx (not (eq? (guard (e (#t #f)) (audio-context-state ctx)) 'running)))
+              (guard (e (#t #f)) (audio-context-resume ctx))))
+          (sound-start! s)))
+
+    ;; the title's frames: only the bank's rendering, ~BANK-MS
+    (define (sound-prepare! s)
+      (unless (bank-ready? (sound-bank s))
+        (let ((t0 (current-milliseconds)))
+          (bank-render-for! (sound-bank s) BANK-MS)
+          (cost! s 'bank (- (current-milliseconds) t0)))))
 
     (define (sound-stop! s)
       (for-each (lambda (i) (let ((st (vector-ref s i))) (when st (guard (e (#t #f)) (set-audio-stream-volume! st 0.0)) (guard (e (#t #f)) (close-audio-stream! st))) (vector-set! s i #f)))
@@ -168,9 +209,10 @@
         (step! s (car sf) (cdr sf) gait foot)))
 
     ;; a placed one-shot the game fires (door-open door-close panel-on panel-off
-    ;; reader-ok reader-deny badge caught note): the bank's (event KIND) slot,
-    ;; its muffled variant (event KIND muffled) when there is one; a kind with no
-    ;; slot yet, or unknown, is silence (the game may fire it before its sound exists)
+    ;; reader-ok reader-deny badge caught note): the bank's (event KIND) sample (the tune David approved,
+    ;; assets/tunes/event-KIND.cts), its muffled variant (event KIND muffled) when there is one
+    ;; (none yet: a muffled event plays the clear one at atten); a kind not rendered
+    ;; yet, or unknown, is silence (the game may fire it before its sound exists)
     (define (sound-event! s kind x y atten muffled?)
       (let* ((sp (placed s x y atten #f))
              (bank (sound-bank s))
@@ -181,12 +223,10 @@
     (define (sound-frame! s dt you guards)
       (vector-set! s 16 '())
       ;; the bank renders ~BANK-MS a frame until it is complete (the title's
-      ;; frames can do it before play); then the bed's loop starts, once
-      (unless (bank-ready? (sound-bank s))
-        (let ((t0 (current-milliseconds)))
-          (bank-render-for! (sound-bank s) BANK-MS)
-          (cost! s 'bank (- (current-milliseconds) t0))))
-      (when (and (sound-started? s) (bank-ready? (sound-bank s)) (not (vector-ref s 12)))
+      ;; frames can do it before play); the bed's loop starts, once, when its stage is done
+      (sound-prepare! s)
+      (when (sound-started? s) (open-players! s))
+      (when (and (sound-started? s) (bank-bed-loop (sound-bank s)) (not (vector-ref s 12)))
         (mixer-loop! (sound-bed-mixer s) (bank-bed-loop (sound-bank s)) BED-GAIN)
         (vector-set! s 12 #t))
       (let* ((lx (list-ref you 0)) (ly (list-ref you 1)) (yaw (list-ref you 2)))

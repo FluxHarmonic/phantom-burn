@@ -1,10 +1,12 @@
 ;;; S1's sound (tasks/phantom-burn-s1-sound): (phantom sound) and its parts,
-;;; headless. Run from the repo root (it reads assets/tunes/track-low-embers.cts).
+;;; headless. Run from the repo root (it reads assets/tunes/event-*.cts and the
+;;; fixture test/fixtures/track-low-embers.cts).
 ;;;
-;;; The acceptance: a step event produces the right sample; the music's
-;;; section follows the guards' awareness; a session renders byte-identically
-;;; twice. And the pure parts exactly: the step tracker, the space, the rule,
-;;; the stings, the mixer.
+;;; The acceptance: a step event produces the right sample; the game plays no
+;;; music (David rejected Low Embers), but the music's hooks still work: with a
+;;; track, its section follows the guards' awareness (Low Embers is only the
+;;; fixture for that); a session renders byte-identically twice. And the pure
+;;; parts exactly: the step tracker, the space, the rule, the stings, the mixer.
 
 (import (sigil test)
         (sigil math)
@@ -13,11 +15,19 @@
         (phantom sound logic)
         (phantom sound bank)
         (phantom sound mix)
-        (phantom sound))
+        (phantom sound)
+        (motif tune)
+        (motif tune player))
 
 (define RATE 32000)
+;; the fixture track for the music's hooks (rejected for the game: not an asset)
+(define FIXTURE-TRACK "track-low-embers")
+;; the game's loader: the event tunes from assets/tunes, and the fixture track
 (define (loader name)
-  (and (string=? name MUSIC-TUNE) (read-file-string "assets/tunes/track-low-embers.cts")))
+  (cond ((string=? name FIXTURE-TRACK) (read-file-string "test/fixtures/track-low-embers.cts"))
+        ((memq (string->symbol name) (map (lambda (k) (string->symbol (string-append "event-" (symbol->string k)))) EVENT-KINDS))
+         (read-file-string (string-append "assets/tunes/" name ".cts")))
+        (else #f)))
 
 (define (f32 bv i) (bytevector-ieee-single-ref bv (* 4 i) 'little))
 (define (f32! bv i x) (bytevector-ieee-single-set! bv (* 4 i) x 'little))
@@ -140,8 +150,15 @@
 
 ;; --- the facade, headless --------------------------------------------------------------
 
-(define (ready-sound)
-  (let ((s (make-sound RATE loader #t)))
+;; a loader with the music and only the named event tunes: the tests that need
+;; no events do not render them (all nine are 22.5 s of audio per bank)
+(define (only-loader . names)
+  (lambda (name) (and (or (string=? name FIXTURE-TRACK) (member name names)) (loader name))))
+
+;; (ready-sound [loader [music]]): music #f by default, as the game plays
+(define (ready-sound . opt)
+  (let ((s (make-sound RATE (if (pair? opt) (car opt) (only-loader)) #t
+                       (if (and (pair? opt) (pair? (cdr opt))) (cadr opt) MUSIC-TUNE))))
     (let loop () (unless (bank-ready? (sound-bank s)) (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0 0.0 'tile 0.0 #f) '()) (loop)))
     (sound-start! s)
     s))
@@ -177,9 +194,17 @@
       (assert-equal '(guard muffled) (list (car (car g)) (cadr (car g))))
       (assert-true (near? (caddr g) 0.6 1e-9)))))
 
-(test-group "the music follows the guards"
+(test-group "the music (none in the game; the hooks, with the fixture track)"
+  (test "the game's own sound plays no music: no player, no section, whatever the guards do"
+    (let ((s (ready-sound)))
+      (let loop ((i 0))
+        (when (< i 60)
+          (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0) (list (list 3.0 0.0 0.0 3 1.0 #f)))
+          (loop (+ i 1))))
+      (assert-false (sound-music-playing? s))
+      (assert-equal (quote none) (sound-section s))))
   (test "a guard searching runs the fill into tense; 4 s after he stops, calm again"
-    (let* ((s (ready-sound)) (out (make-bytevector (* 8 533) 0))
+    (let* ((s (ready-sound (only-loader) FIXTURE-TRACK)) (out (make-bytevector (* 8 533) 0))
            (frames (lambda (k states)
                      (let loop ((i 0))
                        (when (< i k)
@@ -201,7 +226,7 @@
 (test-group "byte-identical"
   (test "a scripted session renders the same bytes twice"
     (let* ((run (lambda ()
-                  (let* ((s (ready-sound)) (out (make-bytevector (* 8 533) 0)) (acc '()))
+                  (let* ((s (ready-sound (only-loader) FIXTURE-TRACK)) (out (make-bytevector (* 8 533) 0)) (acc '()))
                     (let loop ((i 0))
                       (when (< i 360)
                         (sound-frame! s (/ 1 60.0) (list 0.0 0.0 (* 0.01 i) 0.04 (if (< i 180) 'carpet 'marble) 2.4 #f)
@@ -243,7 +268,7 @@
       (assert-true (near? (f32 out 6) 0.4 1e-6))
       (assert-equal 0 (mixer-voices m))))
   (test "the sound starts the bed once the bank is ready, on the steps' mixer's partner"
-    (let* ((s (make-sound RATE loader #t)))
+    (let* ((s (make-sound RATE (only-loader) #t)))
       (sound-start! s)
       (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0 0.0 'tile 0.0 #f) '())
       (let ((out (make-bytevector (* 8 533) 0)))
@@ -276,10 +301,89 @@
       (assert-true (near? (/ (cadr b) (cadr a)) 0.5 1e-9))
       (assert-true (near? (/ (cadr c) (cadr a)) 0.5 1e-9))
       (assert-true (near? (caddr c) 0.6 1e-9))))
-  (test "sound-event!: an unknown kind, and a kind with no sound yet, are silence"
-    (let ((s (ready-sound)))
+  (test "sound-event!: an unknown kind is silence, and so is a kind whose stage is not rendered yet"
+    (let ((s (make-sound RATE loader #t)))
       (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0) '())
-      (sound-event! s 'no-such-kind 1.0 1.0 1.0 #f)
-      (assert-equal '() (sound-last-events s))
       (sound-event! s 'door-open 1.0 1.0 1.0 #f)
-      (assert-equal '() (sound-last-events s)))))
+      (assert-equal '() (sound-last-events s))
+      (let ((s (ready-sound)))
+        (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0) '())
+        (sound-event! s 'no-such-kind 1.0 1.0 1.0 #f)
+        (assert-equal '() (sound-last-events s)))))
+  (test "sound-event! plays the event's sample, placed: 4 m to your right, half the gain, panned 0.6 right"
+    (let ((s (ready-sound (only-loader "event-door-open"))))
+      (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0) '())
+      (sound-event! s 'door-open 0.0 -4.0 1.0 #f)
+      (let ((e (car (sound-last-events s))))
+        (assert-equal '(event door-open) (car e))
+        (assert-true (near? (cadr e) 0.5 1e-9))
+        (assert-true (near? (caddr e) 0.6 1e-9))))))
+
+;; --- the events in the bank (David approved them on the sketchbook, 2026-09-25) --------
+
+(define (bank-until b done?)
+  (let loop () (unless (or (done? b) (bank-render! b 4096)) (loop)))
+  b)
+
+;; an event tune rendered the way the bank does, on a player of its own, to mono
+(define (mono-render text frames)
+  (let* ((p (open-tune-player (read-tune-string text) RATE))
+         (buf (make-bytevector (* 8 frames) 0))
+         (out (make-bytevector (* 4 frames) 0)))
+    (let loop ((done 0))
+      (when (< done frames)
+        (let ((n (min 1024 (- frames done))))
+          (player-pull! p buf (* 8 done) n)
+          (loop (+ done n)))))
+    (let fill ((i 0))
+      (when (< i frames)
+        (f32! out i (* 0.5 (+ (f32 buf (* 2 i)) (f32 buf (+ 1 (* 2 i))))))
+        (fill (+ i 1))))
+    (player-close! p)
+    out))
+
+(define BANK-E (bank-until (make-bank RATE loader) (lambda (b) #f)))
+
+(test-group "the events in the bank"
+  (test "every kind has a sample, EVENT-S long, that sounds (above -50 dBFS)"
+    (for-each (lambda (k)
+                (let ((s (bank-sample BANK-E (list 'event k))))
+                  (unless (and s (> (rms s) 0.00316)) (display k) (display " is missing or silent\n"))
+                  (assert-true (and s (= (quotient (bytevector-length s) 4) (exact (round (* EVENT-S RATE))))))
+                  (assert-true (and s (> (rms s) 0.00316)))))
+              EVENT-KINDS))
+  (test "each is its approved tune's own render, exactly (the file copied from the sketchbook)"
+    (for-each (lambda (k)
+                (let ((name (string-append "event-" (symbol->string k))))
+                  (assert-true (equal? (bank-sample BANK-E (list 'event k))
+                                       (mono-render (loader name) (exact (round (* EVENT-S RATE))))))))
+              EVENT-KINDS))
+  (test "each has faded out by its end (its last 100 ms is under -60 dBFS)"
+    (for-each (lambda (k)
+                (let* ((s (bank-sample BANK-E (list 'event k)))
+                       (n (quotient (bytevector-length s) 4))
+                       (tail (make-bytevector (* 4 (quotient RATE 10)) 0)))
+                  (bytevector-copy! tail 0 s (* 4 (- n (quotient RATE 10))) (* 4 n))
+                  (unless (< (rms tail) 0.001) (display k) (display " still sounds at its end\n"))
+                  (assert-true (< (rms tail) 0.001))))
+              EVENT-KINDS))
+  (test "the steps are usable before the bed, and the bed before the events"
+    (let ((b (make-bank RATE (only-loader "event-note"))))
+      (bank-until b (lambda (b) (bank-sample b '(step tile heel 0))))
+      (assert-false (bank-bed-loop b))
+      (bank-until b (lambda (b) (bank-bed-loop b)))
+      (assert-false (bank-sample b '(event note)))
+      (assert-false (bank-ready? b))))
+  (test "the slots and the bed are the same bytes with the events as without"
+    (assert-true (equal? (vector-ref BANK-A 2) (vector-ref BANK-E 2)))
+    (assert-true (equal? (bank-bed-loop BANK-A) (bank-bed-loop BANK-E))))
+  (test "a kind the loader has no tune for is skipped: silence, and the rest render"
+    (let ((b (bank-until (make-bank RATE (only-loader "event-caught"))
+                         (lambda (b) #f))))
+      (assert-false (bank-sample b '(event badge)))
+      (assert-true (bank-sample b '(event caught)))
+      (assert-true (bank-ready? b))))
+  (test "renders byte-identically twice"
+    (let ((b (bank-until (make-bank RATE loader) (lambda (b) #f))))
+      (for-each (lambda (k) (assert-true (equal? (bank-sample BANK-E (list 'event k)) (bank-sample b (list 'event k)))))
+                EVENT-KINDS))))
