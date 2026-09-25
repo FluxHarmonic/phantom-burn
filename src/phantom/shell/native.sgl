@@ -5,6 +5,7 @@
 ;;;                [--bayer 4|8] [--palette NAME] [--fog M] [--card]
 ;;;                [--snap] [--affine] [--trace] [--auto] [--night N] [--no-lift] [--pools G]
 ;;;                [--on all|none|c1,c3]
+;;;                [--hide PART]
 ;;;                [--guard X,Y[,Z[,R]]] [--guard-speed V] [--guard-state S] [--guard-light L]
 ;;;   phantom-burn --title [--title-at T] [--freeze]   the title screen
 ;;;
@@ -24,6 +25,8 @@
 ;;; 2 office, then the dark rooms: 3 lobby-dark, 4 office-night, 5
 ;;; corridor-dark); --shot holds the camera exactly there, for floor shots.
 ;;;
+;;; --hide leaves out a named part of the compiled floor (floor.sexp's parts;
+;;; P2 hides the badge this way once it is taken, (render-hide-part!)).
 ;;; --guard previews the guard's body (models/guard/guard.py, loaded from
 ;;; assets/guard/guard.sgm) walking a circle of radius R (default 2) around
 ;;; X,Y at floor height Z (default 0), 1.3 m/s (--guard-speed, 0 stands him),
@@ -122,7 +125,8 @@
         (when h (game-set-hud! h))
         (when v (game-set-view! v))
         (when shot (game-set-shot! shot))
-        (let ((on (arg-value args "--on" #f))) (when on (game-set-on! on)))))
+        (let ((on (arg-value args "--on" #f))) (when on (game-set-on! on)))
+        (let ((h (arg-value args "--hide" #f))) (when h (render-hide-part! (string->symbol h) #t)))))
 
     ;; The guard's body, beside the floors (one for every floor).
     (define GUARD-SGM "assets/guard/guard.sgm")

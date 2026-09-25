@@ -43,7 +43,7 @@
           render-world-ms render-post-ms
           render-scene! render-make-world-mesh render-draw-world-mesh render-title-scene!
           render-draw-floor! render-floor-kind
-          render-set-extra-draw! render-draw-object!
+          render-set-extra-draw! render-draw-object! render-hide-part! render-part-hidden?
           render-load-guard! render-guard-ready? render-guard-parts render-draw-guard!
           make-camera camera-set!)
 
@@ -246,7 +246,21 @@ void main() {
     (define *tri* #f)         ; the full-screen triangle
     (define *floor* #f)
     (define *city* #f)
-    (define *draws* '())      ; ((first count texture-or-#f glass?) ...)
+    (define *draws* '())      ; ((first count texture-or-#f glass? name-or-#f) ...)
+    ;; Parts of the compiled floor not drawn, by name (the floor.sexp part's
+    ;; name, e.g. badge once play mode says it is picked up). Loading a
+    ;; compiled floor clears it (a live reload too: play mode hides the part
+    ;; again if it is still taken). The stand-in's draws have no names.
+    (define *hidden* '())
+    (define (render-hide-part! name hide?)
+      (set! *hidden* (if hide?
+                         (if (memq name *hidden*) *hidden* (cons name *hidden*))
+                         (let drop ((l *hidden*))
+                           (cond ((null? l) '())
+                                 ((eq? (car l) name) (drop (cdr l)))
+                                 (else (cons (car l) (drop (cdr l)))))))))
+    (define (render-part-hidden? name) (and (memq name *hidden*) #t))
+    (define (draw-hidden? d) (let ((n (cdr (cdddr d)))) (and (pair? n) (car n) (memq (car n) *hidden*))))
 
     ;; The circuits: (name index level r g b switchable?) per circuit of the
     ;; loaded floor, and each index's on/off. The ambient they imply: a night
@@ -517,6 +531,7 @@ void main() {
     ;; no lights of its own.
     (define (render-load-compiled! load-mesh* load-texture* info)
       (set! *kind* 'compiled)
+      (set! *hidden* '())
       (model-turn!)
       (set! *circuits* (cdr (assq 'circuits info)))
       (when *floor* (mesh-free! *floor*))
@@ -530,7 +545,8 @@ void main() {
                               (let ((tex (load-texture* (list-ref p 3))))
                                 (set-texture-sampling! tex 'nearest 'repeat)
                                 tex))
-                         (list-ref p 4)))
+                         (list-ref p 4)
+                         (list-ref p 0)))
                  (cdr (assq 'parts info))))
       ;; the skyline takes no light but the ambient and its own glow
       (let ((zero (map (lambda (l) '(0.0 0.0 0.0 0.0)) (pad-lights '() NLIGHTS))))
@@ -714,6 +730,7 @@ void main() {
             (set-pipeline-uniform! (if (eq? *kind* 'compiled) *c-glass* *glass*) 'eye *eye*)
             (for-each (lambda (d)
                         (cond ((cadddr d) #f)
+                              ((draw-hidden? d) #f)
                               ((caddr d) (draw-mesh-range opaque *floor* (car d) (cadr d) (caddr d)))
                               (else (draw-mesh-range opaque *floor* (car d) (cadr d)))))
                       *draws*))
@@ -727,7 +744,7 @@ void main() {
           ;; glass last, blended over what is behind it
           (let ((glass (if (eq? *kind* 'compiled) *c-glass* *glass*)))
             (for-each (lambda (d)
-                        (when (cadddr d)
+                        (when (and (cadddr d) (not (draw-hidden? d)))
                           (draw-mesh-range glass *floor* (car d) (cadr d))))
                       *draws*)))
 
