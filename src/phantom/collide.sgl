@@ -294,7 +294,7 @@
                    (vector-set! c 14 (+ bx (* *ux* r)))
                    (vector-set! c 15 (+ by (* *uy* r)))
                    #t)
-                  (else #f))))))))
+                  (else #f)))))))
 
     ;; 2D polygon area test (twice the signed area, away from zero).
     (define (polygon-has-area? a n)
