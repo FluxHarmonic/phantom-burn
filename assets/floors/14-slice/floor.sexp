@@ -47,4 +47,5 @@
   (overlook 4.2 9.3 4.6 7.0 -26.0 1.0 19.0)
   (office 20.5 12.2 1.6 19.4 18.8 1.0 17.0))
  (start 1.0 3.0 0.0)
- (exit 3.0 10.0))
+ (exit 3.0 10.0)
+ (surfaces carpet tile marble grate raised duct wall ceiling glass prop trim))

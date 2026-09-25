@@ -163,7 +163,7 @@
       (list
        ;; the lobby, every switchable circuit off: the exit sign's glow under
        ;; the mezzanine, the city through the window
-       (look-from 'lobby-dark 10.5 3.2 1.6 2.0 6.2 1.0 FOV '())
+       (look-from 'lobby-dark 9.4 2.6 1.6 2.0 6.2 1.0 FOV '())
        ;; the office at night: the monitors' glow on the desks, the FM
        ;; office lit behind its glass
        (look-from 'office-night 20.5 12.2 1.6 19.4 18.8 1.0 FOV '(c3))
@@ -181,6 +181,7 @@
              (rest (filter (lambda (v) (not (memq (car v) '(arrival overlook office)))) vs)))
         (append main DARK-VIEWS rest)))
     (define *views* STAND-IN-VIEWS)
+    (define *surfaces* stand-in-surfaces)   ; the collision's surface tags, by index
 
     (define (view-ref k) (list-ref *views* (max 0 (min k (- (length *views*) 1)))))
 
@@ -251,10 +252,12 @@
         (if info
             (begin
               (render-load-compiled! load-mesh* load-texture* info)
-              (set! *views* (compiled-views info)))
+              (set! *views* (compiled-views info))
+              (set! *surfaces* (let ((s (assq 'surfaces info))) (if s (cdr s) '()))))
             (begin
               (render-load-stand-in! load-mesh* load-texture* stand-in-draws (append stand-in-lights EMITTERS))
-              (set! *views* STAND-IN-VIEWS)))
+              (set! *views* STAND-IN-VIEWS)
+              (set! *surfaces* stand-in-surfaces)))
         (when *walker*
           (for-each (lambda (p) (render-circuit-set! (car p) (cdr p))) saved)))
       (set! *coll* coll))
@@ -381,7 +384,7 @@
     (define (fixed0 x) (number->string (exact (round x))))
 
     (define (surface-name tag)
-      (let ((names stand-in-surfaces))
+      (let ((names *surfaces*))
         (if (< tag (length names)) (symbol->string (list-ref names tag)) "?")))
 
     (define (refresh-hud! k)
