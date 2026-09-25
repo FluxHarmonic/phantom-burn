@@ -21,10 +21,12 @@
 ;;; `crash` (29) is Crash The Stack's own (its assets/palette.png at
 ;;; 262a0e0), with no dark ramps at all.
 ;;;
-;;; The spread: 12 by default (David, 2026-09-25, on a desktop: 8 to 16
-;;; looked best), but the game sets it from the size of one game pixel on
-;;; the screen (render.sgl's auto spread). Any multiple of 4 up to 64 keeps
-;;; the 4x4 pass bit-exact (every term stays a multiple of 1/64 below 2^18).
+;;; The spread: 8 on every device (David, 2026-09-25: "even on phone it
+;;; looks good with a spread of 8, it accentuates the pattern without losing
+;;; the darker shadows"; before that he had 8 to 16 on the desktop and 40 on
+;;; the phone). The auto spread by pixel size (render.sgl) stays behind the
+;;; / key. Any multiple of 4 up to 64 keeps the 4x4 pass bit-exact (every
+;;; term stays a multiple of 1/64 below 2^18), so the game rounds to one.
 ;;;
 ;;; The pass: a full-screen triangle drawn into a second 480x270 target,
 ;;; reading the 3D target by texelFetch (one texel per pixel, so the
@@ -40,7 +42,7 @@
   (begin
 
     (define PALETTE-MAX 60)       ; 60 vec4s + params + opts = 992 bytes, under the 1 KiB block
-    (define dither-spread-default 12.0)
+    (define dither-spread-default 8.0)
     (define dither-size-default 4)
 
     (define PALETTES

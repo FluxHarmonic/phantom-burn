@@ -44,7 +44,8 @@ const requests = [];
 const server = http.createServer((req, res) => {
   res.on("finish", () => requests.push(`${res.statusCode} ${req.url}`));
   res.on("close", () => { if (!res.writableFinished) requests.push(`CLOSED ${req.url}`); });
-  const urlPath = decodeURIComponent((req.url || "/").split("?")[0]);
+  let urlPath;
+  try { urlPath = decodeURIComponent((req.url || "/").split("?")[0]); } catch { res.writeHead(400).end(); return; }
   const fp = path.join(ROOT, urlPath === "/" ? "/index.html" : urlPath);
   if (fp !== ROOT && !fp.startsWith(ROOT + path.sep)) { res.writeHead(403).end(); return; }
   fs.readFile(fp, (err, buf) => {

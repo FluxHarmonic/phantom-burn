@@ -43,6 +43,8 @@
     (define *collide* #f)        ; the base64 text, once the page sends it
     (define *started* #f)        ; #f, #t, or 'failed
     (define *said-ready* #f)
+    (define *waited* 0.0)        ; seconds since the page named the floor, until start
+    (define *said-stuck* #f)
     (define *last-ms* #f)
     (define *keys* '())
     (define *pressed* '())
@@ -167,9 +169,22 @@
       (unless (and *params-seen* (param "title"))
         (web-tick* payload)))
 
+    ;; What the start still waits for, for the load-failed line.
+    (define (missing)
+      (append (if *collide* '() '("collision"))
+              (if (or (stand-in?) *info*) '() '("floor.sexp"))
+              (let loop ((fs *fetches*))
+                (cond ((null? fs) '())
+                      ((gles3-image-ready? (cdar fs)) (loop (cdr fs)))
+                      (else (cons (caar fs) (loop (cdr fs))))))))
+
     (define (web-tick* payload)
       (when (and *params-seen* (not *info*) *info-text*)
-        (set! *info* (floor-info-from-string *info-text*)))
+        (let ((text *info-text*))
+          ;; one attempt: a floor.sexp that does not read is said once
+          (set! *info-text* #f)
+          (set! *info* (guard (e (#t (display "phantom-burn: load failed: floor.sexp does not read") (newline) #f))
+                         (floor-info-from-string text)))))
       (when (and *params-seen* (null? *fetches*) (or (stand-in?) *info*))
         (set! *fetches* (map (lambda (n) (cons n (gles3-fetch-image (url n)))) (asset-names))))
       (gles3-resize-to-display)
@@ -188,6 +203,14 @@
               ((eq? *started* 'failed) #f)
               ((all-ready?) (start!))
               (else
+               ;; a fetch that fails never becomes ready, and the bridge
+               ;; cannot tell Sigil it failed: after 20 s, say what is missing
+               (when *params-seen* (set! *waited* (+ *waited* dt)))
+               (when (and (> *waited* 20.0) (not *said-stuck*))
+                 (set! *said-stuck* #t)
+                 (display (string-append "phantom-burn: load failed, still waiting for: "
+                                         (apply string-append (map (lambda (n) (string-append n " ")) (missing)))))
+                 (newline))
                (begin-frame)
                (clear-screen (/ 13 255) (/ 10 255) (/ 26 255))
                (end-frame)))))
@@ -261,6 +284,10 @@
             ((string=? type "dpr")
              (render-set-dpr! (string->number payload))
              (render-spread-auto! (render-spread-auto?))
+             0)
+            ((string=? type "floor")
+             ;; the page's own (sanitised) floor name, which it fetches by
+             (set! *floor* payload)
              0)
             ((string=? type "floorinfo")
              (set! *info-text* payload)

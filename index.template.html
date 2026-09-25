@@ -105,6 +105,18 @@
       document.addEventListener("sigil-web-app-ready", function (e) { fn(e.detail); }, { once: true });
     }
     if (params.has("touch")) document.body.classList.add("touch");
+    // the game says so when a load fails (a fetch never lands): show it
+    (function () {
+      var log0 = console.log.bind(console);
+      console.log = function () {
+        var line = Array.prototype.join.call(arguments, " ");
+        if (line.indexOf("phantom-burn: load failed") === 0) {
+          var st = document.getElementById("status");
+          if (st) st.textContent = line.replace("phantom-burn: ", "");
+        }
+        log0.apply(null, arguments);
+      };
+    })();
     if (params.has("trace")) {
       var log = console.log.bind(console);
       console.log = function () {
@@ -122,6 +134,7 @@
       var booted = app.ready && app.ready.then ? app.ready : Promise.resolve();
       booted.then(function () {
         app.dispatch("params", location.search.replace(/^\?/, ""));
+        app.dispatch("floor", floor);
         app.dispatch("dpr", String(window.devicePixelRatio || 1));
         window.addEventListener("resize", function () { app.dispatch("dpr", String(window.devicePixelRatio || 1)); });
         function text(f) {

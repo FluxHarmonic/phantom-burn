@@ -25,10 +25,12 @@ function handler(req, res) {
   const u = new URL(req.url, "http://x");
   // a page's ?trace lines (phone numbers without transcribing), to this log
   if (u.pathname.endsWith("/report")) {
-    console.log(`report ${new Date().toISOString()} ${req.socket.remoteAddress} ${decodeURIComponent(u.search.slice(1)).slice(0, 600)}`);
+    let line; try { line = decodeURIComponent(u.search.slice(1)); } catch { line = u.search.slice(1); }
+    console.log(`report ${new Date().toISOString()} ${req.socket.remoteAddress} ${line.slice(0, 600)}`);
     res.writeHead(204); res.end(); return;
   }
-  const urlPath = decodeURIComponent(u.pathname);
+  let urlPath;
+  try { urlPath = decodeURIComponent(u.pathname); } catch { res.writeHead(400); res.end(); return; }
   let fp = path.normalize(path.join(root, urlPath));
   if (!fp.startsWith(root)) { res.writeHead(403); res.end(); return; }
   try { if (fs.statSync(fp).isDirectory()) fp = path.join(fp, "index.html"); } catch { /* the read reports it */ }
