@@ -1,0 +1,43 @@
+;;; The walker on the stand-in floor (G0's export of the floor-14 slice,
+;;; assets/stand-in/floor14.collide): the stairs lift it to the mezzanine,
+;;; the filing cabinet is climbed (crouched: the hatch box is 1.36 m above
+;;; it), and the lobby's west wall stops it. Run from the repo root.
+
+(import (sigil test)
+        (sigil math)
+        (sigil fs)
+        (phantom detmath)
+        (phantom soup)
+        (phantom walker))
+
+(define C (pbc1->collision (read-file-bytes "assets/stand-in/floor14.collide")))
+
+(define (run w n input)
+  (if (= n 0) w (run (walker-step w input TICK C) (- n 1) input)))
+
+(define (run-until w input done? n)
+  (cond ((done? w) w)
+        ((= n 0) #f)
+        (else (run-until (walker-step w input TICK C) input done? (- n 1)))))
+
+(define FORWARD (make-input 0.0 1.0 0.0 0.0 #f #f #f 0))
+(define (near? a b eps) (< (abs (- a b)) eps))
+
+(test-group "the stand-in floor"
+  (test "the arrival spot stands on the lobby floor"
+    (let ((w (run (make-walker 1.3 1.3 0.0 0.0) 30 NO-INPUT)))
+      (assert-true (walker-grounded? w))
+      (assert-true (near? (walker-z w) 0.0 0.01))))
+  (test "walking north up the stairs reaches the mezzanine at 3 m"
+    (let ((w (run-until (make-walker 11.0 1.0 0.0 0.0) FORWARD
+                        (lambda (w) (> (walker-y w) 8.0)) 600)))
+      (assert-true (and w (near? (walker-z w) 3.0 0.05)))))
+  (test "walking south from the office onto the filing cabinet climbs it, crouched"
+    (let* ((m (run-until (make-walker 21.9 15.5 0.0 PI) FORWARD walker-mantling? 400))
+           (w (and m (run m 60 NO-INPUT))))
+      (assert-true (and w (near? (walker-z w) 1.3 0.02)))
+      (assert-true (and w (walker-crouching? w)))))
+  (test "the lobby's west wall stops a walk west"
+    (let ((w (run (make-walker 3.0 3.0 0.0 (/ PI 2.0)) 240 FORWARD)))
+      (assert-true (> (walker-x w) 0.2))
+      (assert-true (< (walker-x w) 1.0)))))
