@@ -20,7 +20,7 @@
 ;;; And the game's events, (event KIND) for KIND in EVENT-KINDS: each is its own
 ;;; tune, assets/tunes/event-KIND.cts, COPIED byte for byte from the sketchbook
 ;;; (David approved them as heard there, 2026-09-25: "Phantom sounds are
-;;; good"), rendered whole (EVENT-S) on a player of its own, one after another,
+;;; good"), rendered for EVENT-S seconds on a player of its own, one after another,
 ;;; after the bed. They are longer than a slot and carry the sketchbook's small
 ;;; reverb, so they are not slots.
 ;;;
@@ -204,9 +204,9 @@
 
     ;; --- the events --------------------------------------------------------------------------
     ;; the kinds agreed with P2 (topics/phantom-sound-api); each tune is 125 rows
-    ;; of 20 ms, the event at row 0, and rendered whole
+    ;; of 20 ms, the event at row 0, rendered for its first EVENT-S seconds
     (define EVENT-KINDS '(door-open door-close panel-on panel-off reader-ok reader-deny badge caught note))
-    (define EVENT-S 2.5)
+    (define EVENT-S 1.6)                  ; each event's render: all nine are silent by then (the tests hold it), 36% less to render than 2.5
 
     ;; --- rendering -------------------------------------------------------------------------------
     ;; Stages, each one player opened once: the slots, the bed, then each event.

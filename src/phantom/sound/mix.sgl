@@ -17,13 +17,15 @@
   (import (sigil core)
           (sigil math)
           (phantom sound logic))
-  (export make-mixer mixer-play! mixer-loop! mixer-render! mixer-voices MAX-VOICES)
+  (export make-mixer mixer-play! mixer-loop! mixer-render! mixer-voices mixer-silent? MAX-VOICES)
   (begin
     (define MAX-VOICES 16)
 
     ;; #(voices loops) where a voice is #(sample frames pos gl gr), oldest first
     (define (make-mixer) (vector '() '()))
     (define (mixer-voices m) (length (vector-ref m 0)))
+    ;; nothing sounding: no one-shot and no loop (a caller can skip the render)
+    (define (mixer-silent? m) (and (null? (vector-ref m 0)) (null? (vector-ref m 1))))
 
     (define (voice sample gain pan)
       (let ((g (pan-gains pan)))
@@ -52,8 +54,18 @@
             (add (+ i 1))))
         (vector-set! v 2 (+ pos k))))
 
+    ;; n stereo frames of out to 0.0 (whose bytes are all 0), copied natively
+    ;; from a zero block: a per-sample loop here cost more than the voices
+    (define ZERO (make-bytevector (* 8 4096) 0))
+    (define (zero! out n)
+      (let loop ((at 0))
+        (when (< at (* 8 n))
+          (let ((k (min (bytevector-length ZERO) (- (* 8 n) at))))
+            (bytevector-copy! out at ZERO 0 k)
+            (loop (+ at k))))))
+
     (define (mixer-render! m out n)
-      (let zero ((i 0)) (when (< i (* 2 n)) (f32! out i 0.0) (zero (+ i 1))))
+      (zero! out n)
       ;; loops first, wrapping as often as the block needs
       (for-each
         (lambda (v)

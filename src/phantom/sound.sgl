@@ -13,7 +13,7 @@
 ;;;                                          gets its own brief. The music's hooks (one
 ;;;                                          player, its sections following the guards)
 ;;;                                          stay, tested with Low Embers as a fixture.
-;;;   (sound-prepare! s)     a frame's slice of the bank's rendering, and nothing
+;;;   (sound-prepare! s)     a frame's slice (~BANK-IDLE-MS) of the bank's rendering, and nothing
 ;;;                          else (the title's frames, before play)
 ;;;   (sound-gesture! s)     every user gesture: the first starts the sound (opens
 ;;;                          the audio context and the streams; not headless), the
@@ -62,7 +62,8 @@
           MUSIC-TUNE SURFACE-MAP)
   (begin
     (define MUSIC-TUNE #f)                ; no track: Low Embers was rejected (see make-sound)
-    (define BANK-MS 3)                    ; the bank renders ~3 ms a frame until complete
+    (define BANK-MS 3)                    ; the bank renders ~3 ms a frame of play until complete
+    (define BANK-IDLE-MS 8)               ; and ~8 ms a frame before play (the title: nothing else runs)
     (define SFX-DEPTH-S 0.1)              ; the steps' sink stays shallow: heard ~0.1 s late
     (define MUSIC-DEPTH-S 0.35)
     (define BUFFER 32768)
@@ -83,20 +84,25 @@
     ;; --- state ------------------------------------------------------------------------
     ;; #(rate loader headless? bank mixer you-steps guards music-rule seed
     ;;   ctx sfx-stream music-stream bed-started? music-player bed-mixer sections
-    ;;   last-events costs started? steps-handed? listener music)
+    ;;   last-events costs started? steps-handed? listener music bed-stream bed-pos)
     ;; music: the track's name, or #f (no music: no player and no music stream)
     ;; steps-handed?: the game has called sound-step! (playback stops deriving
     ;; your steps); listener: (x y yaw) from the last frame, for placed events
     ;; The bed (the hum and the room air) is a loop in bed-mixer, from the bank
     ;; (bank-bed-loop), started once the bed's stage is done: no player of its own.
-    ;; It shares the steps' stream.
+    ;; Live, the loop is copied natively into its own MONO stream (bed-stream, at
+    ;; BED-GAIN as the stream's volume; bed-pos its place in the loop): mixing it
+    ;; in per sample cost more than everything else (the S1 integration's trace);
+    ;; the bed-mixer is the headless render's.
+
     ;; guards: a vector per guard index: #(steps prev-state)
     (define (make-sound rate loader . opt)
       (vector rate loader (and (pair? opt) (car opt)) (make-bank rate loader) (make-mixer) (make-steps)
               '() (make-music-rule) 20260925
               #f #f #f #f #f (make-mixer) #f
               '() (list (cons 'bank 0.0) (cons 'sfx 0.0) (cons 'music 0.0) (cons 'bed 0.0) (cons 'frames 0)) #f #f (list 0.0 0.0 0.0)
-              (if (and (pair? opt) (pair? (cdr opt))) (cadr opt) MUSIC-TUNE)))
+              (if (and (pair? opt) (pair? (cdr opt))) (cadr opt) MUSIC-TUNE)
+              #f 0))
 
     (define (sound-music-playing? s) (and (vector-ref s 13) #t))
 
@@ -142,6 +148,7 @@
           (let ((ctx (vector-ref s 9)))
             (when ctx (guard (e (#t #f)) (audio-context-resume ctx))))
           (vector-set! s 10 (open-stream))
+          (vector-set! s 22 (guard (e (#t #f)) (open-audio-stream channels: 1 buffer-frames: BUFFER volume: BED-GAIN)))
           (when (vector-ref s 21)
             (vector-set! s 11 (open-stream))
             (when (vector-ref s 11) (set-audio-stream-volume! (vector-ref s 11) MUSIC-GAIN))))
@@ -155,16 +162,19 @@
               (guard (e (#t #f)) (audio-context-resume ctx))))
           (sound-start! s)))
 
-    ;; the title's frames: only the bank's rendering, ~BANK-MS
-    (define (sound-prepare! s)
+    ;; the bank's slice of a frame: ~BANK-IDLE-MS before play (the title's
+    ;; frames, sound-prepare! s), ~BANK-MS during it (sound-frame!)
+    (define (bank-slice! s ms)
       (unless (bank-ready? (sound-bank s))
         (let ((t0 (current-milliseconds)))
-          (bank-render-for! (sound-bank s) BANK-MS)
-          (cost! s 'bank (- (current-milliseconds) t0)))))
+          (bank-render-for! (sound-bank s) ms)
+          (cost! s (quote bank) (- (current-milliseconds) t0)))))
+    (define (sound-prepare! s) (bank-slice! s BANK-IDLE-MS))
 
     (define (sound-stop! s)
       (for-each (lambda (i) (let ((st (vector-ref s i))) (when st (guard (e (#t #f)) (set-audio-stream-volume! st 0.0)) (guard (e (#t #f)) (close-audio-stream! st))) (vector-set! s i #f)))
-                '(10 11))
+                '(10 11 22))
+      (vector-set! s 23 0)
       (let ((p (vector-ref s 13))) (when p (player-close! p)) (vector-set! s 13 #f))
       (vector-set! s 12 #f)
       (vector-set! s 14 (make-mixer))
@@ -224,7 +234,7 @@
       (vector-set! s 16 '())
       ;; the bank renders ~BANK-MS a frame until it is complete (the title's
       ;; frames can do it before play); the bed's loop starts, once, when its stage is done
-      (sound-prepare! s)
+      (bank-slice! s BANK-MS)
       (when (sound-started? s) (open-players! s))
       (when (and (sound-started? s) (bank-bed-loop (sound-bank s)) (not (vector-ref s 12)))
         (mixer-loop! (sound-bed-mixer s) (bank-bed-loop (sound-bank s)) BED-GAIN)
@@ -292,16 +302,24 @@
                                        'little)
           (add (+ i 1)))))
 
-    (define *bed-buf* (make-bytevector (* 8 PUSH) 0))
-
-    ;; the steps' stream: the one-shots and the bed loop together
-    (define (render-sfx! s b n)
-      (mixer-render! (sound-mixer s) b n)
-      (mixer-render! (sound-bed-mixer s) *bed-buf* n)
-      (add-into! b *bed-buf* n 1.0))
+    ;; the bed's mono stream: n frames of the loop from bed-pos, copied (wrapping)
+    (define (bed-fill! s b n)
+      (let ((l (bank-bed-loop (sound-bank s))))
+        (let loop ((at 0))
+          (when (< at n)
+            (let* ((len (quotient (bytevector-length l) 4))
+                   (pos (if (>= (vector-ref s 23) len) 0 (vector-ref s 23)))
+                   (k (min (- n at) (- len pos))))
+              (bytevector-copy! b (* 4 at) l (* 4 pos) (* 4 (+ pos k)))
+              (vector-set! s 23 (+ pos k))
+              (loop (+ at k)))))))
 
     (define (pump! s)
-      (pump-stream! s (vector-ref s 10) SFX-DEPTH-S (lambda (b n) (render-sfx! s b n)) 'sfx)
+      ;; the steps' stream: the one-shots (zeroed natively when none sounds)
+      (pump-stream! s (vector-ref s 10) SFX-DEPTH-S (lambda (b n) (mixer-render! (sound-mixer s) b n)) 'sfx)
+      ;; the bed's own mono stream, once its loop is rendered
+      (when (bank-bed-loop (sound-bank s))
+        (pump-stream! s (vector-ref s 22) SFX-DEPTH-S (lambda (b n) (bed-fill! s b n)) 'bed))
       (let ((mp (vector-ref s 13)))
         (when mp (pump-stream! s (vector-ref s 11) MUSIC-DEPTH-S (lambda (b n) (player-pull! mp b 0 n)) 'music))))
 
