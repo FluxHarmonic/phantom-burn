@@ -218,8 +218,9 @@
               (room-over u)))
           (floor-rooms (ctx-floor c)))))
 
-    ;; The built heights: in every face, rooms that do not share air must not
-    ;; have air at the same height. This checks what the build made of over:
+    ;; The built heights: in every face, no two owners (linked or not: a
+    ;; mezzanine shares the lobby's volume but not its air under the slab)
+    ;; may have air at the same height. This checks what the build made of over:
     ;; (the lower room's ceiling dropped under a mezzanine, a duct above its
     ;; corridor's ceiling), not what the floor file says.
     (define (check-built-stacking! c)
@@ -233,7 +234,6 @@
                   (for-each
                     (lambda (b)
                       (when (and (< (iv-owner a) (iv-owner b))
-                                 (not (linked? (ctx-owners c) (ctx-groups c) (iv-owner a) (iv-owner b)))
                                  (> (min (iv-hi a) (iv-hi b)) (+ (max (iv-lo a) (iv-lo b)) 1e-6))
                                  (not (member (cons (iv-owner a) (iv-owner b)) seen)))
                         (set! seen (cons (cons (iv-owner a) (iv-owner b)) seen))
