@@ -89,7 +89,9 @@ for k in "$@"; do
   else
     out="build/floors/shots/$FLOOR-$k-web.png"
     rm -f "$out"
+    # ports of our own, so another worker's shot-web on the defaults cannot answer
     node scripts/shot-web.mjs "$ROOT" "$out" --query "floor=$FLOOR&shot=$k&hud=0" --scale 2 --wait 2500 \
+      --port $((20000 + $$ % 10000)) --cdp $((30000 + $$ % 10000)) \
       || { echo "SETUP-FAILED: shot-web failed on view $k"; exit 2; }
     scale=""
   fi

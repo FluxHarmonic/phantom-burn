@@ -49,8 +49,11 @@ if (!native.length || !/^replay-done /.test(native[native.length - 1])) fail(`${
 
 const script = fs.readFileSync(SCRIPT, "utf8");
 const consoleFile = path.join(OUT, "web-console.txt");
+// ports of our own, so another worker's shot-web on the defaults cannot answer
+const port = 20000 + (process.pid % 10000);
 const r = spawnSync("node", ["scripts/shot-web.mjs", BUILD, path.join(OUT, "web.png"),
   "--query", `floor=${FLOOR}&hud=0`, "--wait", "3000", "--console", consoleFile,
+  "--port", String(port), "--cdp", String(port + 10000),
   "--eval", `window.phantomDispatch("replay", ${JSON.stringify(script)}), "sent"`], { encoding: "utf8" });
 process.stdout.write(r.stdout || "");
 if (!fs.existsSync(consoleFile)) fail("the web leg left no console (shot-web failed)");
