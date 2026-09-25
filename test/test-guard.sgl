@@ -48,7 +48,9 @@
      '((lobby-mid 7.0 5.0 0.0) (lobby-window 6.0 0.6 0.0) (under-mezz 3.0 9.0 0.0)
        (mezzanine 6.0 8.5 3.0) (corridor 17.0 9.5 0.0) (office 19.0 16.0 0.0)
        (fm-office 24.0 18.0 0.0) (duct 18.5 9.8 3.0) (exit 3.0 9.6 0.0)
-       (win-8-1.6 8.0 1.6 0.0) (win-8-2.4 8.0 2.4 0.0) (win-8-3.2 8.0 3.2 0.0) (win-8-4.0 8.0 4.0 0.0)))))
+       (win-8-1.6 8.0 1.6 0.0) (win-8-2.4 8.0 2.4 0.0)
+       (ex-3-8.5 3.0 8.5 0.0) (ex-3-7.5 3.0 7.5 0.0) (ex-3-6.5 3.0 6.5 0.0) (ex-4.5-8.5 4.5 8.5 0.0)
+       (ex-6-9 6.0 9.0 0.0) (ex-6-8 6.0 8.0 0.0) (under-stair-11-4.5 11.0 4.5 0.0)))))
 
 (light-table)
 
@@ -74,6 +76,18 @@
           (play-tick! p w on? 1.0 2.0)
           (let ((g (play-guard p)))
             (loop (+ i 1) w (max best (guard-awareness g)) (max state (guard-state g))))))))
+
+;; As max-awareness, with the guard held at (gx, gy) facing (fx, fy) every
+;; tick (it still perceives and thinks; it does not walk or turn away).
+(define (held-awareness p w on? n gx gy fx fy)
+  (let ((g (play-guard p)) (gw (play-guard-world p)))
+    (let loop ((i 0) (best 0.0) (state 0))
+      (if (>= i n)
+          (list best state)
+          (begin
+            (guard-place! g gx gy fx fy)
+            (play-tick! p w on? 1.0 2.0)
+            (loop (+ i 1) (max best (guard-awareness g)) (max state (guard-state g))))))))
 
 (define FORWARD (make-input 0.0 1.0 0.0 0.0 #f #f #f 0))
 (define EAST (- (/ PI 2.0)))
@@ -149,13 +163,14 @@
       (assert-true (= (car r) 0.0)))))
 
 (test-group "the P1 gate: graded light"
-  (test "in half light (the dark lobby, 2.4 m from the city's window) you are noticed, but much more slowly than when lit"
-    ;; the runner 6 m ahead of the guard, still, for two seconds
+  (test "in half light (the exit sign's spill, the switchable lights off) you are noticed, but much more slowly than when lit"
+    ;; the guard under the mezzanine facing north, the runner 6 m ahead of
+    ;; it by the stairwell door, still, for two seconds
     (let* ((still (lambda (on?)
                     (let* ((p (fresh-play)) (g (play-guard p))
-                           (w (make-walker 8.0 2.4 0.0 WEST)))
+                           (w (make-walker 3.0 8.5 0.0 PI)))
                       (guard-reset! g (play-guard-world p) 0)
-                      (let ((r (max-awareness p w on? 120 (lambda (i) NO-INPUT))))
+                      (let ((r (held-awareness p w on? 120 3.0 2.5 0.0 1.0)))
                         (list (car r) (play-light-01 p))))))
            (lit (still ALL-ON))
            (dim (still DARK)))
@@ -168,6 +183,64 @@
       (assert-true (= (cadr lit) 1.0))
       (assert-true (> (car dim) 0.03))
       (assert-true (< (car dim) (* 0.35 (car lit)))))))
+
+;; A runner crouched under the open stair's treads, at (11, 4.5): the treads
+;; are about 1.5 m up there, room for a crouched body and not for a guard.
+(define (under-stair-walker)
+  (let loop ((i 0) (w (walker-step (make-walker 11.0 4.5 0.0 WEST) (make-input 0.0 0.0 0.0 0.0 #f #f #t 0) TICK C)))
+    (if (>= i 90) w (loop (+ i 1) (walker-step w NO-INPUT TICK C)))))
+
+(test-group "the open stair"
+  (test "the space under the treads is a crouch spot: a runner fits crouched, a guard cannot stand there"
+    (let* ((w (under-stair-walker)) (p (fresh-play)) (nav (guard-world-nav (play-guard-world p))))
+      (display (list 'under-stair 'at (walker-x w) (walker-y w) (walker-z w) 'crouched (walker-crouching? w))) (newline)
+      (assert-true (walker-crouching? w))
+      (assert-true (< (abs (- (walker-x w) 11.0)) 0.3))
+      (assert-false (nav-walkable? nav 11.0 4.5))))
+  (test "the stair is open at the side: a guard beside it in the lit lobby sees you under it (held facing it: suspicious), and a hunt there catches you"
+    (let* ((w (under-stair-walker)) (p (fresh-play)) (g (play-guard p))
+           (glass (play-glass DATA)))
+      (display (list 'under-stair-sight 'chest (sight-clear? C glass 7.0 4.5 1.65 (walker-x w) (walker-y w) (+ (walker-z w) (* 0.55 (walker-height w))))
+                     'head (sight-clear? C glass 7.0 4.5 1.65 (walker-x w) (walker-y w) (walker-eye-z w))
+                     'height (walker-height w)))
+      (newline)
+      (guard-reset! g (play-guard-world p) 0)
+      (let ((seen (held-awareness p w ALL-ON (* 60 4) 7.0 4.5 1.0 0.0)))
+        (display (list 'under-stair-held seen)) (newline)
+        (assert-true (>= (car seen) 0.3)))
+      ;; the hunt: from 4 m away, to the nearest place a guard can stand
+      ;; (1.1 m from you, beside the stair), and the reach with a clear line
+      (let* ((p (fresh-play)) (g (play-guard p)))
+        (guard-reset! g (play-guard-world p) 0)
+        (guard-place! g 7.0 4.5 1.0 0.0)
+        (guard-alarm! g (walker-x w) (walker-y w))
+        (let ((r (run p w ALL-ON (* 60 10) (lambda (i) NO-INPUT))))
+          (display (list 'under-stair-hunt (cdr r) 'ticks (play-ticks p) 'guard (guard-x g) (guard-y g))) (newline)
+          (assert-true (memq 'caught (cdr r)))))))
+  (test "in the dark, under the treads, a guard 4 m away does not see you"
+    (let* ((w (under-stair-walker)) (p (fresh-play)) (g (play-guard p)))
+      (guard-reset! g (play-guard-world p) 0)
+      (let ((r (held-awareness p w DARK (* 60 3) 7.0 4.5 1.0 0.0)))
+        (display (list 'under-stair-dark r)) (newline)
+        (assert-true (= (car r) 0.0))))))
+
+(test-group "capture"
+  (test "a hunting guard 0.7 m away through a wall does not catch you"
+    ;; the corridor side of the corridor/office wall at y 13 (the door is at
+    ;; x 19.9 to 21.1), and the office side
+    (let* ((p (fresh-play)) (g (play-guard p)) (w (make-walker 19.3 13.35 0.0 0.0)))
+      (guard-reset! g (play-guard-world p) 0)
+      (guard-place! g 19.3 12.65 0.0 1.0)
+      (guard-alarm! g 19.3 13.35)
+      (play-tick! p w ALL-ON 1.0 2.0)
+      (assert-false (eq? (play-outcome p) 'caught))))
+  (test "the positive control: the same reach with nothing between catches you"
+    (let* ((p (fresh-play)) (g (play-guard p)) (w (make-walker 7.0 4.2 0.0 0.0)))
+      (guard-reset! g (play-guard-world p) 0)
+      (guard-place! g 7.0 3.1 0.0 1.0)
+      (guard-alarm! g 7.0 4.2)
+      (play-tick! p w ALL-ON 1.0 2.0)
+      (assert-true (eq? (play-outcome p) 'caught)))))
 
 (test-group "crouching and circuits"
   (test "in full view and light, still, a crouched runner is noticed at about half the rate of a standing one"

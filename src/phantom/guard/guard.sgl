@@ -40,7 +40,7 @@
           (phantom guard sense))
 
   (export make-guard-world guard-world-nav make-guard guard-reset!
-          guard-step! guard-caught? guard-hold!
+          guard-step! guard-caught? guard-hold! guard-place! guard-alarm!
           guard-x guard-y guard-z guard-fx guard-fy
           guard-prev-x guard-prev-y guard-prev-fx guard-prev-fy
           guard-state guard-state-name guard-awareness guard-sees? guard-rate
@@ -71,7 +71,10 @@
     (define WALK-SPEED 1.3)
     (define SEARCH-SPEED 1.7)
     (define HUNT-SPEED 3.5)                 ; your walk is 2.4 and your run 4.4
-    (define CATCH-REACH 0.8)
+    ;; A hunting guard catches you within this reach, horizontally, if it can
+    ;; see you there: far enough to reach under the open stair's treads (a
+    ;; crouch spot no guard can stand in), never through a wall.
+    (define CATCH-REACH 1.2)
     (define ARRIVE 0.3)
     (define REFIELD-TICKS 30)
     (define PERCEIVE-EVERY 3)                 ; sight at 20 Hz: the rays are the cost
@@ -194,7 +197,7 @@
         (perceive! g gw t (* dt PERCEIVE-EVERY)))
       (think! g t dt)
       (act! g gw t dt)
-      (catch! g t))
+      (catch! g gw t))
 
     ;; --- perception ------------------------------------------------------------------
 
@@ -412,11 +415,37 @@
                       (+ (vector-ref g S-Y) (+ (* bx s) (* by c)))
                       TURN-LOOK)))
 
-    ;; A hunting guard within reach of you, at your height, catches you.
-    (define (catch! g t)
+    ;; A hunting guard within reach of you, at your height, with nothing
+    ;; between you, catches you.
+    (define (catch! g gw t)
       (when (= (vector-ref g S-STATE) HUNTING)
         (let ((dx (- (vector-ref t 0) (vector-ref g S-X)))
               (dy (- (vector-ref t 1) (vector-ref g S-Y))))
           (when (and (< (+ (* dx dx) (* dy dy)) (* CATCH-REACH CATCH-REACH))
-                     (< (abs (- (vector-ref t 2) (vector-ref g S-Z))) 1.2))
-            (vector-set! g S-CAUGHT #t)))))))
+                     (< (abs (- (vector-ref t 2) (vector-ref g S-Z))) 1.2)
+                     (let ((coll (vector-ref gw 1)) (glass (play-glass (vector-ref gw 2)))
+                           (gx (vector-ref g S-X)) (gy (vector-ref g S-Y))
+                           (ez (+ (vector-ref g S-Z) 1.2)))
+                       (or (sight-clear? coll glass gx gy ez (vector-ref t 0) (vector-ref t 1)
+                                         (+ (vector-ref t 2) (* 0.55 (vector-ref t 4))))
+                           (sight-clear? coll glass gx gy ez (vector-ref t 0) (vector-ref t 1) (vector-ref t 3)))))
+            (vector-set! g S-CAUGHT #t)))))
+
+    ;; The guard hunting, certain, from where it stands, as if it had just
+    ;; seen you at (x, y) (P2's floor alarm; tests).
+    (define (guard-alarm! g x y)
+      (enter! g HUNTING)
+      (vector-set! g S-AWARE 1.0)
+      (vector-set! g S-LSX x) (vector-set! g S-LSY y)
+      (vector-set! g S-LOST 0.0)
+      g)
+
+    ;; For tests and tools: put the guard at (x, y) facing (fx, fy), as it
+    ;; is otherwise (state, awareness, route point).
+    (define (guard-place! g x y fx fy)
+      (let ((m (sqrt (+ (* fx fx) (* fy fy)))))
+        (vector-set! g S-X x) (vector-set! g S-Y y)
+        (vector-set! g S-FX (/ fx m)) (vector-set! g S-FY (/ fy m))
+        (vector-set! g S-BFX (/ fx m)) (vector-set! g S-BFY (/ fy m))
+        (save-prev! g)
+        g))))

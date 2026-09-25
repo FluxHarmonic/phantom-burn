@@ -34,8 +34,8 @@
     ;; The renderer's ambient ((phantom render) sync-light!): the night's
     ;; floor everywhere, plus bounce in proportion to the switchable
     ;; circuits that are on. Kept equal to render.sgl's by hand.
-    (define NIGHT '(0.045 0.032 0.085))
-    (define BOUNCE '(0.155 0.108 0.255))
+    (define NIGHT '(0.042 0.042 0.042))
+    (define BOUNCE '(0.138 0.138 0.138))
 
     ;; The light, as brightness (luma), that maps to 0 and to 1 in light-01.
     ;; Measured on floor 14 (test/test-guard.sgl prints the table): the dark
