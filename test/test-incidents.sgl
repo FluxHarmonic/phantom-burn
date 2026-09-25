@@ -1,0 +1,134 @@
+;;; P2's incidents and the patch note (design §5, D19), through (phantom play
+;;; core) as the game runs it, on floor 14.
+;;;
+;;; The gate (§8, P2): the loud way logs the dark-room incident and the patch
+;;; note shows it; the ghost way logs nothing. Its sabotage (a light switched
+;;; off in an empty room counted as noticed) must turn the ghost way red.
+
+(import (sigil test)
+        (sigil math)
+        (sigil fs)
+        (phantom detmath)
+        (phantom soup)
+        (phantom walker)
+        (phantom play data)
+        (phantom play core)
+        (phantom guard guard))
+
+(define DIR "assets/floors/14-slice/")
+(define C (pbc1->collision (read-file-bytes (string-append DIR "collide"))))
+(define INFO (floor-info-from-string (read-file-string (string-append DIR "floor.sexp"))))
+(define DATA (play-data-from-string (read-file-string (string-append DIR "play.sexp"))))
+(define CIRCUITS (cdr (assq 'circuits INFO)))
+
+;; The circuits' state as a list the test switches, and its on? procedure.
+(define (make-lights) (list 'c1 'c2 'c3 'emergency 'screens 'city))
+(define *lights* (make-lights))
+(define (on? c) (and (memq c *lights*) #t))
+(define (switch! r)
+  (when (pair? r)
+    (case (car r)
+      ((panel-off) (set! *lights* (filter (lambda (c) (not (eq? c (cadr r)))) *lights*)))
+      ((panel-on) (unless (memq (cadr r) *lights*) (set! *lights* (cons (cadr r) *lights*)))))))
+
+(define FORWARD (make-input 0.0 1.0 0.0 0.0 #f #f #f 0))
+
+(define (tick p w) (play-tick! p (walker-step w NO-INPUT TICK C) on? 1.0 2.0))
+(define (ticks p w n) (let loop ((i 0)) (when (< i n) (tick p w) (loop (+ i 1)))))
+
+;; An attempt with the badge in hand: walked to from the FM office's door.
+(define (with-badge)
+  (set! *lights* (make-lights))
+  (let ((p (play-reset! (make-play C DATA CIRCUITS))))
+    (let loop ((i 0) (w (make-walker 24.0 17.6 0.0 0.0)))
+      (if (or (play-badge? p) (>= i 120))
+          (list p w)
+          (let ((w (walker-step w FORWARD TICK C)))
+            (play-tick! p w on? 1.0 2.0)
+            (loop (+ i 1) w))))))
+
+;; Standing by the corridor's light panel (16 10), still.
+(define PANEL-SPOT (make-walker 16.3 9.4 0.0 0.0))
+
+(test-group "use"
+  (test "the panel wants the badge; with it, it switches the lobby's circuit off and on"
+    (set! *lights* (make-lights))
+    (let ((p (play-reset! (make-play C DATA CIRCUITS))))
+      (tick p PANEL-SPOT)
+      (assert-true (equal? (play-use! p PANEL-SPOT on?) '(panel-deny c2))))
+    (let* ((b (with-badge)) (p (car b)))
+      (assert-true (play-badge? p))
+      (tick p PANEL-SPOT)
+      (let ((off (play-use! p PANEL-SPOT on?)))
+        (switch! off)
+        (assert-true (equal? off '(panel-off c2)))
+        (assert-false (on? 'c2))
+        (let ((on (play-use! p PANEL-SPOT on?)))
+          (switch! on)
+          (assert-true (equal? on '(panel-on c2)))
+          (assert-true (on? 'c2))))))
+  (test "nothing in reach: nothing"
+    (let* ((b (with-badge)) (p (car b)) (w (make-walker 7.0 4.0 0.0 0.0)))
+      (tick p w)
+      (assert-true (null? (play-use! p w on?)))))
+  (test "use makes events for playback: the badge, the switch, the reader and the door"
+    (let* ((b (with-badge)) (p (car b)))
+      (tick p PANEL-SPOT)
+      (switch! (play-use! p PANEL-SPOT on?))
+      (let ((w (make-walker 3.0 9.0 0.0 0.0)))
+        (tick p w)
+        (play-use! p w on?)
+        (let ((kinds (map car (play-take-events! p))))
+          (display (list 'events kinds)) (newline)
+          (assert-true (memq 'badge kinds))
+          (assert-true (memq 'panel-off kinds))
+          (assert-true (memq 'reader-ok kinds))
+          (assert-true (memq 'door-open kinds))
+          (assert-true (null? (play-take-events! p))))))))
+
+(test-group "the P2 gate: incidents and the patch note"
+  (test "THE LOUD WAY: the lobby's lights killed at the panel; the guard walks into the dark corridor; the patch note shows it"
+    (let* ((b (with-badge)) (p (car b)) (g (play-guard p)))
+      (tick p PANEL-SPOT)
+      (switch! (play-use! p PANEL-SPOT on?))
+      ;; the runner leaves the guard's world (off the floor, silent, unseen)
+      (let ((gone (make-walker 60.0 60.0 0.0 0.0)))
+        (let loop ((i 0))
+          (unless (or (>= i (* 60 60)) (pair? (play-incidents p)))
+            (play-tick! p gone on? 1.0 2.0)
+            (loop (+ i 1)))))
+      (display (list 'loud 'incidents (play-incidents p) 'patches (play-patches p) 'guard-awareness (guard-awareness g))) (newline)
+      (assert-true (assq 'dark-room (play-incidents p)))
+      (assert-true (pair? (play-patches p)))
+      (assert-true (let ((s (car (car (play-patches p))))) (and (>= (string-length s) 18) (string=? (substring s 0 18) "EMERGENCY LIGHTING"))))
+      ;; and he comes to check it
+      (assert-true (>= (guard-awareness g) 0.3))))
+  (test "THE GHOST WAY: a light killed and restored before anyone came, the reader used unseen: INCIDENTS 0, NO CHANGES"
+    (let* ((b (with-badge)) (p (car b)))
+      (tick p PANEL-SPOT)
+      (switch! (play-use! p PANEL-SPOT on?))
+      (assert-false (on? 'c2))
+      ;; two seconds of dark lobby and corridor, the guard still in the office
+      (ticks p PANEL-SPOT 120)
+      (switch! (play-use! p PANEL-SPOT on?))
+      (assert-true (on? 'c2))
+      (let ((w (make-walker 3.0 9.0 0.0 0.0)))
+        (tick p w)
+        (assert-true (equal? (play-use! p w on?) '(reader-ok))))
+      (display (list 'ghost 'incidents (play-incidents p) 'patches (play-patches p) 'outcome (play-outcome p))) (newline)
+      (assert-true (eq? (play-outcome p) 'won))
+      (assert-true (null? (play-incidents p)))
+      (assert-true (null? (play-patches p)))))
+  (test "seen: a guard that sees you and turns suspicious is an incident, patched as tighter patrols"
+    (set! *lights* (make-lights))
+    (let* ((p (play-reset! (make-play C DATA CIRCUITS))) (g (play-guard p))
+           (w (make-walker 8.0 2.2 0.0 (/ PI 2.0))))
+      (guard-reset! g (play-guard-world p) 0)
+      (let loop ((i 0))
+        (unless (or (>= i 300) (pair? (play-incidents p)))
+          (guard-place! g 2.5 2.0 1.0 0.0)
+          (tick p w)
+          (loop (+ i 1))))
+      (display (list 'seen (play-incidents p) (play-patches p))) (newline)
+      (assert-true (assq 'you-seen (play-incidents p)))
+      (assert-true (equal? (car (car (play-patches p))) "PATROLS TIGHTENED")))))

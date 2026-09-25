@@ -40,7 +40,7 @@
           (phantom guard sense))
 
   (export make-guard-world guard-world-nav make-guard guard-reset!
-          guard-step! guard-caught? guard-hold! guard-place! guard-alarm! guard-hear! guard-heard?
+          guard-step! guard-caught? guard-hold! guard-place! guard-alarm! guard-hear! guard-heard? guard-notice!
           guard-x guard-y guard-z guard-fx guard-fy
           guard-prev-x guard-prev-y guard-prev-fx guard-prev-fy
           guard-state guard-state-name guard-awareness guard-sees? guard-rate
@@ -472,6 +472,14 @@
             (when (< a HEAR-CAP)
               (vector-set! g S-AWARE
                            (min HEAR-CAP (+ a HEAR-BASE (* HEAR-GAIN (- (/ level threshold) 1.0))))))))))
+    ;; Something out of place (design §3: a room that was lit and is now
+    ;; dark): awareness to at least level, and (x y z) becomes the place to
+    ;; check. A hunting guard carries on hunting.
+    (define (guard-notice! g level x y z)
+      (unless (= (vector-ref g S-STATE) HUNTING)
+        (when (< (vector-ref g S-AWARE) level) (vector-set! g S-AWARE level))
+        (vector-set! g S-LSX x) (vector-set! g S-LSY y) (vector-set! g S-LSZ z)))
+
     (define (guard-heard? g) (and (>= (vector-ref g S-HEARD) 0) (< (vector-ref g S-HEARD) 30)))
 
     ;; For tests and tools: put the guard at (x, y) facing (fx, fy), as it

@@ -30,11 +30,13 @@
           (phantom play data)
           (phantom play core)
           (phantom guard sense)
+          (phantom guard hearing)
           (phantom guard guard)
           (phantom guard body))
 
   (export play-mode-start! play-mode-active? play-mode-core
           play-mode-reset! play-mode-set-on-win!
+          play-press! play-mode-set-dev! play-mode-sound-feed
           play-hold? play-after-tick! play-frame! play-hud!)
 
   (begin
@@ -90,6 +92,66 @@
 
     (define (play-hold?) (not (eq? *phase* 'play)))
 
+    ;; --- keys: use, and the light keys ------------------------------------------
+
+    ;; The game hands play each pressed key first ((phantom game)'s fifth
+    ;; hook); #t means play took it. F (the phone's USE) uses what is in reach
+    ;; on the next tick. Without ?dev, the light keys (1 2 3 0) are play's
+    ;; to refuse: in the game the panels switch the lights (P2).
+    (define *use* #f)
+    (define *dev* #f)
+    (define *message* #f)           ; a line that replaces the objective for a moment
+    (define *message-t* 0.0)
+    (define (play-mode-set-dev! on?) (set! *dev* on?))
+    (define (play-press! k)
+      (cond ((not *core*) #f)
+            ((memq k '(f use)) (set! *use* #t) #t)
+            ((and (not *dev*) (memq k LIGHT-KEYS)) #t)
+            (else #f)))
+    (define LIGHT-KEYS (map string->symbol '("1" "2" "3" "0")))
+
+    (define (say! line) (set! *message* line) (set! *message-t* 2.5))
+
+    ;; Apply what a use did: the panel switches its circuit in the renderer.
+    (define (apply-use! r)
+      (cond ((null? r) (say! "NOTHING HERE TO USE"))
+            ((memq (car r) '(panel-on panel-off))
+             (render-circuit-set! (cadr r) (eq? (car r) 'panel-on))
+             (say! (if (eq? (car r) 'panel-on) "LIGHTS ON" "LIGHTS OFF")))
+            ((eq? (car r) 'panel-deny) (say! "THE PANEL WANTS A FACILITIES BADGE"))
+            ((eq? (car r) 'reader-deny) (say! "THE READER WANTS A FACILITIES BADGE"))
+            (else #f)))
+
+    ;; --- the sound feed ((phantom sound), topics/phantom-sound-api) ------------
+
+    ;; What playback needs this frame: (you guards steps events), where
+    ;;   you     (x y yaw), the listener
+    ;;   guards  ((x y moved state atten muffled? path-m)), atten and path-m
+    ;;           through the floor's openings (P2's hearing, the other way)
+    ;;   steps   ((surface gait foot) ...) your steps since the last call,
+    ;;           timed by the game ((phantom sound logic)), for sound-step!
+    ;;   events  ((kind x y atten muffled?) ...) for sound-event!: badge,
+    ;;           panel-on, panel-off, reader-ok, reader-deny, door-open, caught
+    ;; The steps and events are taken: a second call the same frame has none.
+    (define *feed-gx* #f) (define *feed-gy* #f)
+    (define (play-mode-sound-feed w)
+      (if (not *core*)
+          (list (list 0.0 0.0 0.0) '() '() '())
+          (let* ((g (play-guard *core*))
+                 (h (play-hearing *core*))
+                 (gx (guard-x g)) (gy (guard-y g))
+                 (moved (if *feed-gx* (sqrt (+ (* (- gx *feed-gx*) (- gx *feed-gx*)) (* (- gy *feed-gy*) (- gy *feed-gy*)))) 0.0)))
+            (set! *feed-gx* gx) (set! *feed-gy* gy)
+            (play-guard-path! *core*)
+            (let ((atten (hear-gain h)) (muffled (hear-muffled? h)) (path-m (hear-path-m h)))
+              (list (list (walker-x w) (walker-y w) (walker-yaw w))
+                    (list (list gx gy moved (guard-state g) atten muffled path-m))
+                    (play-take-steps! *core*)
+                    (map (lambda (e)
+                           ;; placed events pass through the rooms to you like the guard
+                           (list (car e) (cadr e) (caddr e) 1.0 #f))
+                         (play-take-events! *core*)))))))
+
     ;; The site's title-to-play flow: a thunk called once when the win card
     ;; has been shown (the shell goes back to the title), or #f to start a
     ;; new attempt there as before.
@@ -134,10 +196,18 @@
          (set! *place* #f)
          (play-start-walker *core* *coll*))
         (else
-         (let ((o (play-tick! *core* w render-circuit-on? (render-night) (render-pools))))
+         (when *use*
+           (set! *use* #f)
+           (apply-use! (play-use! *core* w render-circuit-on?)))
+         (set! *message-t* (max 0.0 (- *message-t* TICK)))
+         (let ((o (if (eq? (play-outcome *core*) 'won)
+                      'won
+                      (play-tick! *core* w render-circuit-on? (render-night) (render-pools)))))
            (cond ((eq? o 'caught) (set! *phase* 'caught) (set! *timer* 0.0))
                  ((eq? o 'won) (set! *phase* 'won) (set! *timer* 0.0)
-                  (set! *ticks-at-win* (play-ticks *core*)))
+                  (set! *ticks-at-win* (play-ticks *core*))
+                  ;; the patch note's ping, on the landing
+                  (play-event! *core* 'note (walker-x w) (walker-y w)))
                  ((eq? o 'badge) (set! *badge-flash* 2.5)
                   ;; taken: gone from the desk (the compiler's badge part)
                   (render-hide-part! 'badge #t)))
@@ -283,7 +353,9 @@
 
     (define (draw-objective! w h ts)
       (let ((line (cond ((eq? *phase* 'won) #f)
+                        ((> *message-t* 0.0) *message*)
                         ((> *badge-flash* 0.0) "FACILITIES BADGE. NOW THE STAIRWELL DOOR, UNDER THE MEZZANINE")
+                        ((and (play-near-exit? *core*) (play-badge? *core*)) "THE READER: PRESS F (USE)")
                         ((play-near-exit? *core*) "THE READER WANTS A FACILITIES BADGE")
                         ((play-badge? *core*) "TO THE STAIRWELL DOOR, UNDER THE MEZZANINE")
                         (else "FIND THE FACILITIES BADGE: THE FM OFFICE DESK"))))
@@ -305,23 +377,42 @@
            (big-centred "CAUGHT" w (* 0.45 h) (* 2 ts))
            (set-color 1.0 1.0 1.0)))
         ((eq? *phase* 'won)
-         (let ((a (min 0.8 (/ *timer* 1.0)))
-               (secs (exact (floor (/ *ticks-at-win* 60)))))
+         ;; the patch note on the landing (design §5): flat system text, then
+         ;; Gibson's line in violet; a clean floor gets no Gibson line
+         (let* ((a (min 0.85 (/ *timer* 1.0)))
+                (secs (exact (floor (/ *ticks-at-win* 60))))
+                (patches (play-patches *core*))
+                (n (length (play-incidents *core*)))
+                (x (/ (- w (text-width "PATCH 14-1  EMERGENCY LIGHTING: FM OFFICE" ts)) 2))
+                (line (lambda (i) (+ (* 0.3 h) (* i 12 ts)))))
            (set-color 0.0 0.0 0.0 a)
            (with-blend-mode 'normal (draw-filled-rect 0 0 w h))
-           (set-color 0.302 0.949 0.851)
-           (big-centred "FLOOR 14 CLEAR" w (* 0.36 h) (* 2 ts))
            (set-color 0.8 0.85 1.0)
-           (big-centred (string-append "FACILITIES IN HAND. "
-                                       (number->string (quotient secs 60)) ":"
-                                       (let ((s (remainder secs 60))) (string-append (if (< s 10) "0" "") (number->string s)))
-                                       ", ATTEMPT " (number->string *attempts*))
-                        w (* 0.5 h) ts)
+           (draw-text "FLOOR 14 TO 27" x (line 0) ts)
+           (draw-text (string-append "INCIDENTS " (number->string n)) x (line 1) ts)
+           (if (null? patches)
+               (draw-text "NO CHANGES" x (line 2) ts)
+               (let loop ((ps patches) (i 1))
+                 (unless (null? ps)
+                   (draw-text (string-append "PATCH 14-" (number->string i) "  " (car (car ps))) x (line (+ i 1)) ts)
+                   (loop (cdr ps) (+ i 1)))))
+           (unless (null? patches)
+             (set-color 0.702 0.42 1.0)
+             (draw-text (string-append "# " (string-upcase* (cadr (car patches)))) x (line (+ 2 (length patches))) ts))
+           (set-color 0.45 0.5 0.6)
+           (draw-text (string-append (number->string (quotient secs 60)) ":"
+                                     (let ((s (remainder secs 60))) (string-append (if (< s 10) "0" "") (number->string s)))
+                                     "  ATTEMPT " (number->string *attempts*))
+                      x (line (+ 4 (length patches))) ts)
            (set-color 1.0 1.0 1.0)))
         ((> *fade-in* 0.0)
          (set-color 0.0 0.0 0.0 (/ *fade-in* FADE-IN))
          (with-blend-mode 'normal (draw-filled-rect 0 0 w h))
          (set-color 1.0 1.0 1.0))))
+
+    ;; Gibson's lines are sentence case; the HUD's font has capitals only, so
+    ;; they are drawn in capitals until it grows lower case.
+    (define (string-upcase* s) (list->string (map char-upcase (string->list s))))
 
     (define (big-centred text w y ts)
       (draw-text text (/ (- w (text-width text ts)) 2) y ts))))

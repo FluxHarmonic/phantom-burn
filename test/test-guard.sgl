@@ -285,13 +285,19 @@
       (display (list 'badge-run (cdr r1) 'at (walker-x (car r1)) (walker-y (car r1)))) (newline)
       (assert-true (play-badge? p))
       (let ((r2 (run p (make-walker 3.0 8.6 0.0 0.0) DARK 60 (lambda (i) FORWARD))))
-        (display (list 'exit-run (cdr r2))) (newline)
-        (assert-true (eq? (play-outcome p) 'won)))))
+        ;; P2: the reader opens the door (F): walking up to it is not enough
+        (assert-false (eq? (play-outcome p) 'won))
+        (let ((u (play-use! p (car r2) DARK)))
+          (display (list 'exit-run (cdr r2) 'use u)) (newline)
+          (assert-true (equal? u '(reader-ok)))
+          (assert-true (eq? (play-outcome p) 'won))))))
   (test "the exit without the badge does not win"
     (let* ((p (fresh-play))
            (r (run p (make-walker 3.0 8.6 0.0 0.0) DARK 60 (lambda (i) FORWARD))))
       (assert-false (eq? (play-outcome p) 'won))
-      (assert-true (play-near-exit? p)))))
+      (assert-true (play-near-exit? p))
+      (assert-true (equal? (play-use! p (car r) DARK) '(reader-deny)))
+      (assert-false (eq? (play-outcome p) 'won)))))
 
 (test-group "cost"
   (test "a guard tick with the runner in view across the lobby: time and allocations (printed)"

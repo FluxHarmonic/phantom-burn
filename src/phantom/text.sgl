@@ -63,7 +63,10 @@
         (#\, "     " "     " "     " "     " " ##  " "  #  " " #   ")
         ;; P1's guard captions (design §5: ?, SEARCHING, THERE)
         (#\? " ### " "#   #" "    #" "   # " "  #  " "     " "  #  ")
-        (#\! "  #  " "  #  " "  #  " "  #  " "  #  " "     " "  #  ")))
+        (#\! "  #  " "  #  " "  #  " "  #  " "  #  " "     " "  #  ")
+        ;; P2's patch note: Gibson's lines are marked # (the root prompt)
+        (#\# " # # " " # # " "#####" " # # " "#####" " # # " " # # ")
+        (#\' "  #  " "  #  " " #   " "     " "     " "     " "     ")))
 
     (define CELL-W 6)
     (define CELL-H 8)

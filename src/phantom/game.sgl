@@ -111,6 +111,8 @@
     ;;   1 (after-tick! w)   -> a walker to restart from, or #f
     ;;   2 (frame! alpha cam) before the world is drawn
     ;;   3 (hud! w h k)       after the frame is composited
+    ;;   4 (press! key)       optional: each pressed key before the game's
+    ;;                        own keys; #t when play took it (P2: F to use)
     ;; With no play set, nothing below changes.
     (define *play* #f)
     (define (game-set-play! hooks) (set! *play* hooks))
@@ -366,7 +368,11 @@
       (let ((t0 (current-jiffy))
             (dt (min MAX-DT (max 0.0 dt)))
             (held? (vector-ref ctl 0)))
-        (for-each style-key! (vector-ref ctl 1))
+        ;; play (P2) sees each pressed key first: 5th hook, #t when it took it
+        (for-each (lambda (k)
+                    (unless (and *play* (> (vector-length *play*) 4) ((vector-ref *play* 4) k))
+                      (style-key! k)))
+                  (vector-ref ctl 1))
         ;; look: the mouse, the look stick (squared, for fine aim), the arrows
         (let ((lx (vector-ref ctl 6)) (ly (vector-ref ctl 7)))
           (set! *pending-yaw* (+ *pending-yaw*

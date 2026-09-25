@@ -47,9 +47,9 @@
     #labgrid button.down { background: rgba(204, 230, 255, 0.35); }
     #labgrid .sep { grid-column: 1 / -1; height: 1px; background: rgba(204, 230, 255, 0.2); }
     body.touch #crouch { display: block; }
-    /* The game's light switches on a phone (P1; no ?dev needed): one button
-       per switchable zone, left of the crouch button, out of both sticks'
-       way. Each sends the key the keyboard uses (1 office, 2 lobby, 3 FM). */
+    /* USE on a phone (P2; no ?dev needed): left of the crouch button, out of
+       both sticks' way; it sends ("press", "use"), the keyboard's F. The light
+       panels in the building switch the lights now. */
     #lights { position: fixed; right: 100px; top: 30px; z-index: 3; display: none; gap: 6px;
               font: bold 11px ui-monospace, monospace; -webkit-user-select: none; user-select: none; touch-action: none; }
     body.touch.playing:not(.ontitle) #lights { display: flex; }
@@ -73,7 +73,7 @@
   <div class="ring" id="lring"></div><div class="knob" id="lknob"></div>
   <div class="ring" id="rring"></div><div class="knob" id="rknob"></div>
   <div id="crouch">C</div>
-  <div id="lights"><button data-k="2">LOBBY</button><button data-k="1">OFFICE</button><button data-k="3">FM</button></div>
+  <div id="lights"><button data-k="use">USE</button></div>
   <div id="lab">
     <button id="labbtn">LAB</button>
     <div id="labgrid">
@@ -90,9 +90,9 @@
   <div id="status"></div>
   <div id="how">
     <span class="start">Press any key, click or tap to start.<br></span>
-    <b>Get the FACILITIES badge from the FM office desk, then leave by the stairwell door under the mezzanine. A guard patrols; if he hunts you down, the floor restarts.</b><br>
-    <span class="desk">Click, then WASD and mouse. Shift sneaks, C crouches, Q and E lean. 1 (office), 2 (lobby) and 3 (FM office) switch the lights: the dark hides you. The eye at the bottom shows how visible you are.</span>
-    <span class="phone">Left thumb moves, right thumb looks, C crouches. LOBBY, OFFICE and FM (top right) switch the lights: the dark hides you. The eye at the bottom shows how visible you are.</span>
+    <b>Get the FACILITIES badge from the FM office desk, then leave by the stairwell door under the mezzanine. One of Gibson's security units patrols; if it hunts you down, the floor restarts.</b><br>
+    <span class="desk">Click, then WASD and mouse. Shift sneaks (it hears you on hard floors), C crouches, Q and E lean. F uses: the corridor's light panel (it wants the badge; the dark hides you) and the stairwell door's card reader. The eye at the bottom shows how visible you are.</span>
+    <span class="phone">Left thumb moves, right thumb looks, C crouches. USE (top right) takes the badge, works the light panel and the card reader: the dark hides you. The eye at the bottom shows how visible you are.</span>
   </div>
   <script>
   // Phantom Burn's page. The generic loader (sigil-web-app.js) boots the

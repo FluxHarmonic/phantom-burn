@@ -94,7 +94,7 @@
     ;; The keys whose presses the game reads (style lab, crouch, views).
     (define PRESS-KEYS
       (map string->symbol '("c" "p" "[" "]" "/" "b" "n" "-" "=" "h" "v" "x" "7" "8" "9"
-                            "j" "k" "l" "1" "2" "3" "4" "5" "6" "0" "," "." "g" ";" "'")))
+                            "j" "k" "l" "1" "2" "3" "4" "5" "6" "0" "," "." "g" ";" "'" "f")))
 
     (define (pressed-keys)
       (let loop ((ks PRESS-KEYS) (acc '()))
@@ -136,7 +136,8 @@
       (when (and (member "--play" args) info (file-exists? (path "play.sexp")))
         (play-mode-start! (game-collision) info (read-file-string (path "play.sexp"))
                           (not (arg-value args "--view" #f)))
-        (game-set-play! (vector play-hold? play-after-tick! play-frame! play-hud!))
+        (game-set-play! (vector play-hold? play-after-tick! play-frame! play-hud! play-press!))
+        (play-mode-set-dev! (and (member "--dev" args) #t))
         (unless (member "--hud" args) (game-set-hud! 0))))
 
     ;; The guard's body, beside the floors (one for every floor).

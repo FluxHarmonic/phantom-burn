@@ -15,6 +15,7 @@
 (define-library (phantom play core)
   (import (sigil core)
           (sigil math)
+          (sigil list)
           (phantom collide)
           (phantom walker)
           (phantom play data)
@@ -30,7 +31,8 @@
           play-badge? play-outcome play-ticks play-start-walker
           play-near-exit? GUARD-START-LEG PICKUP-REACH EXIT-REACH
           play-hearing play-take-steps! play-last-heard play-runner-room
-          play-guard-path! play-set-hearing!)
+          play-guard-path! play-set-hearing!
+          play-use! play-incidents play-patches play-take-events! play-event! USE-REACH)
 
   (begin
 
@@ -52,7 +54,19 @@
     ;;  21 the loudest step the guard received this tick (a level)
     ;;  22 your room  23 hearing on? (the sight gates turn it off, to
     ;;  measure sight alone)
-    (define (play? p) (and (vector? p) (= (vector-length p) 24) (eq? (vector-ref p 0) 'play)))
+    ;;  24 incidents, newest first: ((kind room-name) ...)  25 the guard's
+    ;;  state last tick  26 the guard's room last tick  27 events for
+    ;;  playback, newest first: ((kind x y) ...)  28 the switchable circuits
+    ;;  that were on when the attempt began (#f until its first tick): only
+    ;;  a light that was on and is now off makes a dark room (design §3)
+    (define (play? p) (and (vector? p) (= (vector-length p) 29) (eq? (vector-ref p 0) 'play)))
+    (define USE-REACH 1.3)          ; m, horizontally: the panel, the reader
+    (define (play-incidents p) (reverse (vector-ref p 24)))
+    ;; the events since the last call, oldest first, and forget them
+    (define (play-take-events! p)
+      (let ((e (reverse (vector-ref p 27)))) (vector-set! p 27 '()) e))
+    (define (event! p kind x y) (vector-set! p 27 (cons (list kind x y) (vector-ref p 27))))
+    (define (play-event! p kind x y) (event! p kind x y))
     (define (play-set-hearing! p on?) (vector-set! p 23 on?) p)
     (define (play-hearing p) (vector-ref p 15))
     (define (play-last-heard p) (vector-ref p 21))
@@ -79,7 +93,8 @@
       (let* ((gw (make-guard-world coll data))
              (p (vector 'play data gw (make-guard gw GUARD-START-LEG) (make-light-state) (make-target)
                         circuits #f 'playing 0 0.0 0.0 0.0 0.0 #f
-                        (make-hearing data) (make-steps) #f #f '() (hearing-threshold data) 0.0 -1 #t)))
+                        (make-hearing data) (make-steps) #f #f '() (hearing-threshold data) 0.0 -1 #t
+                        '() 0 -1 '() #f)))
         p))
 
     ;; A new attempt: the guard back at its start, the badge on the desk.
@@ -93,6 +108,11 @@
       (vector-set! p 17 #f) (vector-set! p 18 #f)
       (vector-set! p 19 '())
       (vector-set! p 21 0.0)
+      (vector-set! p 24 '())
+      (vector-set! p 25 0)
+      (vector-set! p 26 -1)
+      (vector-set! p 27 '())
+      (vector-set! p 28 #f)
       p)
 
     ;; The path from the guard to you (for playback: how much of the guard
@@ -157,16 +177,133 @@
             (target-set! (vector-ref p 5) x y z (walker-eye-z w) (walker-height w) l01 vis shape)
             (steps! p w x y z)
             (guard-step! g (vector-ref p 2) (vector-ref p 5) TICK)
+            (notice! p on?)
             (let ((outcome
                    (cond
                      ((guard-caught? g) 'caught)
                      ((and (not (vector-ref p 7)) (near-badge? data x y z)) 'badge)
-                     ((near-exit? data x y z)
-                      (if (vector-ref p 7) 'won (begin (vector-set! p 14 #t) 'playing)))
+                     ((near-exit? data x y z) (vector-set! p 14 #t) 'playing)
                      (else (vector-set! p 14 #f) 'playing))))
-              (cond ((eq? outcome 'badge) (vector-set! p 7 #t) 'badge)
+              (cond ((eq? outcome 'badge) (vector-set! p 7 #t)
+                                          (event! p 'badge (vector-ref (play-badge data) 0) (vector-ref (play-badge data) 1))
+                                          'badge)
                     ((eq? outcome 'playing) 'playing)
-                    (else (vector-set! p 8 outcome) outcome))))))
+                    (else (event! p 'caught x y) (vector-set! p 8 outcome) outcome))))))
+
+    ;; --- incidents (design §5, D19) ------------------------------------------------
+
+    ;; An incident is anything out of the ordinary a guard noticed: you (his
+    ;; state rising to SUSPICIOUS or beyond, by sight or by ear), or an
+    ;; effect of something you did (a room whose switchable light was on
+    ;; when the attempt began and is off now, with the guard in it). Each
+    ;; kind is logged once per room. A trick
+    ;; nobody noticed is not an incident: a light switched off and back on
+    ;; while no guard was in its room logs nothing.
+    (define (incident! p kind room)
+      (let ((name (if (>= room 0) (room-name (vector-ref (play-rooms (vector-ref p 1)) room)) 'none)))
+        (unless (member (list kind name) (vector-ref p 24))
+          (vector-set! p 24 (cons (list kind name) (vector-ref p 24))))))
+
+    (define (notice! p on?)
+      (unless (vector-ref p 28)
+        (vector-set! p 28 (filter on? (map car (filter (lambda (c) (list-ref c 6)) (vector-ref p 6))))))
+      (let* ((g (vector-ref p 3)) (data (vector-ref p 1))
+             (state (guard-state g)) (was (vector-ref p 25))
+             (groom (room-at data (guard-x g) (guard-y g) (guard-z g))))
+        ;; you: the moment he turns suspicious or worse
+        (when (and (>= state SUSPICIOUS) (< was SUSPICIOUS))
+          (incident! p (if (guard-sees? g) 'you-seen 'you-heard) (vector-ref p 22)))
+        ;; a dark room: his room's light is a switchable circuit that is off
+        (when (>= groom 0)
+          (let* ((c (room-circuit (vector-ref (play-rooms data) groom)))
+                 (sw (and c (assq c (vector-ref p 6)))))
+            (when (and sw (list-ref sw 6) (memq c (vector-ref p 28)) (not (on? c)))
+              (unless (member (list 'dark-room (room-name (vector-ref (play-rooms data) groom))) (vector-ref p 24))
+                (incident! p 'dark-room groom)
+                ;; he comes to check: to the circuit's panel if it has one
+                (let ((panel (assq c (play-panels data))))
+                  (if panel
+                      (guard-notice! g 0.65 (cadr panel) (caddr panel) 0.0)
+                      (guard-notice! g 0.65 (guard-x g) (guard-y g) (guard-z g))))))))
+        (vector-set! p 25 state)
+        (vector-set! p 26 groom)))
+
+    ;; The patch note (design §5): up to two patches, the most serious first,
+    ;; each (system-line gibson-line). A badge seen in use is always one.
+    (define PATCHES
+      '((badge-seen "BADGE REVOKED: FACILITIES" "Nice badge. It isn't yours anymore.")
+        (you-seen "PATROLS TIGHTENED" "Found you. Now I know what you look like.")
+        (you-heard "PATROLS TIGHTENED" "You walk loudly for a ghost.")
+        (dark-room "EMERGENCY LIGHTING: ~" "You like the dark. I've fixed the dark.")))
+    (define DUCT-PATCH '("DUCT GRATES BOLTED" "Crawling through my walls? I've bolted them."))
+
+    (define (patch-for inc)
+      (let ((kind (car inc)) (room (cadr inc)))
+        (if (and (memq kind '(you-seen you-heard)) (eq? room 'duct))
+            DUCT-PATCH
+            (let ((e (assq kind PATCHES)))
+              (list (subst-room (cadr e) room) (caddr e))))))
+    (define (subst-room s room)
+      (let loop ((i 0))
+        (cond ((>= i (string-length s)) s)
+              ((char=? (string-ref s i) #\~)
+               (string-append (substring s 0 i) (upcase (symbol->string room)) (substring s (+ i 1) (string-length s))))
+              (else (loop (+ i 1))))))
+    (define (upcase s) (list->string (map (lambda (ch) (if (char=? ch #\-) #\space (char-upcase ch))) (string->list s))))
+
+    ;; The patches, as ((system-line gibson-line) ...), at most two, by the
+    ;; order of PATCHES (the duct's with you), one per system line.
+    (define (play-patches p)
+      (let* ((incs (play-incidents p))
+             (rank (lambda (inc) (let loop ((ks (map car PATCHES)) (i 0))
+                                   (cond ((null? ks) 99) ((eq? (car ks) (car inc)) i) (else (loop (cdr ks) (+ i 1)))))))
+             (sorted (list-sort (lambda (a b) (< (rank a) (rank b))) incs)))
+        (let loop ((is sorted) (acc '()))
+          (if (or (null? is) (= (length acc) 2))
+              (reverse acc)
+              (let ((pt (patch-for (car is))))
+                (loop (cdr is) (if (assoc (car pt) acc) acc (cons pt acc))))))))
+
+    ;; --- use (F; the phone's USE) ------------------------------------------------------
+
+    ;; Use what is within reach: a circuit's light panel, the stairwell door's
+    ;; card reader. Returns what happened:
+    ;;   (panel-on C) (panel-off C)  the circuit C switched (the caller
+    ;;                               switches it: the renderer holds the state)
+    ;;   (panel-deny C)              the panel wants a credential you lack
+    ;;   (reader-ok)                 the badge opens the stairwell door: won
+    ;;   (reader-deny)               no badge
+    ;;   ()                          nothing in reach
+    ;; on? is the circuits' state, as play-tick! takes it.
+    (define (play-use! p w on?)
+      (if (not (eq? (vector-ref p 8) 'playing))
+          '()
+          (let* ((data (vector-ref p 1)) (x (walker-x w)) (y (walker-y w)) (z (walker-z w))
+                 (reach? (lambda (px py) (let ((dx (- x px)) (dy (- y py)))
+                                          (and (< z 0.5) (< (+ (* dx dx) (* dy dy)) (* USE-REACH USE-REACH))))))
+                 (panel (let find ((ps (play-panels data)))
+                          (cond ((null? ps) #f) ((reach? (cadr (car ps)) (caddr (car ps))) (car ps)) (else (find (cdr ps))))))
+                 (exit (play-exit data)))
+            (cond
+              (panel
+               (let ((c (car panel)) (needs (cadddr panel)))
+                 (cond ((and needs (not (vector-ref p 7)))
+                        (event! p 'reader-deny (cadr panel) (caddr panel))
+                        (list 'panel-deny c))
+                       ((on? c) (event! p 'panel-off (cadr panel) (caddr panel)) (list 'panel-off c))
+                       (else (event! p 'panel-on (cadr panel) (caddr panel)) (list 'panel-on c)))))
+              ((reach? (vector-ref exit 0) (vector-ref exit 1))
+               (if (vector-ref p 7)
+                   (begin
+                     ;; a badge seen in use is always patched (design §5)
+                     (when (guard-sees? (vector-ref p 3)) (incident! p 'badge-seen (vector-ref p 22)))
+                     (event! p 'reader-ok (vector-ref exit 0) (vector-ref exit 1))
+                     (event! p 'door-open (vector-ref exit 0) (vector-ref exit 1))
+                     (vector-set! p 8 'won)
+                     (list 'reader-ok))
+                   (begin (event! p 'reader-deny (vector-ref exit 0) (vector-ref exit 1))
+                          (list 'reader-deny))))
+              (else '())))))
 
     (define (near-badge? data x y z)
       (let* ((b (play-badge data))
