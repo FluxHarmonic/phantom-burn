@@ -177,8 +177,11 @@
                                    (list-ref v 4) (list-ref v 5) (list-ref v 6) (lens->fov (list-ref v 7)) #t))
                       (cdr (assq 'views info))))
              (named (lambda (n) (let find ((l vs)) (cond ((null? l) #f) ((eq? (caar l) n) (car l)) (else (find (cdr l)))))))
-             (main (filter (lambda (v) v) (map named '(arrival overlook office))))
-             (rest (filter (lambda (v) (not (memq (car v) '(arrival overlook office)))) vs)))
+             ;; the export's office view is "into-office" in the compiler's
+             ;; floors since 2026-09-25 (a view cannot share a room's name)
+             (main (filter (lambda (v) v) (list (named 'arrival) (named 'overlook)
+                                                (or (named 'into-office) (named 'office)))))
+             (rest (filter (lambda (v) (not (memq (car v) '(arrival overlook office into-office)))) vs)))
         (append main DARK-VIEWS rest)))
     (define *views* STAND-IN-VIEWS)
     (define *surfaces* stand-in-surfaces)   ; the collision's surface tags, by index
@@ -414,7 +417,7 @@
                                  (render-circuits)))
                      (if *shot*
                          (string-append "SHOT " (string-upcase* (symbol->string (car (view-ref *shot*)))))
-                         (string-append (fixed1 (walker-x w)) " " (fixed1 (walker-y w)) " " (fixed1* (walker-z w))
+                         (string-append (fixed1* (walker-x w)) " " (fixed1* (walker-y w)) " " (fixed1* (walker-z w))
                                         (if (walker-crouching? w) "  CROUCH" "")
                                         (if (walker-mantling? w) "  MANTLE" "")
                                         "  " (surface-name (walker-surface w)))))

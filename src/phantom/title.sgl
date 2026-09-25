@@ -11,9 +11,10 @@
 ;;; The letters are Crash The Stack's block alphabet (crash-the-stack
 ;;; src/crash/title/alphabet.sgl at 262a0e0, generated from its
 ;;; assets/src/title/blocky.txt): 7 x 6 cells, # full, ^ v the top and
-;;; bottom halves, < > the left and right halves, drawn here 4 x 8 pixels a
-;;; cell (a terminal cell's 1:2), coloured cyan at the top to magenta at the
-;;; bottom as Crash's logo is. They are baked once into an atlas and drawn
+;;; bottom halves, < > the left and right halves, drawn here 5 x 10 pixels a
+;;; cell (a terminal cell's 1:2), coloured cyan at the top to near-white at
+;;; the bottom: magenta is kept for the beam and the burn, the one accent
+;;; (David, 2026-09-25: bigger letters, less pink in them). They are baked once into an atlas and drawn
 ;;; as one sheared quad each, in the 3D pass, after the room: about 25
 ;;; draws a frame.
 ;;;
@@ -48,18 +49,18 @@
         ("U" "##   ##" "##   ##" "##   ##" "##   ##" "##v v##" " ^###^ ")
         ("R" "######v" "##   ##" "##vvv#^" "##^^## " "##   ##" "##   ##")))
 
-    (define CW 4)                    ; cell width, pixels
-    (define CH 8)                    ; cell height
-    (define GW (* 7 CW))             ; glyph 28 x 48
+    (define CW 5)                    ; cell width, pixels
+    (define CH 10)                   ; cell height
+    (define GW (* 7 CW))             ; glyph 35 x 60
     (define GH (* 6 CH))
-    (define ADV 32)                  ; advance per letter
-    (define SPACE 16)                ; the gap between the words
-    (define SHEAR 10.0)              ; the top edge's shift right, pixels
+    (define ADV 40)                  ; advance per letter
+    (define SPACE 20)                ; the gap between the words
+    (define SHEAR 12.0)              ; the top edge's shift right, pixels
     (define TITLE "PHANTOM BURN")
-    (define TOP 72)                  ; the letters' top row in the frame
-    ;; the burned stroke: rows 14 to 17 of 48, in the top third
-    (define BAND0 (/ 14.0 GH))
-    (define BAND1 (/ 18.0 GH))
+    (define TOP 58)                  ; the letters' top row in the frame
+    ;; the burned stroke: rows 17 to 21 of 60, in the top third
+    (define BAND0 (/ 17.0 GH))
+    (define BAND1 (/ 22.0 GH))
 
     (define (glyph-index ch)
       (let loop ((gs GLYPHS) (i 0))
@@ -68,8 +69,9 @@
               (else (loop (cdr gs) (+ i 1))))))
 
     ;; The atlas: every glyph side by side, RGBA, top row first; a cell's
-    ;; filled pixels coloured by their row, cyan (#4DF2D9) at the top to
-    ;; magenta (#FF59D9) at the bottom, the last row a shade darker.
+    ;; filled pixels coloured by their row, cyan (#4DF2D9) at the top to a
+    ;; cool near-white (#F0F0FA) at the bottom, each cell's last row a shade
+    ;; darker.
     (define (atlas-pixels)
       (let* ((n (length GLYPHS))
              (w (* n GW))
@@ -90,9 +92,9 @@
                                        (t (/ py (- GH 1.0)))
                                        (dark (if (= y (- CH 1)) 0.85 1.0))
                                        (o (* 4 (+ (* py w) (* k GW) (* c CW) x))))
-                                  (bytevector-u8-set! px o (exact (round (* dark (+ 77 (* t 178))))))
-                                  (bytevector-u8-set! px (+ o 1) (exact (round (* dark (+ 242 (* t -153))))))
-                                  (bytevector-u8-set! px (+ o 2) (exact (round (* dark (+ 217 (* t 0))))))
+                                  (bytevector-u8-set! px o (exact (round (* dark (+ 77 (* t 163))))))
+                                  (bytevector-u8-set! px (+ o 1) (exact (round (* dark (+ 242 (* t -2))))))
+                                  (bytevector-u8-set! px (+ o 2) (exact (round (* dark (+ 217 (* t 33))))))
                                   (bytevector-u8-set! px (+ o 3) 255)))
                               (fx (+ x 1))))
                           (fill (+ y 1)))))
@@ -232,9 +234,8 @@ void main() {
           (let ((z (- 1.48 (* k 0.075))) (len (list-ref '(0.62 0.44 0.7 0.3 0.52 0.18) k)))
             (glow-rect! -0.44 (- z 0.03) (+ -0.44 len) z (- SY 0.003) CYAN))
           (loop (+ k 1))))
-      ;; a tall slit of city light in the far wall, right of the console (a
-      ;; wide slit at 2.2 m sat exactly behind the letters' top edge)
-      (glow-rect! 2.1 0.4 2.26 2.9 3.99 MAGENTA)
+      ;; no city slit: magenta is the beam's alone (David, 2026-09-25), and
+      ;; a slit in the far wall crossed the letters wherever it sat
       (let ((room-count *nverts*))
         ;; the # cursor: a 5 x 5 grid of 1.6 cm cells after the last line
         (let ()
@@ -275,11 +276,11 @@ void main() {
         bv))
 
     ;; the room's lights (the stand-in shader's form: x y z radius r g b
-    ;; circuit; 4 = always lit): the screen's glow, the city slit, a trace
-    ;; of violet from above
+    ;; circuit; 4 = always lit): the screen's glow, a dim violet from the far
+    ;; side, a trace of violet from above
     (define ROOM-LIGHTS
       '((0.0 -0.9 1.25 4.2 0.45 1.4 1.28 4)
-        (2.2 3.4 1.6 6.5 0.9 0.25 0.7 4)
+        (2.2 3.4 1.6 6.5 0.3 0.2 0.55 4)
         (0.0 0.0 3.0 6.0 0.12 0.09 0.25 4)))
 
     ;; --- state and the frame ------------------------------------------------------

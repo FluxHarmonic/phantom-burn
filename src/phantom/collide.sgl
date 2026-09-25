@@ -259,8 +259,13 @@
     ;; Push (x, y) out of the n-corner polygon in buffer A, seen from above,
     ;; to at least r away. Returns #t if it moved the point (the new point in
     ;; slots 14 and 15), else #f. `nx ny` is the triangle's normal, the way
-    ;; out when the centre sits exactly on the piece.
-    (define (push-out! c n x y r nx ny)
+    ;; out when the centre sits exactly on the piece; `nz` tells a floor or
+    ;; ceiling piece (|nz| > FLOOR-NZ): with the centre under or over one of
+    ;; those there is no sideways push at all (a ceiling inside the body is
+    ;; the walker's headroom to handle, by crouching, never a shove: the
+    ;; compiler's reach probe saw a standing body under the 1 m duct thrown
+    ;; 0.63 m in a tick). Its edges still push a body that is beside it.
+    (define (push-out! c n x y r nx ny nz)
       (let ((a (vector-ref c 17)))
         ;; the nearest point of the outline, and whether (x, y) is inside
         (let loop ((k 0) (best 1e30) (bx x) (by y) (inside #f))
@@ -282,6 +287,8 @@
               (let* ((d (sqrt best))
                      (area? (> n 2)))
                 (cond
+                  ((and area? inside (> (abs nz) FLOOR-NZ))
+                   #f)
                   ((and area? inside (polygon-has-area? a n))
                    ;; inside a flat piece (a desk top at chest height): out
                    ;; by the nearest edge, then the radius
@@ -345,7 +352,8 @@
                       (let ((n (clip-slab c i zlo zhi)))
                         (when (and (> n 0)
                                    (push-out! c n px py r
-                                              (vector-ref ns (* 3 i)) (vector-ref ns (+ (* 3 i) 1))))
+                                              (vector-ref ns (* 3 i)) (vector-ref ns (+ (* 3 i) 1))
+                                              (vector-ref ns (+ (* 3 i) 2))))
                           (set! pushes (+ pushes 1))))))))
               (if (= pushes 0)
                   total

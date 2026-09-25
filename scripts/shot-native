@@ -22,7 +22,7 @@ WAIT="${SHOT_WAIT:-2}"
 LOG="$(mktemp /tmp/phantom-shot-native.XXXXXX)"
 trap 'rm -f "$LOG"' EXIT
 
-DISPLAY="$SHOT_DISPLAY" scripts/dev "$BIN" --size 480x270 --seconds "$((WAIT + 3))" "$@" > "$LOG" 2>&1 &
+DISPLAY="$SHOT_DISPLAY" scripts/dev "$BIN" --size 480x270 --seconds "$((WAIT + 8))" "$@" > "$LOG" 2>&1 &
 PID=$!
 i=0
 until grep -q 'phantom-burn: ready' "$LOG"; do
@@ -35,7 +35,13 @@ done
 sleep "$WAIT"
 # a bare Xvfb has no window manager, so the window sits at 0,0
 DISPLAY="$SHOT_DISPLAY" import -window root -crop 480x270+0+0 +repage "$OUT"
+# the game must still be running after the grab (a window that closed before
+# or during it leaves a black root), and its log must hold no error
+kill -0 "$PID" 2>/dev/null || { echo "SETUP-FAILED: the game had exited by the time of the grab; log:"; cat "$LOG"; exit 2; }
 wait "$PID" || { echo "SETUP-FAILED: the game exited non-zero; log:"; cat "$LOG"; exit 2; }
+if grep -a -i -E 'error|unbound|exception' "$LOG" | grep -v -E 'GL_VERTEX_ATTRIBUTE_NOT_FOUND|sokol_gfx.h' | grep -q .; then
+  echo "SETUP-FAILED: the game's log holds an error:"; grep -a -i -E 'error|unbound|exception' "$LOG" | head -5; exit 2
+fi
 SIZE="$(identify -format '%wx%h' "$OUT")"
 [ "$SIZE" = "480x270" ] || { echo "SETUP-FAILED: the grab is $SIZE, not 480x270"; exit 2; }
 echo "shot -> $OUT"

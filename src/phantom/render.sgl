@@ -267,7 +267,7 @@ void main() {
     ;; pixels (device pixels per game pixel / devicePixelRatio; natively the
     ;; ratio is taken as 1, sigil-desktop has no content scale): David found
     ;; 40 right on his phone and 8 to 16 on a desktop, the same frame.
-    (define *spread-auto* #t)
+    (define *spread-auto* #f)        ; the / key; 8 fixed by default (David)
     (define *dpr* 1.0)
     (define *pixel-css* 0.0)
     (define *spread* dither-spread-default)
@@ -305,10 +305,14 @@ void main() {
     (define (render-spread) *spread*)
     (define (render-spread! s)
       (set! *spread-auto* #f)
-      (set! *spread* (max 0.0 (min 64.0 (* 1.0 s))))
+      ;; a multiple of 4, which keeps the pass bit-exact with bayer.sh
+      (set! *spread* (* 4.0 (round (/ (max 0.0 (min 64.0 (* 1.0 s))) 4.0))))
       (sync-post!))
     (define (render-spread-auto?) *spread-auto*)
-    (define (render-spread-auto! on?) (set! *spread-auto* on?) (set! *pixel-css* 0.0))
+    (define (render-spread-auto! on?)
+      (set! *spread-auto* on?)
+      (set! *pixel-css* 0.0)
+      (unless on? (set! *spread* dither-spread-default) (sync-post!)))
     (define (render-set-dpr! d) (when (and (number? d) (> d 0)) (set! *dpr* (* 1.0 d))))
     (define (render-pixel-css) *pixel-css*)
     ;; 40 at 1.5 CSS px per game pixel or less (a phone), 12 at 4 or more (a
@@ -410,8 +414,17 @@ void main() {
     ;; The stand-in floor: (load-mesh* layout name) and (load-texture*
     ;; name) are the shell's loaders; draws and lights are (phantom
     ;; stand-in)'s data.
+    ;; the Y-up stand-in (and the city) turned Z-up: columns x -> x, y -> z,
+    ;; z -> -y (the title sets the identity; every loader puts this back)
+    (define (model-turn!)
+      (mat4-identity! *model*)
+      (f32! *model* 5 0.0) (f32! *model* 6 1.0)
+      (f32! *model* 9 -1.0) (f32! *model* 10 0.0)
+      (both (lambda (p) (set-pipeline-uniform! p 'model *model*))))
+
     (define (render-load-stand-in! load-mesh* load-texture* draws lights)
       (set! *kind* 'stand-in)
+      (model-turn!)
       (set! *circuits* STAND-IN-CIRCUITS)
       (when *floor* (mesh-free! *floor*))
       (when *city* (mesh-free! *city*))
@@ -439,6 +452,7 @@ void main() {
     ;; no lights of its own.
     (define (render-load-compiled! load-mesh* load-texture* info)
       (set! *kind* 'compiled)
+      (model-turn!)
       (set! *circuits* (cdr (assq 'circuits info)))
       (when *floor* (mesh-free! *floor*))
       (when *city* (mesh-free! *city*))
@@ -565,10 +579,12 @@ void main() {
                               ((caddr d) (draw-mesh-range opaque *floor* (car d) (cadr d) (caddr d)))
                               (else (draw-mesh-range opaque *floor* (car d) (cadr d)))))
                       *draws*))
-          ;; the city is far away; it fades much later
+          ;; the city is far away; it fades much later. On the compiled floor
+          ;; it is the city circuit's: switched off, it is not drawn.
           (f32! *eye* 3 900.0)
           (set-pipeline-uniform! *opaque* 'eye *eye*)
-          (draw-mesh *opaque* *city*)
+          (unless (and (eq? *kind* 'compiled) (not (render-circuit-on? 'city)))
+            (draw-mesh *opaque* *city*))
           ;; glass last, blended over what is behind it
           (let ((glass (if (eq? *kind* 'compiled) *c-glass* *glass*)))
             (for-each (lambda (d)

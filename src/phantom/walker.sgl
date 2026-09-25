@@ -48,6 +48,10 @@
     (define CROUCH 0.9)
     (define EYE-DROP 0.12)          ; eyes below the top of the head
     (define STEP 0.36)              ; stepped onto while walking
+    ;; one tolerance on both sides of the step: a top up to STEP + STEP-TOL
+    ;; above the feet is stepped onto, and only what rises above that pushes
+    ;; the body (float32 geometry puts a 0.36 riser at 0.36000001)
+    (define STEP-TOL 1e-4)
     (define MANTLE 1.9)             ; the highest top climbed onto, above the feet
     (define SPEED-WALK 2.4)         ; m/s
     (define SPEED-SNEAK 1.1)
@@ -99,15 +103,18 @@
     (define I-SURF 24)
     (define SLOTS 25)
 
-    (define (make-walker x y z yaw)
-      (let ((w (make-vector SLOTS 0.0)))
+    ;; (make-walker x y z yaw [crouched?]): standing, or crouched (the
+    ;; player's own crouch toggled on, the body at CROUCH).
+    (define (make-walker x y z yaw . opt)
+      (let ((w (make-vector SLOTS 0.0))
+            (crouched? (and (pair? opt) (car opt) #t)))
         (vector-set! w 0 'walker)
         (vector-set! w I-X x) (vector-set! w I-Y y) (vector-set! w I-Z z)
         (vector-set! w I-YAW yaw) (vector-set! w I-PITCH 0.0)
-        (vector-set! w I-H STAND)
-        (vector-set! w I-CROUCH #f) (vector-set! w I-FORCED #f)
+        (vector-set! w I-H (if crouched? CROUCH STAND))
+        (vector-set! w I-CROUCH crouched?) (vector-set! w I-FORCED #f)
         (vector-set! w I-GROUND #t) (vector-set! w I-MANTLE #f)
-        (vector-set! w I-EYEZ (+ z (- STAND EYE-DROP)))
+        (vector-set! w I-EYEZ (+ z (- (if crouched? CROUCH STAND) EYE-DROP)))
         (vector-set! w I-SURF 0)
         w))
 
@@ -142,21 +149,28 @@
     ;; --- the ground ------------------------------------------------------------
 
     ;; The highest floor under the body's footprint (its centre and four
-    ;; points at 0.6 of its radius) with z in [zlo, zhi], or #f. The surface
-    ;; under the centre, when there is one, is the tag.
-    (define (footprint-floor c x y zlo zhi)
-      (let* ((k (* 0.6 RADIUS))
-             (f0 (collide-floor c x y zlo zhi))
-             (tag (collide-surface c)))
-        (let ((best (fmax* f0 (fmax* (collide-floor c (+ x k) y zlo zhi)
-                                     (fmax* (collide-floor c (- x k) y zlo zhi)
-                                            (fmax* (collide-floor c x (+ y k) zlo zhi)
-                                                   (collide-floor c x (- y k) zlo zhi)))))))
-          (set! *last-tag* (if f0 tag (collide-surface c)))
-          best)))
+    ;; points at 0.6 of its radius) with z in [zlo, zhi], or #f; the tag of
+    ;; the surface chosen goes to *last-tag*. (Module scratch, written and
+    ;; read within one step, so the step stays a function of its inputs.)
+    (define *best* #f)
+    (define *best-tag* 0)
     (define *last-tag* 0)
-
-    (define (fmax* a b) (cond ((not a) b) ((not b) a) ((> a b) a) (else b)))
+    (define (probe! c x y zlo zhi)
+      (let ((f (collide-floor c x y zlo zhi)))
+        (when (and f (or (not *best*) (> f *best*)))
+          (set! *best* f)
+          (set! *best-tag* (collide-surface c)))))
+    (define (footprint-floor c x y zlo zhi)
+      (let ((k (* 0.6 RADIUS)))
+        (set! *best* #f)
+        (set! *best-tag* 0)
+        (probe! c x y zlo zhi)
+        (probe! c (+ x k) y zlo zhi)
+        (probe! c (- x k) y zlo zhi)
+        (probe! c x (+ y k) zlo zhi)
+        (probe! c x (- y k) zlo zhi)
+        (set! *last-tag* *best-tag*)
+        *best*))
 
     ;; The room above z at (x, y): the lowest ceiling in (z, z + limit] less
     ;; z, or limit when there is none.
@@ -169,11 +183,11 @@
     (define (walker-step s in dt c)
       (let ((w (vector-copy s)))
         (look! w in)
+        (when (input-crouch? in)
+          (vector-set! w I-CROUCH (not (vector-ref w I-CROUCH))))
         (if (vector-ref w I-MANTLE)
             (mantle-step! w dt)
             (begin
-              (when (input-crouch? in)
-                (vector-set! w I-CROUCH (not (vector-ref w I-CROUCH))))
               (height-step! w dt c)
               (move-step! w in dt c)))
         (lean-step! w in dt c)
@@ -185,10 +199,16 @@
       (vector-set! w I-PITCH (clamp (+ (vector-ref w I-PITCH) (input-look-pitch in)) (- PITCH-MAX) PITCH-MAX)))
 
     ;; Crouch and stand toward the wanted height, never into a ceiling. A
-    ;; forced crouch lets go once a standing body fits.
+    ;; ceiling inside the body (placed or arrived under a low ceiling) forces
+    ;; a crouch at once: the body shrinks to fit, never gets pushed sideways
+    ;; (collide-resolve! leaves floors and ceilings over the centre to this).
+    ;; A forced crouch lets go once a standing body fits.
     (define (height-step! w dt c)
       (let* ((x (vector-ref w I-X)) (y (vector-ref w I-Y)) (z (vector-ref w I-Z))
              (room (- (headroom c x y z (+ STAND 0.5)) 0.02)))
+        (when (< room (vector-ref w I-H))
+          (vector-set! w I-FORCED #t)
+          (vector-set! w I-H (max CROUCH room)))
         (when (and (vector-ref w I-FORCED) (>= room STAND))
           (vector-set! w I-FORCED #f))
         (let* ((want (if (or (vector-ref w I-CROUCH) (vector-ref w I-FORCED)) CROUCH STAND))
@@ -217,10 +237,10 @@
              (vx (+ (vector-ref w I-VX) (* k (- tvx (vector-ref w I-VX)))))
              (vy (+ (vector-ref w I-VY) (* k (- tvy (vector-ref w I-VY)))))
              (h (vector-ref w I-H))
-             (pushes (collide-resolve! c (+ x (* vx dt)) (+ y (* vy dt)) RADIUS (+ z STEP) (+ z h)))
+             (pushes (collide-resolve! c (+ x (* vx dt)) (+ y (* vy dt)) RADIUS (+ z STEP STEP-TOL) (+ z h)))
              (nx (collide-x c)) (ny (collide-y c)))
         (if (vector-ref w I-GROUND)
-            (let ((floor (footprint-floor c nx ny (- z STEP) (+ z STEP))))
+            (let ((floor (footprint-floor c nx ny (- z STEP) (+ z STEP STEP-TOL))))
               (cond
                 ((not floor)
                  ;; off an edge: fall from here
@@ -241,7 +261,7 @@
                        (try-mantle! w c fx fy)))))))
             (let* ((vz (max (- FALL-MAX) (- (vector-ref w I-VZ) (* GRAVITY dt))))
                    (nz (+ z (* vz dt)))
-                   (floor (footprint-floor c nx ny nz (+ z STEP))))
+                   (floor (footprint-floor c nx ny nz (+ z STEP STEP-TOL))))
               (place! w x y nx ny dt)
               (if floor
                   (begin
@@ -262,31 +282,48 @@
       (vector-set! w I-VY (/ (- ny y) dt)))
 
     ;; Climb onto what is ahead, if its top is within reach, there is room
-    ;; on it for at least a crouched body, and nothing overhead stops the
-    ;; body rising to it.
+    ;; on it for at least a crouched body, the body can rise in place to it
+    ;; (no ceiling over the start up to where the head will be), and the way
+    ;; across to the landing is clear at three heights (the review's F1: the
+    ;; landing alone let a mantle pass through a thin wall or glass).
     (define (try-mantle! w c fx fy)
       (let* ((x (vector-ref w I-X)) (y (vector-ref w I-Y)) (z (vector-ref w I-Z))
              (h (vector-ref w I-H))
              (ahead (+ RADIUS 0.3))
              (px (+ x (* fx ahead))) (py (+ y (* fy ahead)))
-             (top (collide-floor c px py (+ z STEP) (+ z MANTLE))))
+             (top (collide-floor c px py (+ z STEP STEP-TOL) (+ z MANTLE))))
         (when top
-          (let ((room (- (headroom c px py top (+ STAND 0.5)) 0.02)))
-            (when (and (>= room CROUCH)
-                       ;; rising in place: nothing between the head and the top
-                       (not (collide-ceiling c x y (+ z h) (+ top CROUCH))))
+          (let* ((room (- (headroom c px py top (+ STAND 0.5)) 0.02))
+                 ;; the room over the start once risen to the top: the climb
+                 ;; happens in place first, so the head must fit there too
+                 (rise (- (- (headroom c x y z (+ (- top z) STAND 0.5)) 0.02) (- top z)))
+                 ;; the height the body climbs at: its own, or less where the
+                 ;; top or the space over the start has less (then crouched;
+                 ;; the crouch happens as the climb starts)
+                 (ch (min h room rise)))
+            (when (and (>= room CROUCH) (>= rise CROUCH))
               (let* ((th (min room STAND))
                      (pushes (collide-resolve! c px py RADIUS (+ top 0.05) (+ top th)))
                      (tx (collide-x c)) (ty (collide-y c)))
-                ;; the spot on top must hold the body near where we aimed
-                (when (< (+ (* (- tx px) (- tx px)) (* (- ty py) (- ty py))) (* 0.2 0.2))
-                  (when (< room STAND)
+                ;; the spot on top must hold the body near where we aimed, and
+                ;; nothing may stand between here and there
+                (when (and (< (+ (* (- tx px) (- tx px)) (* (- ty py) (- ty py))) (* 0.2 0.2))
+                           (path-clear? c x y tx ty (+ top 0.1))
+                           (path-clear? c x y tx ty (+ top (* 0.5 ch)))
+                           (path-clear? c x y tx ty (+ top ch -0.05)))
+                  (when (< ch STAND)
+                    (vector-set! w I-H CROUCH)
                     (vector-set! w I-FORCED #t))
                   (vector-set! w I-MANTLE 0.0)
                   (vector-set! w I-MFX x) (vector-set! w I-MFY y) (vector-set! w I-MFZ z)
                   (vector-set! w I-MTX tx) (vector-set! w I-MTY ty) (vector-set! w I-MTZ top)
                   (vector-set! w I-MDUR (+ 0.35 (* 0.25 (- top z))))
                   (vector-set! w I-VX 0.0) (vector-set! w I-VY 0.0) (vector-set! w I-VZ 0.0))))))))
+
+    ;; No wall, glass or post on the straight line from (x, y) to (tx, ty)
+    ;; at height z.
+    (define (path-clear? c x y tx ty z)
+      (not (collide-ray c x y z (- tx x) (- ty y) 0.0)))
 
     ;; Rise in place for the first 60% of the climb, then move over the top.
     (define (mantle-step! w dt)
