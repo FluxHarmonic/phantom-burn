@@ -1,0 +1,335 @@
+;;; (phantom walker) - The runner's body: walking, sneaking, running,
+;;; crouching, leaning, stairs and mantling, over a (phantom collide)
+;;; collision, in design coordinates (metres, x east, y north, z up).
+;;;
+;;; (walker-step state input dt collision) -> a new state. It is a pure
+;;; function (the state passed in is not changed) with no platform calls,
+;;; so the floor compiler's gates run the same code headless. The game
+;;; steps it at a fixed TICK (1/60 s); determinism across targets is only
+;;; claimed at that dt. Trigonometry comes from (phantom detmath), whose
+;;; bits agree natively and on the web.
+;;;
+;;; Movement is ground based, as in Thief (design §3): there is no jump.
+;;; The body is a vertical cylinder RADIUS wide, from the feet up to its
+;;; height (STAND or CROUCH). Anything lower than STEP under the moving body
+;;; is stepped onto, so stairs need nothing special; a floor's edge lets
+;;; the body drop. Pushing forward into an obstacle whose top is between
+;;; STEP and MANTLE above the feet, with room for at least a crouched body
+;;; on top, climbs onto it (the filing cabinet, and up through the hatch
+;;; into the duct). Where the room on top is less than a standing body, the
+;;; walker crouches by itself and stands again by itself once there is
+;;; room; the player's own crouch (the C toggle) is separate from that.
+;;;
+;;; Yaw is 0 facing north (+y) and grows counter-clockwise seen from above
+;;; (turning left); pitch is positive looking up.
+
+(define-library (phantom walker)
+  (import (sigil core)
+          (sigil math)
+          (phantom detmath)
+          (phantom collide))
+
+  (export TICK RADIUS STAND CROUCH STEP MANTLE EYE-DROP
+          SPEED-WALK SPEED-SNEAK SPEED-RUN
+          make-walker walker? walker-step walker-copy
+          walker-x walker-y walker-z walker-yaw walker-pitch
+          walker-height walker-crouching? walker-grounded? walker-mantling?
+          walker-lean walker-surface walker-speed
+          walker-eye-x walker-eye-y walker-eye-z walker-roll
+          make-input input? input-move-x input-move-y input-look-yaw input-look-pitch
+          input-sneak? input-run? input-crouch? input-lean
+          NO-INPUT)
+
+  (begin
+
+    (define TICK (/ 1.0 60.0))
+    (define RADIUS 0.28)
+    (define STAND 1.75)
+    (define CROUCH 0.9)
+    (define EYE-DROP 0.12)          ; eyes below the top of the head
+    (define STEP 0.36)              ; stepped onto while walking
+    (define MANTLE 1.9)             ; the highest top climbed onto, above the feet
+    (define SPEED-WALK 2.4)         ; m/s
+    (define SPEED-SNEAK 1.1)
+    (define SPEED-RUN 4.4)
+    (define CROUCH-MUL 0.55)
+    (define ACCEL 12.0)             ; 1/s: how fast velocity reaches the stick's
+    (define GRAVITY 14.0)
+    (define FALL-MAX 20.0)
+    (define HEIGHT-RATE 3.5)        ; m/s, crouching and standing
+    (define LEAN-RATE 5.0)          ; full lean in 0.2 s
+    (define LEAN-DIST 0.4)          ; m, at the eyes
+    (define LEAN-ROLL 0.12)         ; rad at full lean
+    (define LEAN-GAP 0.12)          ; kept between the leaning head and a wall
+    (define PITCH-MAX 1.5)
+    (define EYE-FOLLOW 18.0)        ; 1/s: the eyes follow the body up a step
+
+    ;; --- input ---------------------------------------------------------------
+
+    ;; One tick's input: move-x (strafe right), move-y (forward), each -1..1
+    ;; (a stick's length past 1 is clamped); look-yaw and look-pitch in
+    ;; radians this tick; sneak? run? held; crouch? pressed this tick (a
+    ;; toggle); lean -1 (left), 0 or 1 (right).
+    (define (make-input move-x move-y look-yaw look-pitch sneak? run? crouch? lean)
+      (vector 'input move-x move-y look-yaw look-pitch sneak? run? crouch? lean))
+    (define (input? v) (and (vector? v) (= (vector-length v) 9) (eq? (vector-ref v 0) 'input)))
+    (define (input-move-x v) (vector-ref v 1))
+    (define (input-move-y v) (vector-ref v 2))
+    (define (input-look-yaw v) (vector-ref v 3))
+    (define (input-look-pitch v) (vector-ref v 4))
+    (define (input-sneak? v) (vector-ref v 5))
+    (define (input-run? v) (vector-ref v 6))
+    (define (input-crouch? v) (vector-ref v 7))
+    (define (input-lean v) (vector-ref v 8))
+    (define NO-INPUT (make-input 0.0 0.0 0.0 0.0 #f #f #f 0))
+
+    ;; --- state ---------------------------------------------------------------
+
+    (define I-X 1) (define I-Y 2) (define I-Z 3) (define I-YAW 4) (define I-PITCH 5)
+    (define I-VX 6) (define I-VY 7) (define I-VZ 8) (define I-H 9)
+    (define I-CROUCH 10)            ; the player's toggle
+    (define I-FORCED 11)            ; crouched by the walker (no room to stand)
+    (define I-LEAN 12)              ; -1..1, eased
+    (define I-GROUND 13)
+    (define I-MANTLE 14)            ; #f, or progress 0..1
+    (define I-MFX 15) (define I-MFY 16) (define I-MFZ 17)
+    (define I-MTX 18) (define I-MTY 19) (define I-MTZ 20) (define I-MDUR 21)
+    (define I-EYEZ 22)              ; the eyes' height, following the body
+    (define I-LEANOFF 23)           ; metres, signed, after the wall check
+    (define I-SURF 24)
+    (define SLOTS 25)
+
+    (define (make-walker x y z yaw)
+      (let ((w (make-vector SLOTS 0.0)))
+        (vector-set! w 0 'walker)
+        (vector-set! w I-X x) (vector-set! w I-Y y) (vector-set! w I-Z z)
+        (vector-set! w I-YAW yaw) (vector-set! w I-PITCH 0.0)
+        (vector-set! w I-H STAND)
+        (vector-set! w I-CROUCH #f) (vector-set! w I-FORCED #f)
+        (vector-set! w I-GROUND #t) (vector-set! w I-MANTLE #f)
+        (vector-set! w I-EYEZ (+ z (- STAND EYE-DROP)))
+        (vector-set! w I-SURF 0)
+        w))
+
+    (define (walker? w) (and (vector? w) (= (vector-length w) SLOTS) (eq? (vector-ref w 0) 'walker)))
+    (define (walker-copy w) (vector-copy w))
+    (define (walker-x w) (vector-ref w I-X))
+    (define (walker-y w) (vector-ref w I-Y))
+    (define (walker-z w) (vector-ref w I-Z))
+    (define (walker-yaw w) (vector-ref w I-YAW))
+    (define (walker-pitch w) (vector-ref w I-PITCH))
+    (define (walker-height w) (vector-ref w I-H))
+    (define (walker-crouching? w) (or (vector-ref w I-CROUCH) (vector-ref w I-FORCED)))
+    (define (walker-grounded? w) (vector-ref w I-GROUND))
+    (define (walker-mantling? w) (and (vector-ref w I-MANTLE) #t))
+    (define (walker-lean w) (vector-ref w I-LEAN))
+    (define (walker-surface w) (vector-ref w I-SURF))
+    (define (walker-speed w)
+      (sqrt (+ (* (vector-ref w I-VX) (vector-ref w I-VX)) (* (vector-ref w I-VY) (vector-ref w I-VY)))))
+    ;; the eyes, with the lean's sideways offset
+    (define (walker-eye-x w) (+ (vector-ref w I-X) (* (dcos (vector-ref w I-YAW)) (vector-ref w I-LEANOFF))))
+    (define (walker-eye-y w) (+ (vector-ref w I-Y) (* (dsin (vector-ref w I-YAW)) (vector-ref w I-LEANOFF))))
+    (define (walker-eye-z w) (vector-ref w I-EYEZ))
+    ;; the camera's roll, positive to the right (a lean right rolls right)
+    (define (walker-roll w) (* LEAN-ROLL (vector-ref w I-LEAN)))
+
+    (define (clamp v lo hi) (if (< v lo) lo (if (> v hi) hi v)))
+    (define (approach v target step)
+      (cond ((< v target) (min target (+ v step)))
+            ((> v target) (max target (- v step)))
+            (else v)))
+
+    ;; --- the ground ------------------------------------------------------------
+
+    ;; The highest floor under the body's footprint (its centre and four
+    ;; points at 0.6 of its radius) with z in [zlo, zhi], or #f. The surface
+    ;; under the centre, when there is one, is the tag.
+    (define (footprint-floor c x y zlo zhi)
+      (let* ((k (* 0.6 RADIUS))
+             (f0 (collide-floor c x y zlo zhi))
+             (tag (collide-surface c)))
+        (let ((best (fmax* f0 (fmax* (collide-floor c (+ x k) y zlo zhi)
+                                     (fmax* (collide-floor c (- x k) y zlo zhi)
+                                            (fmax* (collide-floor c x (+ y k) zlo zhi)
+                                                   (collide-floor c x (- y k) zlo zhi)))))))
+          (set! *last-tag* (if f0 tag (collide-surface c)))
+          best)))
+    (define *last-tag* 0)
+
+    (define (fmax* a b) (cond ((not a) b) ((not b) a) ((> a b) a) (else b)))
+
+    ;; The room above z at (x, y): the lowest ceiling in (z, z + limit] less
+    ;; z, or limit when there is none.
+    (define (headroom c x y z limit)
+      (let ((ceil (collide-ceiling c x y (+ z 0.01) (+ z limit))))
+        (if ceil (- ceil z) limit)))
+
+    ;; --- the step ---------------------------------------------------------------
+
+    (define (walker-step s in dt c)
+      (let ((w (vector-copy s)))
+        (look! w in)
+        (if (vector-ref w I-MANTLE)
+            (mantle-step! w dt)
+            (begin
+              (when (input-crouch? in)
+                (vector-set! w I-CROUCH (not (vector-ref w I-CROUCH))))
+              (height-step! w dt c)
+              (move-step! w in dt c)))
+        (lean-step! w in dt c)
+        (eyes-step! w dt)
+        w))
+
+    (define (look! w in)
+      (vector-set! w I-YAW (+ (vector-ref w I-YAW) (input-look-yaw in)))
+      (vector-set! w I-PITCH (clamp (+ (vector-ref w I-PITCH) (input-look-pitch in)) (- PITCH-MAX) PITCH-MAX)))
+
+    ;; Crouch and stand toward the wanted height, never into a ceiling. A
+    ;; forced crouch lets go once a standing body fits.
+    (define (height-step! w dt c)
+      (let* ((x (vector-ref w I-X)) (y (vector-ref w I-Y)) (z (vector-ref w I-Z))
+             (room (- (headroom c x y z (+ STAND 0.5)) 0.02)))
+        (when (and (vector-ref w I-FORCED) (>= room STAND))
+          (vector-set! w I-FORCED #f))
+        (let* ((want (if (or (vector-ref w I-CROUCH) (vector-ref w I-FORCED)) CROUCH STAND))
+               (h (vector-ref w I-H))
+               (next (approach h want (* HEIGHT-RATE dt))))
+          ;; growing stops at the ceiling (and never shrinks the body to fit)
+          (vector-set! w I-H (if (> next h) (max h (min next room)) next)))))
+
+    (define (move-step! w in dt c)
+      (let* ((x (vector-ref w I-X)) (y (vector-ref w I-Y)) (z (vector-ref w I-Z))
+             (yaw (vector-ref w I-YAW))
+             (fx (- (dsin yaw))) (fy (dcos yaw))          ; forward
+             (rx (dcos yaw)) (ry (dsin yaw))              ; right
+             (mx (input-move-x in)) (my (input-move-y in))
+             (m (sqrt (+ (* mx mx) (* my my))))
+             (mx (if (> m 1.0) (/ mx m) mx))
+             (my (if (> m 1.0) (/ my m) my))
+             (crouched (or (vector-ref w I-CROUCH) (vector-ref w I-FORCED)))
+             (speed (* (cond ((input-sneak? in) SPEED-SNEAK)
+                             ((and (input-run? in) (not crouched)) SPEED-RUN)
+                             (else SPEED-WALK))
+                       (if crouched CROUCH-MUL 1.0)))
+             (tvx (* speed (+ (* rx mx) (* fx my))))
+             (tvy (* speed (+ (* ry mx) (* fy my))))
+             (k (min 1.0 (* ACCEL dt (if (vector-ref w I-GROUND) 1.0 0.25))))
+             (vx (+ (vector-ref w I-VX) (* k (- tvx (vector-ref w I-VX)))))
+             (vy (+ (vector-ref w I-VY) (* k (- tvy (vector-ref w I-VY)))))
+             (h (vector-ref w I-H))
+             (pushes (collide-resolve! c (+ x (* vx dt)) (+ y (* vy dt)) RADIUS (+ z STEP) (+ z h)))
+             (nx (collide-x c)) (ny (collide-y c)))
+        (if (vector-ref w I-GROUND)
+            (let ((floor (footprint-floor c nx ny (- z STEP) (+ z STEP))))
+              (cond
+                ((not floor)
+                 ;; off an edge: fall from here
+                 (vector-set! w I-GROUND #f)
+                 (vector-set! w I-VZ 0.0)
+                 (place! w x y nx ny dt))
+                ((< (headroom c nx ny floor (+ h 0.02)) h)
+                 ;; a step up into a ceiling: stay
+                 (place! w x y x y dt))
+                (else
+                 (vector-set! w I-Z floor)
+                 (vector-set! w I-SURF *last-tag*)
+                 (place! w x y nx ny dt)
+                 (when (and (> pushes 0) (> my 0.5))
+                   (let* ((want (* speed my dt))
+                          (got (+ (* (- nx x) fx) (* (- ny y) fy))))
+                     (when (< got (* 0.5 want))
+                       (try-mantle! w c fx fy)))))))
+            (let* ((vz (max (- FALL-MAX) (- (vector-ref w I-VZ) (* GRAVITY dt))))
+                   (nz (+ z (* vz dt)))
+                   (floor (footprint-floor c nx ny nz (+ z STEP))))
+              (place! w x y nx ny dt)
+              (if floor
+                  (begin
+                    (vector-set! w I-Z floor)
+                    (vector-set! w I-VZ 0.0)
+                    (vector-set! w I-GROUND #t)
+                    (vector-set! w I-SURF *last-tag*))
+                  (begin
+                    (vector-set! w I-Z nz)
+                    (vector-set! w I-VZ vz)))))))
+
+    ;; Move to (nx, ny) from (x, y); the velocity is what actually happened,
+    ;; so pushing into a wall builds no speed along it.
+    (define (place! w x y nx ny dt)
+      (vector-set! w I-X nx)
+      (vector-set! w I-Y ny)
+      (vector-set! w I-VX (/ (- nx x) dt))
+      (vector-set! w I-VY (/ (- ny y) dt)))
+
+    ;; Climb onto what is ahead, if its top is within reach, there is room
+    ;; on it for at least a crouched body, and nothing overhead stops the
+    ;; body rising to it.
+    (define (try-mantle! w c fx fy)
+      (let* ((x (vector-ref w I-X)) (y (vector-ref w I-Y)) (z (vector-ref w I-Z))
+             (h (vector-ref w I-H))
+             (ahead (+ RADIUS 0.3))
+             (px (+ x (* fx ahead))) (py (+ y (* fy ahead)))
+             (top (collide-floor c px py (+ z STEP) (+ z MANTLE))))
+        (when top
+          (let ((room (- (headroom c px py top (+ STAND 0.5)) 0.02)))
+            (when (and (>= room CROUCH)
+                       ;; rising in place: nothing between the head and the top
+                       (not (collide-ceiling c x y (+ z h) (+ top CROUCH))))
+              (let* ((th (min room STAND))
+                     (pushes (collide-resolve! c px py RADIUS (+ top 0.05) (+ top th)))
+                     (tx (collide-x c)) (ty (collide-y c)))
+                ;; the spot on top must hold the body near where we aimed
+                (when (< (+ (* (- tx px) (- tx px)) (* (- ty py) (- ty py))) (* 0.2 0.2))
+                  (when (< room STAND)
+                    (vector-set! w I-FORCED #t))
+                  (vector-set! w I-MANTLE 0.0)
+                  (vector-set! w I-MFX x) (vector-set! w I-MFY y) (vector-set! w I-MFZ z)
+                  (vector-set! w I-MTX tx) (vector-set! w I-MTY ty) (vector-set! w I-MTZ top)
+                  (vector-set! w I-MDUR (+ 0.35 (* 0.25 (- top z))))
+                  (vector-set! w I-VX 0.0) (vector-set! w I-VY 0.0) (vector-set! w I-VZ 0.0))))))))
+
+    ;; Rise in place for the first 60% of the climb, then move over the top.
+    (define (mantle-step! w dt)
+      (let* ((t (min 1.0 (+ (vector-ref w I-MANTLE) (/ dt (vector-ref w I-MDUR)))))
+             (fz (vector-ref w I-MFZ)) (tz (vector-ref w I-MTZ))
+             (rise (min 1.0 (/ t 0.6)))
+             (over (max 0.0 (/ (- t 0.6) 0.4))))
+        (vector-set! w I-Z (+ fz (* rise (- tz fz))))
+        (vector-set! w I-X (+ (vector-ref w I-MFX) (* over (- (vector-ref w I-MTX) (vector-ref w I-MFX)))))
+        (vector-set! w I-Y (+ (vector-ref w I-MFY) (* over (- (vector-ref w I-MTY) (vector-ref w I-MFY)))))
+        (when (vector-ref w I-FORCED)
+          (vector-set! w I-H (approach (vector-ref w I-H) CROUCH (* 2.0 HEIGHT-RATE dt))))
+        (if (>= t 1.0)
+            (begin
+              (vector-set! w I-MANTLE #f)
+              (vector-set! w I-GROUND #t))
+            (vector-set! w I-MANTLE t))))
+
+    ;; Lean toward the input, and keep the head out of walls: a ray from the
+    ;; eyes to the side limits the offset.
+    (define (lean-step! w in dt c)
+      (let* ((target (exact->inexact* (input-lean in)))
+             (lean (approach (vector-ref w I-LEAN) target (* LEAN-RATE dt)))
+             (want (* lean LEAN-DIST)))
+        (vector-set! w I-LEAN lean)
+        (if (= want 0.0)
+            (vector-set! w I-LEANOFF 0.0)
+            (let* ((yaw (vector-ref w I-YAW))
+                   (reach (+ (abs want) LEAN-GAP))
+                   (sx (* (dcos yaw) (if (> want 0.0) reach (- reach))))
+                   (sy (* (dsin yaw) (if (> want 0.0) reach (- reach))))
+                   (ez (+ (vector-ref w I-Z) (- (vector-ref w I-H) EYE-DROP)))
+                   (t (collide-ray c (vector-ref w I-X) (vector-ref w I-Y) ez sx sy 0.0))
+                   (limit (if t (max 0.0 (- (* t reach) LEAN-GAP)) (abs want))))
+              (vector-set! w I-LEANOFF (if (> want 0.0) (min want limit) (max want (- limit))))))))
+
+    (define (exact->inexact* n) (* 1.0 n))
+
+    ;; The eyes follow the body's height, quickly, so a stair step or a
+    ;; crouch is a short glide rather than a jump; never more than 0.3 m
+    ;; behind.
+    (define (eyes-step! w dt)
+      (let* ((target (+ (vector-ref w I-Z) (- (vector-ref w I-H) EYE-DROP)))
+             (e (vector-ref w I-EYEZ))
+             (e (+ e (* (min 1.0 (* EYE-FOLLOW dt)) (- target e)))))
+        (vector-set! w I-EYEZ (clamp e (- target 0.3) (+ target 0.3)))))))
