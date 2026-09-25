@@ -17,6 +17,8 @@
 ;;;   ("press", "KEY")       a button on the page (the crouch button sends c)
 ;;;   ("dpr", "N")           window.devicePixelRatio, at boot and on a resize
 ;;;   ("floorinfo", TEXT)    a compiled floor's floor.sexp (before its assets load)
+;;;   ("nofloor", "")        ?title=1: the room's floor.sexp did not load (the
+;;;                          title then uses its stand-in room)
 
 (define-library (phantom shell web)
   (import (sigil core)
@@ -87,12 +89,12 @@
         (image-free! img)
         tex))
 
-    (define (all-ready?)
-      (and *collide*
-           (pair? *fetches*)
+    (define (fetched?)
+      (and (pair? *fetches*)
            (let loop ((fs *fetches*))
              (or (null? fs)
                  (and (gles3-image-ready? (cdar fs)) (loop (cdr fs)))))))
+    (define (all-ready?) (and *collide* (fetched?)))
 
     (define (dom-key->sym k)
       (cond ((string=? k "ArrowLeft") 'left)
@@ -164,20 +166,45 @@
               (for-each (lambda (l) (display (string-append "phantom-burn: replay " l)) (newline)) lines)
               (display (string-append "phantom-burn: replay-done " (number->string (length lines)))) (newline)))))
 
-    ;; ?title=1: the title screen, which needs no floor.
+    ;; ?title=1: the title screen, in the root-console room (the page sends
+    ;; assets/floors/root-room's floor.sexp; no collision). It starts once the
+    ;; room's meshes and textures land, or in its stand-in room when the page
+    ;; says the floor did not load, or after 10 s of waiting.
     (define *title-t* #f)
+    (define *no-floor* #f)
+    (define (title-start! info)
+      (if info
+          (title-init! load-mesh* load-texture* info)
+          (title-init!))
+      (apply-params!)
+      (set! *title-t* 0.0))
     (define (title-tick payload)
       (let ((dt (frame-dt payload)))
+        (when (and (not *title-t*) (not *info*) *info-text*)
+          (let ((text *info-text*))
+            (set! *info-text* #f)
+            (set! *info* (guard (e (#t (display "phantom-burn: title: floor.sexp does not read") (newline) #f))
+                           (floor-info-from-string text)))
+            (unless *info* (set! *no-floor* #t))))
+        (when (and (not *title-t*) *info* (null? *fetches*))
+          (set! *fetches* (map (lambda (n) (cons n (gles3-fetch-image (url n)))) (asset-names))))
+        (unless *title-t*
+          (set! *waited* (+ *waited* dt))
+          (cond ((and *info* (fetched?)) (title-start! *info*))
+                ((or *no-floor* (> *waited* 10.0))
+                 (display "phantom-burn: title: no room, the stand-in room instead") (newline)
+                 (title-start! #f))))
         (if *title-t*
-            (set! *title-t* (+ *title-t* dt))
             (begin
-              (title-init!)
-              (apply-params!)
-              (set! *title-t* 0.0)))
-        (title-frame! *title-t* (gles3-canvas-width) (gles3-canvas-height))
-        (unless *said-ready*
-          (set! *said-ready* #t)
-          (display "phantom-burn: ready title") (newline))))
+              (set! *title-t* (+ *title-t* dt))
+              (title-frame! *title-t* (gles3-canvas-width) (gles3-canvas-height))
+              (unless *said-ready*
+                (set! *said-ready* #t)
+                (display "phantom-burn: ready title") (newline)))
+            (begin
+              (begin-frame)
+              (clear-screen 0.0 0.0 0.0)
+              (end-frame)))))
 
     (define (web-tick payload)
       (when (and *params-seen* (param "title"))
@@ -308,6 +335,9 @@
              0)
             ((string=? type "floorinfo")
              (set! *info-text* payload)
+             0)
+            ((string=? type "nofloor")
+             (set! *no-floor* #t)
              0)
             ((string=? type "collide")
              (set! *collide* payload)

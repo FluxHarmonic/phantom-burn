@@ -102,7 +102,9 @@
   //     ?trace        a console stats line every 120 frames, each also sent to the
   //                   host (report?LINE, the host's log), so the phone's numbers
   //                   need no transcribing; ?auto walks by itself
-  //     ?title=1      the title screen (its own scene; no floor)
+  //     ?title=1      the title screen, in the root-console room (floor
+  //                   root-room unless ?floor= names another; its floor.sexp
+  //                   only, no collision; ("nofloor", "") when it fails)
   //     ?play=1       P1's game: the guard, the badge and the exit (the floor's
   //                   play.sexp, sent as ("playinfo", TEXT) before the collision)
   //     ?card         the test card (a sweep of the colour cube) through the post pass
@@ -119,7 +121,7 @@
   (function () {
     "use strict";
     var params = new URLSearchParams(location.search);
-    var floor = (params.get("floor") || "14-slice").replace(/[^A-Za-z0-9_-]/g, "");
+    var floor = (params.get("floor") || (params.has("title") ? "root-room" : "14-slice")).replace(/[^A-Za-z0-9_-]/g, "");
     var dir = floor === "stand-in" ? "assets/stand-in/" : "assets/floors/" + floor + "/";
     var collideFile = floor === "stand-in" ? "floor14.collide.b64" : "collide.b64";
     function withApp(fn) {
@@ -179,7 +181,10 @@
             return r.text();
           });
         }
-        if (params.has("title")) return null;   // the title screen loads no floor
+        if (params.has("title")) {   // the title's room: its floor.sexp, no collision
+          return text("floor.sexp").then(function (t) { app.dispatch("floorinfo", t); },
+                                         function () { app.dispatch("nofloor", ""); });
+        }
         var info = floor === "stand-in" ? Promise.resolve(null) : text("floor.sexp");
         return info.then(function (t) {
           if (t !== null) app.dispatch("floorinfo", t);
