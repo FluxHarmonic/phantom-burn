@@ -94,6 +94,7 @@
               (lambda (alpha cam) #f)
               (lambda (w h k)
                 (let ((t (now)))
+                  (device-parts-update! (preview-devices t))
                   (if terminal?
                       (terminal-draw! w h k (preview-terminal t) (preview-devices t))
                       (deck-hud-draw! w h k (preview-deck t)))))

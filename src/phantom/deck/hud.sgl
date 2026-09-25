@@ -37,7 +37,7 @@
           (phantom render)
           (phantom game))
 
-  (export deck-hud-draw! terminal-draw! deck-hud-reset! deck-hud-use-map!
+  (export deck-hud-draw! terminal-draw! deck-hud-reset! deck-hud-use-map! device-parts-update!
           map-outlines map-openings map-devices)
 
   (begin
@@ -107,6 +107,52 @@
             (draw-filled-rect bx by (* bw (max 0.0 (min 1.0 prog))) k)))
         (set-color 1.0 1.0 1.0)))
 
+    ;; --- the devices' state-driven parts (v4 §1 (c)) -----------------------------
+    ;;
+    ;; (device-parts-update! devices), once a frame from play (devices =
+    ;; (play-mode-devices)): each device's named floor parts shown or hidden
+    ;; through render-hide-part!, and only when that changes. ID-led: the
+    ;; phone's blinks while it rings; the printer's and the vent's are lit
+    ;; while running; the terminal's is always lit; the camera's is steady,
+    ;; blinking while it sees you. ID-alarm: the camera's, once alarmed.
+    ;; ID-open / ID-closed: the blinds, as they are.
+    (define *shown* '())             ; ((part-symbol . shown?) ...)
+    (define *part-names* '())        ; ((ID led alarm open closed) ...), made once per ID
+    (define (parts-of id)
+      (let ((p (assq id *part-names*)))
+        (if p
+            (cdr p)
+            (let* ((s (symbol->string id))
+                   (n (map (lambda (suffix) (string->symbol (string-append s "-" suffix)))
+                           '("led" "alarm" "open" "closed"))))
+              (set! *part-names* (cons (cons id n) *part-names*))
+              n))))
+    (define (show! part on?)
+      (let ((p (assq part *shown*)))
+        (unless (and p (eq? (cdr p) on?))
+          (render-hide-part! part (not on?))
+          (if p (set-cdr! p on?) (set! *shown* (cons (cons part on?) *shown*))))))
+    (define *parts-floor* #f)          ; a floor load clears render's hidden set: start over
+    (define (device-parts-update! devices)
+      (unless (eq? (render-floor-info) *parts-floor*)
+        (set! *parts-floor* (render-floor-info))
+        (set! *shown* '()))
+      (for-each
+       (lambda (d)
+         (let* ((id (list-ref d 0)) (kind (list-ref d 1)) (st (list-ref d 5))
+                (s (if (pair? st) (car st) st))
+                (n (parts-of id)))
+           (case kind
+             ((phone) (show! (car n) (and (eq? s 'ringing) (blink? 2.5))))
+             ((printer) (show! (car n) (eq? s 'running)))
+             ((vent) (show! (car n) (eq? s 'on)))
+             ((terminal) (show! (car n) #t))
+             ((camera) (show! (car n) (or (not (eq? s 'seeing)) (blink? 4.0)))
+                       (show! (cadr n) (eq? s 'alarmed)))
+             ((blinds) (show! (caddr n) (eq? s 'open))
+                       (show! (cadddr n) (not (eq? s 'open)))))))
+       devices))
+
     ;; --- the floor's map data (floor.sexp, the compiler's; v4 §3 (f)) ---------
 
     (define (field info key) (let ((f (and info (assq key info)))) (if f (cdr f) '())))
@@ -120,7 +166,7 @@
     (define *baked-for* #f)       ; the info the map was baked from
     (define *map-rt* #f)
 
-    (define (deck-hud-reset!) (set! *baked-for* #f))
+    (define (deck-hud-reset!) (set! *baked-for* #f) (set! *shown* '()))
     ;; A map to draw instead of the floor's (the native --terminal-preview,
     ;; before the compiler writes outlines); #f goes back to the floor's.
     (define *map-override* #f)
