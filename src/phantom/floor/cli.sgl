@@ -3,10 +3,12 @@
 ;;;
 ;;;   phantom-burn --floor-check FLOOR...     gates 1, 2 and 6; problems as
 ;;;                                           FILE:LINE: message [gate N]
-;;;   phantom-burn --floor-compile FLOOR [--out DIR]
+;;;   phantom-burn --floor-compile FLOOR [--out DIR] [--city S R] [--ambient R G B]
 ;;;                                           DIR/NAME.sgm, NAME.sgm.json,
 ;;;                                           NAME.collide, tex-*.png
-;;;                                           (DIR defaults to build/floors)
+;;;                                           (DIR defaults to build/floors); --city
+;;;                                           STRENGTH RADIUS (0 off) and --ambient R G B
+;;;                                           try a look without editing the compiler
 ;;;   phantom-burn --floor-sheet FLOOR [OUT.svg]
 ;;;                                           the plan from above
 ;;;   phantom-burn --floor-time FLOOR [N]     compile N times, print the times
@@ -71,7 +73,8 @@
             (else (arg-after (cdr a) flag default))))
 
     ;; Each option and how many values follow it.
-    (define OPTION-VALUES '(("--out" . 1) ("--save-witness" . 1) ("--probe" . 3) ("--dt" . 1)))
+    (define OPTION-VALUES '(("--out" . 1) ("--save-witness" . 1) ("--probe" . 3) ("--dt" . 1)
+                            ("--city" . 2) ("--ambient" . 3)))
 
     (define (positional a)
       (let loop ((a a) (acc '()))
@@ -90,9 +93,21 @@
               (ok 0)
               (else 1))))
 
-    (define (compile-to floor out)
+    ;; The look lab's settings from the arguments: --city STRENGTH RADIUS (0
+    ;; turns the city light off) and --ambient R G B, for trying looks without
+    ;; editing the compiler. ((city S R) (ambient R G B)), each only if given.
+    (define (look-options a)
+      (let ((nums (lambda (flag k)
+                    (let ((m (member flag a)))
+                      (and m (>= (length (cdr m)) k)
+                           (let ((xs (map string->number (take (cdr m) k))))
+                             (and (every (lambda (x) x) xs) (map inexact xs))))))))
+        (append (let ((c (nums "--city" 2))) (if c (list (cons 'city c)) '()))
+                (let ((g (nums "--ambient" 3))) (if g (list (cons 'ambient g)) '())))))
+
+    (define (compile-to floor out look)
       (let* ((t0 (current-jiffy))
-             (cf (compile-floor floor read-text-file))
+             (cf (compile-floor floor read-text-file #f look))
              (t1 (current-jiffy))
              (name (compiled-floor-name cf)))
         (report cf)
@@ -199,7 +214,7 @@
                  0)))))
 
     (define (usage)
-      (say "usage: phantom-burn --floor-check FLOOR... | --floor-compile FLOOR [--out DIR] |")
+      (say "usage: phantom-burn --floor-check FLOOR... | --floor-compile FLOOR [--out DIR] [--city S R] [--ambient R G B] |")
       (say "       --floor-sheet FLOOR [OUT.svg] | --floor-time FLOOR [N] |")
       (say "       --floor-reach FLOOR [--save-witness PATH] [--probe X Y Z] |")
       (say "       --floor-replay FILE.collide[.b64] SCRIPT [--dt X]")
@@ -212,7 +227,7 @@
              (status
                (cond ((and (string=? cmd "--floor-check") (pair? pos)) (check pos))
                      ((and (string=? cmd "--floor-compile") (pair? pos))
-                      (compile-to (car pos) (arg-after (cdr a) "--out" "build/floors")))
+                      (compile-to (car pos) (arg-after (cdr a) "--out" "build/floors") (look-options (cdr a))))
                      ((and (string=? cmd "--floor-sheet") (pair? pos))
                       (sheet (car pos) (and (pair? (cdr pos)) (cadr pos))))
                      ((and (string=? cmd "--floor-reach") (member "--probe" a) (pair? pos))

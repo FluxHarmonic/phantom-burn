@@ -212,8 +212,12 @@ void main() {
     (define *pools* 2.0)
     (define (render-pools) *pools*)
     (define (render-pools! g) (set! *pools* (max 0.0 (min 8.0 (* 1.0 g)))) (sync-light!))
-    (define NIGHT '(0.045 0.032 0.085))
-    (define BOUNCE '(0.155 0.108 0.255))
+    ;; Neutral grey (David's pick, 2026-09-25; it was violet, NIGHT (0.045
+    ;; 0.032 0.085) and BOUNCE (0.155 0.108 0.255)). The contract: NIGHT +
+    ;; BOUNCE is the floor compiler's AMBIENT (0.18 0.18 0.18), the
+    ;; sidecar's ambient; change both together.
+    (define NIGHT '(0.042 0.042 0.042))
+    (define BOUNCE '(0.138 0.138 0.138))
     (define (circuit-index name)
       (let ((c (assq name *circuits*))) (and c (cadr c))))
     (define (render-circuits) (map car *circuits*))

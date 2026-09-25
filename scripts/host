@@ -12,9 +12,6 @@
 set -eu
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 HOSTDIR="${HOSTDIR:-$HOME/Projects/Code/sigil/phantom-burn-hosted}"
-# the build to serve: build/web, or a runner build (WEB=build/remote-web-SHA),
-# relative to the repo; made absolute before the cd below
-WEB="$(cd "$REPO" && cd "${WEB:-build/web}" && pwd)"
 # PORT_TLS / PORT_HTTP: other ports, so a second build can be hosted beside
 # the first (P1: HOSTDIR=...-p1 PORT_TLS=8815 PORT_HTTP=8816)
 PORT_TLS="${PORT_TLS:-8811}"
@@ -53,6 +50,12 @@ for p in $PORT_TLS $PORT_HTTP; do
   rm -f "$f"
 done
 [ "${1:-}" = "--stop" ] && exit 0
+
+# the build to serve: build/web, or a runner build (WEB=build/remote-web-SHA),
+# relative to the repo (resolved after the stop, which needs no build)
+WEB_REL="${WEB:-build/web}"
+case "$WEB_REL" in /*) WEB="$WEB_REL" ;; *) WEB="$REPO/$WEB_REL" ;; esac
+[ -d "$WEB" ] || { echo "host: $WEB_REL: no such build (build --config web, or WEB=build/remote-web-SHA)"; exit 1; }
 
 [ -f "$WEB/phantom-burn.wasm" ] || { echo "host: build/web/phantom-burn.wasm missing; build --config web first"; exit 1; }
 [ -f "$WEB/assets/stand-in/floor14.collide.b64" ] || { echo "host: build/web/assets/stand-in missing"; exit 1; }
