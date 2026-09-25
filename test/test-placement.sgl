@@ -78,10 +78,12 @@
     (assert-true (says? (variant "from: (centre (0 0.3))" "from: (corner 9 (0 0))") "is not one of the room's 4 corners")))
   (test "off the end of the wall"
     (assert-true (says? (variant "from: (south 1.6)" "from: (south 11)") "m is off the")))
-  (test "at: and a room anchor together"
+  (test "at: and from: together"
     (assert-true (says? (variant "(prop  kind: root-console  in: key-room"
                                  "(prop  kind: root-console  at: (4 4)  in: key-room")
-                        "has at: and a room anchor")))
+                        "has at: and from:")))
+  (test "at: outside the room in: names"
+    (assert-true (says? (variant "from: (centre (0 -1.6))" "at: (20 20)") "is not in key-room")))
   (test "against: with a corner"
     (assert-true (says? (variant "against: west  from: (south 1.6)" "against: west  from: (corner 0 (1 1))")
                         "needs from: (END M)"))))
