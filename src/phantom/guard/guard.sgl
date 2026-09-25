@@ -40,7 +40,7 @@
           (phantom guard sense))
 
   (export make-guard-world guard-world-nav make-guard guard-reset!
-          guard-step! guard-caught? guard-hold! guard-place! guard-alarm!
+          guard-step! guard-caught? guard-hold! guard-place! guard-alarm! guard-hear! guard-heard?
           guard-x guard-y guard-z guard-fx guard-fy
           guard-prev-x guard-prev-y guard-prev-fx guard-prev-fy
           guard-state guard-state-name guard-awareness guard-sees? guard-rate
@@ -125,7 +125,8 @@
     (define S-FTX 22) (define S-FTY 23) (define S-FAGE 24) (define S-PHASE 25)
     (define S-BFX 26) (define S-BFY 27) (define S-RATE 28) (define S-ARRIVED 29)
     (define S-TICK 30)
-    (define SLOTS 31)
+    (define S-HEARD 31)             ; ticks since it last heard you (-1: never, this attempt)
+    (define SLOTS 32)
 
     (define (make-guard gw leg)
       (let ((g (make-vector SLOTS 0.0)))
@@ -155,6 +156,7 @@
         (vector-set! g S-FTX 1e9) (vector-set! g S-FTY 1e9) (vector-set! g S-FAGE 0)
         (vector-set! g S-PHASE 0.0) (vector-set! g S-RATE 0.0) (vector-set! g S-ARRIVED #f)
         (vector-set! g S-TICK 0)
+        (vector-set! g S-HEARD -1)
         (vector-set! g S-BFX (vector-ref g S-FX)) (vector-set! g S-BFY (vector-ref g S-FY))
         (save-prev! g)
         g))
@@ -193,6 +195,7 @@
     (define (guard-step! g gw t dt)
       (save-prev! g)
       (vector-set! g S-TICK (+ 1 (vector-ref g S-TICK)))
+      (when (>= (vector-ref g S-HEARD) 0) (vector-set! g S-HEARD (+ 1 (vector-ref g S-HEARD))))
       (when (= 0 (remainder (vector-ref g S-TICK) PERCEIVE-EVERY))
         (perceive! g gw t (* dt PERCEIVE-EVERY)))
       (think! g t dt)
@@ -439,6 +442,26 @@
       (vector-set! g S-LSX x) (vector-set! g S-LSY y)
       (vector-set! g S-LOST 0.0)
       g)
+
+    ;; Hearing (design §5): a noise that reached the guard at level, over
+    ;; the floor's threshold, from (x, y). It raises awareness by more the
+    ;; louder it was over the threshold, and the place becomes where to
+    ;; look; hearing alone never makes the guard certain (HEAR-CAP, short
+    ;; of HUNTING). A hunting guard only takes the place.
+    (define HEAR-BASE 0.08)
+    (define HEAR-GAIN 0.25)
+    (define HEAR-CAP 0.95)
+    (define (guard-hear! g level threshold x y)
+      (when (> level threshold)
+        (vector-set! g S-HEARD 0)
+        (unless (vector-ref g S-SEEN)
+          (vector-set! g S-LSX x) (vector-set! g S-LSY y))
+        (unless (= (vector-ref g S-STATE) HUNTING)
+          (let ((a (vector-ref g S-AWARE)))
+            (when (< a HEAR-CAP)
+              (vector-set! g S-AWARE
+                           (min HEAR-CAP (+ a HEAR-BASE (* HEAR-GAIN (- (/ level threshold) 1.0))))))))))
+    (define (guard-heard? g) (and (>= (vector-ref g S-HEARD) 0) (< (vector-ref g S-HEARD) 30)))
 
     ;; For tests and tools: put the guard at (x, y) facing (fx, fy), as it
     ;; is otherwise (state, awareness, route point).

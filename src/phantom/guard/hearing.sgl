@@ -1,0 +1,141 @@
+;;; (phantom guard hearing) - How sound travels on a floor (design §3, "How
+;;; noise travels"; §5, hearing), both ways: what a guard hears of you, and
+;;; how much of a guard reaches you (the playback's atten, muffled? and
+;;; path-m, topics/phantom-sound-api).
+;;;
+;;; Sound goes room to room through the floor's openings, its sector graph
+;;; (the compiler's rooms and edges). Each opening passes a fraction of it
+;;; (the edge's sound factor: an arch 1, a door 0.9, a grate or hatch 0.8,
+;;; glass 0.3); rooms that share one air volume (a group: the lobby and the
+;;; mezzanine over it) are one space. Between two rooms the path is the
+;;; one that passes the most, found once per floor load; its length is
+;;; walked through the openings' centres, so a guard three metres away
+;;; through a wall but fifteen by the corridor sounds fifteen metres away.
+;;;
+;;; A footstep's noise is its surface's (quiet carpet to ringing grate)
+;;; times its gait (sneaking halves it, running doubles it: §3). It reaches
+;;; a guard as noise x path gain x distance falloff, and he hears it when
+;;; that is over the floor's ambient (the HVAC, the buzz, the city:
+;;; loud places hide you). What he hears raises his awareness and gives him
+;;; a place to check, but never makes him certain: hearing alone stops
+;;; short of HUNTING.
+
+(define-library (phantom guard hearing)
+  (import (sigil core)
+          (sigil math)
+          (phantom play data))
+
+  (export make-hearing hearing? hear-path! hear-gain hear-path-m hear-muffled?
+          step-noise hearing-threshold heard-level
+          SURFACE-NOISE GAIT-NOISE FALLOFF-M MUFFLE-BELOW)
+
+  (begin
+
+    ;; noise at the source, by the surface's noise class
+    (define SURFACE-NOISE
+      '((quiet . 0.35) (moderate . 0.6) (loud . 1.0) (ringing . 1.1) (hollow . 0.9) (duct . 0.5)))
+    (define OTHER-NOISE 0.6)          ; a surface with no class (a desk top, a prop)
+    (define GAIT-NOISE '((sneak . 0.5) (walk . 1.0) (run . 2.0)))
+    (define FALLOFF-M 3.0)            ; full within 3 m, then 3/d
+    (define MUFFLE-BELOW 0.85)        ; an opening passing less than this muffles (glass, a grate)
+
+    (define (lookup key alist default) (let ((e (assq key alist))) (if e (cdr e) default)))
+
+    ;; The noise of one step on the surface with this collision tag at gait.
+    (define (step-noise data tag gait)
+      (let* ((classes (play-surface-noise data))
+             (class (and (>= tag 0) (< tag (vector-length classes)) (cdr (vector-ref classes tag)))))
+        (* (if class (lookup class SURFACE-NOISE OTHER-NOISE) OTHER-NOISE)
+           (lookup gait GAIT-NOISE 1.0))))
+
+    ;; The level a guard needs to hear something over the floor's ambient.
+    (define (hearing-threshold data)
+      (+ 0.1 (* 0.05 (let sum ((l (play-noise-ambient data)) (s 0.0))
+                       (if (null? l) s (sum (cdr l) (+ s (cdar l))))))))
+
+    ;; --- paths ----------------------------------------------------------------------
+
+    ;; The hearing: a vector
+    ;;  0 tag  1 data  2 rooms n  3 best gain per pair (n*n)  4 path per pair
+    ;;  (a vector of edge indices, from the first room's side)  5 out gain
+    ;;  6 out path-m  7 out muffled?
+    (define (hearing? h) (and (vector? h) (= (vector-length h) 8) (eq? (vector-ref h 0) 'hearing)))
+    (define (hear-gain h) (vector-ref h 5))
+    (define (hear-path-m h) (vector-ref h 6))
+    (define (hear-muffled? h) (vector-ref h 7))
+
+    (define (make-hearing data)
+      (let* ((rooms (play-rooms data))
+             (edges (play-edges data))
+             (n (vector-length rooms))
+             (gains (make-vector (* n n) 0.0))
+             (paths (make-vector (* n n) (vector))))
+        ;; from each room, the widest path (the most sound passed) to every
+        ;; other: a Dijkstra on the product, n is small
+        (let each ((src 0))
+          (when (< src n)
+            (let ((best (make-vector n 0.0)) (via (make-vector n '())) (done (make-vector n #f)))
+              (vector-set! best src 1.0)
+              (let round ()
+                (let pick ((i 0) (u -1))
+                  (cond
+                    ((< i n) (pick (+ i 1) (if (and (not (vector-ref done i)) (> (vector-ref best i) 0.0)
+                                                   (or (< u 0) (> (vector-ref best i) (vector-ref best u))))
+                                              i u)))
+                    ((>= u 0)
+                     (vector-set! done u #t)
+                     (let relax ((k 0))
+                       (when (< k (vector-length edges))
+                         (let* ((e (vector-ref edges k))
+                                (a (edge-a e)) (b (edge-b e))
+                                (other (cond ((= a u) b) ((= b u) a) (else -1))))
+                           (when (and (>= other 0) (not (vector-ref done other)))
+                             (let ((g (* (vector-ref best u)
+                                         (if (= (room-group (vector-ref rooms u)) (room-group (vector-ref rooms other)))
+                                             1.0 (edge-sound e)))))
+                               (when (> g (vector-ref best other))
+                                 (vector-set! best other g)
+                                 (vector-set! via other (append (vector-ref via u) (list k)))))))
+                         (relax (+ k 1))))
+                     (round)))))
+              (let fill ((dst 0))
+                (when (< dst n)
+                  (vector-set! gains (+ (* src n) dst) (vector-ref best dst))
+                  (vector-set! paths (+ (* src n) dst) (list->vector (vector-ref via dst)))
+                  (fill (+ dst 1)))))
+            (each (+ src 1))))
+        (vector 'hearing data n gains paths 0.0 0.0 #f)))
+
+    (define (dist x0 y0 x1 y1) (let ((dx (- x1 x0)) (dy (- y1 y0))) (sqrt (+ (* dx dx) (* dy dy)))))
+
+    ;; From (fx fy) in room ra to (tx ty) in room rb: the path's gain, its
+    ;; walked length and whether it is muffled, into (hear-gain h)
+    ;; (hear-path-m h) (hear-muffled? h). A room of -1 (off the floor's rooms)
+    ;; hears nothing. Openings between rooms of one group are not walked
+    ;; through: one air volume is one space.
+    (define (hear-path! h ra fx fy rb tx ty)
+      (let ((n (vector-ref h 2)) (data (vector-ref h 1)))
+        (cond
+          ((or (< ra 0) (< rb 0))
+           (vector-set! h 5 0.0) (vector-set! h 6 (dist fx fy tx ty)) (vector-set! h 7 #t))
+          (else
+           (let* ((path (vector-ref (vector-ref h 4) (+ (* ra n) rb)))
+                  (edges (play-edges data))
+                  (rooms (play-rooms data)))
+             (vector-set! h 5 (vector-ref (vector-ref h 3) (+ (* ra n) rb)))
+             (let walk ((i 0) (x fx) (y fy) (m 0.0) (muffled #f))
+               (if (< i (vector-length path))
+                   (let* ((e (vector-ref edges (vector-ref path i)))
+                          (same (= (room-group (vector-ref rooms (edge-a e))) (room-group (vector-ref rooms (edge-b e))))))
+                     (if same
+                         (walk (+ i 1) x y m muffled)
+                         (walk (+ i 1) (edge-x e) (edge-y e) (+ m (dist x y (edge-x e) (edge-y e)))
+                               (or muffled (< (edge-sound e) MUFFLE-BELOW)))))
+                   (begin
+                     (vector-set! h 6 (+ m (dist x y tx ty)))
+                     (vector-set! h 7 muffled)))))))))
+
+    ;; What arrives of a noise of this level along the last path.
+    (define (heard-level h noise)
+      (let ((m (vector-ref h 6)))
+        (* noise (vector-ref h 5) (if (<= m FALLOFF-M) 1.0 (/ FALLOFF-M m)))))))

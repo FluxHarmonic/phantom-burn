@@ -20,13 +20,17 @@
           (phantom play data)
           (phantom guard nav)
           (phantom guard sense)
-          (phantom guard guard))
+          (phantom guard guard)
+          (phantom guard hearing)
+          (phantom sound logic))
 
   (export make-play play? play-reset! play-tick!
           play-data play-guard play-guard-world
           play-light play-light-01 play-visibility play-shape play-light-state
           play-badge? play-outcome play-ticks play-start-walker
-          play-near-exit? GUARD-START-LEG PICKUP-REACH EXIT-REACH)
+          play-near-exit? GUARD-START-LEG PICKUP-REACH EXIT-REACH
+          play-hearing play-take-steps! play-last-heard play-runner-room
+          play-guard-path!)
 
   (begin
 
@@ -42,7 +46,18 @@
     ;;  6 circuits (floor.sexp's)  7 badge held?  8 outcome  9 ticks
     ;;  10 light (brightness)  11 light 0..1  12 visibility  13 shape
     ;;  14 near the exit without the badge?
-    (define (play? p) (and (vector? p) (= (vector-length p) 15) (eq? (vector-ref p 0) 'play)))
+    ;;  P2: 15 hearing  16 your steps ((phantom sound logic))  17 18 your
+    ;;  last x y  19 the steps for playback since it last took them, newest
+    ;;  first: ((surface gait foot) ...)  20 the hearing threshold
+    ;;  21 the loudest step the guard received this tick (a level)
+    ;;  22 your room
+    (define (play? p) (and (vector? p) (= (vector-length p) 23) (eq? (vector-ref p 0) 'play)))
+    (define (play-hearing p) (vector-ref p 15))
+    (define (play-last-heard p) (vector-ref p 21))
+    (define (play-runner-room p) (vector-ref p 22))
+    ;; the steps since the last call, oldest first, and forget them
+    (define (play-take-steps! p)
+      (let ((s (reverse (vector-ref p 19)))) (vector-set! p 19 '()) s))
     (define (play-data p) (vector-ref p 1))
     (define (play-guard-world p) (vector-ref p 2))
     (define (play-guard p) (vector-ref p 3))
@@ -61,7 +76,8 @@
     (define (make-play coll data circuits)
       (let* ((gw (make-guard-world coll data))
              (p (vector 'play data gw (make-guard gw GUARD-START-LEG) (make-light-state) (make-target)
-                        circuits #f 'playing 0 0.0 0.0 0.0 0.0 #f)))
+                        circuits #f 'playing 0 0.0 0.0 0.0 0.0 #f
+                        (make-hearing data) (make-steps) #f #f '() (hearing-threshold data) 0.0 -1)))
         p))
 
     ;; A new attempt: the guard back at its start, the badge on the desk.
@@ -71,7 +87,46 @@
       (vector-set! p 8 'playing)
       (vector-set! p 9 0)
       (vector-set! p 14 #f)
+      (vector-set! p 16 (make-steps))
+      (vector-set! p 17 #f) (vector-set! p 18 #f)
+      (vector-set! p 19 '())
+      (vector-set! p 21 0.0)
       p)
+
+    ;; The path from the guard to you (for playback: how much of the guard
+    ;; reaches you), into (play-hearing p)'s gain, path-m and muffled?.
+    (define (play-guard-path! p)
+      (let* ((g (vector-ref p 3)) (d (vector-ref p 1))
+             (rg (room-at d (guard-x g) (guard-y g) (guard-z g))))
+        (hear-path! (vector-ref p 15) rg (guard-x g) (guard-y g)
+                    (vector-ref p 22) (vector-ref p 17) (vector-ref p 18))))
+
+    ;; Your steps this tick: timed by (phantom sound logic) from how far you
+    ;; moved, on the surface under you at your gait. Each heel strike is a
+    ;; noise the guard may hear through the rooms between you; each step is
+    ;; kept for playback. No steps while you are in the air or climbing.
+    (define (steps! p w x y z)
+      (let* ((px (or (vector-ref p 17) x)) (py (or (vector-ref p 18) y))
+             (moved (sqrt (+ (* (- x px) (- x px)) (* (- y py) (- y py)))))
+             (data (vector-ref p 1))
+             (room (room-at data x y z)))
+        (vector-set! p 17 x) (vector-set! p 18 y) (vector-set! p 22 room)
+        (vector-set! p 21 0.0)
+        (when (and (walker-grounded? w) (not (walker-mantling? w)))
+          (let* ((tag (walker-surface w))
+                 (gait (gait-for (walker-speed w) (walker-crouching? w)))
+                 (events (steps-advance! (vector-ref p 16) moved TICK (play-surface-name data tag) gait)))
+            (for-each
+             (lambda (e)
+               (vector-set! p 19 (cons (list (cadr e) (caddr e) (car e)) (vector-ref p 19)))
+               (when (eq? (car e) 'heel)
+                 (let* ((g (vector-ref p 3)) (h (vector-ref p 15))
+                        (rg (room-at data (guard-x g) (guard-y g) (guard-z g))))
+                   (hear-path! h room x y rg (guard-x g) (guard-y g))
+                   (let ((level (heard-level h (step-noise data tag gait))))
+                     (vector-set! p 21 (max (vector-ref p 21) level))
+                     (guard-hear! g level (vector-ref p 20) x y)))))
+             events)))))
 
     ;; The walker at the floor's arrival spot, facing as the floor says.
     (define (play-start-walker p coll)
@@ -98,6 +153,7 @@
             (vector-set! p 12 vis)
             (vector-set! p 13 shape)
             (target-set! (vector-ref p 5) x y z (walker-eye-z w) (walker-height w) l01 vis shape)
+            (steps! p w x y z)
             (guard-step! g (vector-ref p 2) (vector-ref p 5) TICK)
             (let ((outcome
                    (cond
