@@ -246,7 +246,7 @@
     ;; tune's whole 2.5 s; the note's chime for 1.6. 9.8 s in all, not 22.5.
     (define EVENT-S 1.6)                  ; a kind not listed below
     (define EVENT-LENGTHS
-      (quote ((door-open . 2.5) (door-close . 0.52) (panel-on . 0.62) (panel-off . 0.44)
+      (quote ((door-open . 2.5) (door-close . 0.52) (panel-on . 0.62) (panel-off . 0.5)
               (reader-ok . 0.54) (reader-deny . 0.5) (badge . 1.06) (caught . 2.5) (note . 1.6))))
     (define (event-seconds kind) (let ((e (assq kind EVENT-LENGTHS))) (if e (cdr e) EVENT-S)))
 

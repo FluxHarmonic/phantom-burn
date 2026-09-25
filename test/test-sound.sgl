@@ -139,11 +139,12 @@
                   (assert-true (> r 0.00316))))
               (bank-slots)))
   (test "a muffled guard step is darker than a clear one (less of it changes sample to sample)"
-    (let* ((diff (lambda (bv) (let ((n (quotient (bytevector-length bv) 4)))
+    ;; on the left channel (the samples are interleaved stereo): frame to frame
+    (let* ((diff (lambda (bv) (let ((n (quotient (bytevector-length bv) 8)))
                                 (let loop ((i 1) (acc 0.0) (all 0.0))
                                   (if (>= i n) (/ acc (max all 1e-12))
-                                      (loop (+ i 1) (+ acc (let ((d (- (f32 bv i) (f32 bv (- i 1))))) (* d d)))
-                                            (+ all (* (f32 bv i) (f32 bv i)))))))))
+                                      (loop (+ i 1) (+ acc (let ((d (- (f32 bv (* 2 i)) (f32 bv (* 2 (- i 1)))))) (* d d)))
+                                            (+ all (* (f32 bv (* 2 i)) (f32 bv (* 2 i))))))))))
            (clear (diff (bank-sample BANK-A '(guard clear 0))))
            (muffled (diff (bank-sample BANK-A '(guard muffled 0)))))
       (assert-true (< muffled (* 0.3 clear))))))
