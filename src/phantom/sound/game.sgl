@@ -58,6 +58,7 @@
                                        t))
                            " steps " (number->string *steps-n*) " events " (number->string *events-n*)
                            " guards " (number->string *guards-n*)
+                           " cues " (number->string (sound-cue-plays *s*))
                            " started " (if (sound-started? *s*) "yes" "no"))))
                (set! *steps-n* 0) (set! *events-n* 0)
                line))))

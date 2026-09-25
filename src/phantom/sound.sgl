@@ -59,7 +59,24 @@
   (export make-sound sound-start! sound-gesture! sound-prepare! sound-frame! sound-step! sound-event! sound-stop!
           sound-render! sound-trace sound-started? sound-bank sound-mixer sound-bed-mixer sound-last-events
           sound-section sound-music-playing?
-          MUSIC-TUNE SURFACE-MAP)
+          sound-cue-plays MUSIC-TUNE SURFACE-MAP)
+  ;; On the web, one-shots play as the audio bridge's CUES: uploaded once, mixed
+  ;; in the AudioWorklet (sigil-wasm-audio's load-audio-cue / play-audio-cue), so
+  ;; a sounding step costs nothing per sample in Sigil (the mixer, per sample in
+  ;; Sigil, cost ~3 ms a frame while walking: the S1 integration's probe). Natively
+  ;; (sigil-audio 0.12.2 has no cues) and headless, the mixer plays them.
+  (cond-expand
+    (wasm (import (only (sigil browser audio-sink) load-audio-cue play-audio-cue)))
+    (else))
+  (cond-expand
+    (wasm (begin
+            (define CUES? #t)
+            (define (cue-load bv) (load-audio-cue bv channels: 2))
+            (define (cue-play c v p) (play-audio-cue c volume: v pan: p))))
+    (else (begin
+            (define CUES? #f)
+            (define (cue-load bv) #f)
+            (define (cue-play c v p) #f))))
   (begin
     (define MUSIC-TUNE #f)                ; no track: Low Embers was rejected (see make-sound)
     (define BANK-MS 3)                    ; the bank renders ~3 ms a frame of play until complete
@@ -84,7 +101,10 @@
     ;; --- state ------------------------------------------------------------------------
     ;; #(rate loader headless? bank mixer you-steps guards music-rule seed
     ;;   ctx sfx-stream music-stream bed-started? music-player bed-mixer sections
-    ;;   last-events costs started? steps-handed? listener music bed-stream bed-pos)
+    ;;   last-events costs started? steps-handed? listener music bed-stream bed-pos
+    ;;   cues cue-plays)
+    ;; cues: ((key . cue) ...), each bank sample uploaded as a cue on its first play
+    ;; (the web); cue-plays: how many one-shots went to the worklet so far
     ;; music: the track's name, or #f (no music: no player and no music stream)
     ;; steps-handed?: the game has called sound-step! (playback stops deriving
     ;; your steps); listener: (x y yaw) from the last frame, for placed events
@@ -102,7 +122,7 @@
               #f #f #f #f #f (make-mixer) #f
               '() (list (cons 'bank 0.0) (cons 'sfx 0.0) (cons 'music 0.0) (cons 'bed 0.0) (cons 'frames 0)) #f #f (list 0.0 0.0 0.0)
               (if (and (pair? opt) (pair? (cdr opt))) (cadr opt) MUSIC-TUNE)
-              #f 0))
+              #f 0 '() 0))
 
     (define (sound-music-playing? s) (and (vector-ref s 13) #t))
 
@@ -187,8 +207,32 @@
     (define (play! s key gain pan)
       (let ((sample (and (>= gain MIN-GAIN) (bank-sample (sound-bank s) key))))
         (when sample
-          (mixer-play! (sound-mixer s) sample gain pan 2)
+          (unless (cue-played! s key sample gain pan)
+            (mixer-play! (sound-mixer s) sample gain pan 2))
           (vector-set! s 16 (cons (list key gain pan) (vector-ref s 16))))))
+
+    (define (sound-cue-plays s) (vector-ref s 25))
+
+    ;; the web, once the sound is started: the sample as a cue (uploaded on its
+    ;; first play), at our gains: pan-gains is equal power (1 a side at the
+    ;; centre), the worklet's cue pan a balance (left = vol x (1 - pan) for pan > 0,
+    ;; right = vol x (1 + pan) for pan < 0), so vol is the louder side and the pan
+    ;; the quieter side's share of it; the same two gains exactly, but vol is
+    ;; capped at 1 (a near, hard-panned, loud step plays a little quieter). #f when
+    ;; there are no cues (natively, headless, or refused): the mixer plays it.
+    (define (cue-played! s key sample gain pan)
+      (and CUES? (not (vector-ref s 2)) (sound-started? s)
+           (let* ((e (assoc key (vector-ref s 24)))
+                  (cue (if e (cdr e)
+                           (let ((c (cue-load sample)))
+                             (when c (vector-set! s 24 (cons (cons key c) (vector-ref s 24))))
+                             c))))
+             (and cue
+                  (let* ((g (pan-gains pan)) (l (* gain (car g))) (r (* gain (cdr g)))
+                         (v (max l r))
+                         (p (cond ((<= v 0.0) 0.0) ((>= r l) (- 1.0 (/ l r))) (else (- (- 1.0 (/ r l)))))))
+                    (and (cue-play cue (min 1.0 v) p)
+                         (begin (vector-set! s 25 (+ 1 (vector-ref s 25))) #t)))))))
 
     (define (guard-entry s i)
       (let loop ((gs (vector-ref s 6)))
