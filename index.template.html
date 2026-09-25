@@ -52,7 +52,7 @@
        way. Each sends the key the keyboard uses (1 office, 2 lobby, 3 FM). */
     #lights { position: fixed; right: 100px; top: 30px; z-index: 3; display: none; gap: 6px;
               font: bold 11px ui-monospace, monospace; -webkit-user-select: none; user-select: none; touch-action: none; }
-    body.touch.playing #lights { display: flex; }
+    body.touch.playing:not(.ontitle) #lights { display: flex; }
     #lights button { color: #CCE6FF; background: rgba(13, 10, 26, 0.72); border: 1px solid rgba(204, 230, 255, 0.4);
                      border-radius: 6px; font: inherit; padding: 0 8px; height: 40px; }
     #lights button.down { background: rgba(204, 230, 255, 0.35); }
@@ -63,6 +63,8 @@
            border-radius: 6px; font: 13px/1.45 ui-monospace, monospace; transition: opacity 0.6s; }
     #how b { font-weight: bold; color: #E6F2FF; }
     #how .phone { display: none; }
+    #how .start { display: none; color: #4DF2D9; font-weight: bold; }
+    body.ontitle #how .start { display: inline; }
     @media (pointer: coarse) { #how .phone { display: inline; } #how .desk { display: none; } }
   </style>
 </head>
@@ -87,6 +89,7 @@
   </div>
   <div id="status"></div>
   <div id="how">
+    <span class="start">Press any key, click or tap to start.<br></span>
     <b>Get the FACILITIES badge from the FM office desk, then leave by the stairwell door under the mezzanine. A guard patrols; if he hunts you down, the floor restarts.</b><br>
     <span class="desk">Click, then WASD and mouse. Shift sneaks, C crouches, Q and E lean. 1 (office), 2 (lobby) and 3 (FM office) switch the lights: the dark hides you. The eye at the bottom shows how visible you are.</span>
     <span class="phone">Left thumb moves, right thumb looks, C crouches. LOBBY, OFFICE and FM (top right) switch the lights: the dark hides you. The eye at the bottom shows how visible you are.</span>
@@ -160,14 +163,39 @@
     // that goes away a moment after the first key, click or touch.
     var playing = params.get("play") !== "0" && !params.has("title");
     if (playing) document.body.classList.add("playing");
-    if (playing) {
-      var how = document.getElementById("how");
-      how.style.display = "block";
-      var hide = function () { how.style.opacity = "0"; setTimeout(function () { how.style.display = "none"; }, 600); };
+    // The flow (the site's front door): the title in the root-console room,
+    // any key, click or tap to play, the title again after a win. Only for
+    // a query with none of the developer's doors, so ?play=1 skips the
+    // title and the gates' own queries (floor=, hud=, title=1, ...) load
+    // exactly what they did.
+    var flow = playing && !["play", "title", "floor", "view", "shot", "card", "hud", "trace", "auto"]
+      .some(function (k) { return params.has(k); });
+    if (flow) document.body.classList.add("flow");
+    var how = document.getElementById("how");
+    var hideTimer = null;
+    function showHow() {
+      if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+      how.style.display = "block"; how.style.opacity = "1";
       ["keydown", "mousedown", "touchstart"].forEach(function (ev) {
-        window.addEventListener(ev, function once() { window.removeEventListener(ev, once, true); setTimeout(hide, 2500); }, true);
+        window.addEventListener(ev, function once() {
+          window.removeEventListener(ev, once, true);
+          if (!hideTimer) hideTimer = setTimeout(function () { how.style.opacity = "0";
+            hideTimer = setTimeout(function () { how.style.display = "none"; hideTimer = null; }, 600); }, 2500);
+        }, true);
       });
     }
+    if (playing) showHow();
+    // the game says which part of the flow it is in; back on the title, the
+    // how-to line and its start line show again
+    (function () {
+      var log1 = console.log.bind(console);
+      console.log = function () {
+        var line = Array.prototype.join.call(arguments, " ");
+        if (line === "phantom-burn: mode title") { document.body.classList.add("ontitle"); showHow(); }
+        if (line === "phantom-burn: mode game") document.body.classList.remove("ontitle");
+        log1.apply(null, arguments);
+      };
+    })();
     if (params.has("trace")) {
       var log = console.log.bind(console);
       console.log = function () {
@@ -184,7 +212,7 @@
       if (app.ready && app.ready.then) app.ready.then(function () { status.textContent = ""; });
       var booted = app.ready && app.ready.then ? app.ready : Promise.resolve();
       booted.then(function () {
-        app.dispatch("params", location.search.replace(/^\?/, ""));
+        app.dispatch("params", location.search.replace(/^\?/, "") + (flow ? "&flow=1" : ""));
         app.dispatch("floor", floor);
         app.dispatch("dpr", String(window.devicePixelRatio || 1));
         window.addEventListener("resize", function () { app.dispatch("dpr", String(window.devicePixelRatio || 1)); });
@@ -197,6 +225,13 @@
         if (params.has("title")) {   // the title's room: its floor.sexp, no collision
           return text("floor.sexp").then(function (t) { app.dispatch("floorinfo", t); },
                                          function () { app.dispatch("nofloor", ""); });
+        }
+        if (flow) {   // the title's room first, beside the floor
+          fetch("assets/floors/root-room/floor.sexp").then(function (r) {
+            if (!r.ok) throw new Error(String(r.status));
+            return r.text();
+          }).then(function (t) { app.dispatch("titleinfo", t); },
+                  function () { app.dispatch("notitle", ""); });
         }
         var info = floor === "stand-in" ? Promise.resolve(null) : text("floor.sexp");
         return info.then(function (t) {
@@ -211,6 +246,8 @@
         }).then(function (t) { app.dispatch("collide", t); });
       }).catch(function (e) { status.textContent = String(e.message || e); });
 
+      // a click or a tap on the title starts (a key does too, in the game)
+      canvas.addEventListener("pointerdown", function () { if (flow) app.dispatch("press", "start"); });
       canvas.addEventListener("click", function () {
         if (document.pointerLockElement !== canvas && canvas.requestPointerLock) canvas.requestPointerLock();
       });

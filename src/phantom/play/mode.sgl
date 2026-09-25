@@ -32,13 +32,14 @@
           (phantom guard guard))
 
   (export play-mode-start! play-mode-active? play-mode-core
+          play-mode-reset! play-mode-set-on-win!
           play-hold? play-after-tick! play-frame! play-hud!)
 
   (begin
 
     (define FADE-OUT 0.9)           ; s, caught: to black
     (define FADE-IN 0.6)            ; s, the floor again
-    (define WIN-HOLD 7.0)           ; s on the win card, then a new attempt
+    (define WIN-HOLD 6.0)           ; s on the win card, then a new attempt (or the title)
 
     (define *core* #f)
     (define *coll* #f)
@@ -89,6 +90,27 @@
 
     (define (play-hold?) (not (eq? *phase* 'play)))
 
+    ;; The site's title-to-play flow: a thunk called once when the win card
+    ;; has been shown (the shell goes back to the title), or #f to start a
+    ;; new attempt there as before.
+    (define *on-win* #f)
+    (define (play-mode-set-on-win! thunk) (set! *on-win* thunk))
+
+    ;; A fresh run from the title: every circuit on, the guard and badge
+    ;; back, attempt 1, and the runner put at the arrival spot on the next
+    ;; tick. (The game's floor must already be the play floor again.)
+    (define (play-mode-reset!)
+      (for-each (lambda (c) (render-circuit-set! c #t)) (render-circuits))
+      (play-reset! *core*)
+      (set! *attempts* 1)
+      (set! *phase* 'play)
+      (set! *timer* 0.0)
+      (set! *fade-in* FADE-IN)
+      (set! *badge-flash* 0.0)
+      (set! *place* #t)
+      ;; the title cleared the guard's draw (its room is not this floor)
+      (render-set-extra-draw! draw-guard!))
+
     (define (play-after-tick! w)
       (set! *timer* (+ *timer* TICK))
       (set! *fade-in* (max 0.0 (- *fade-in* TICK)))
@@ -99,7 +121,12 @@
          (if (>= *timer* FADE-OUT) (restart-walker) #f))
         ((eq? *phase* 'won)
          (guard-hold! (play-guard *core*))
-         (if (>= *timer* WIN-HOLD) (restart-walker) #f))
+         (cond ((< *timer* WIN-HOLD) #f)
+               (*on-win*
+                ;; hold the card until the shell has gone to the title
+                (when (< *timer* (+ WIN-HOLD TICK)) (*on-win*))
+                #f)
+               (else (restart-walker))))
         (*place*
          ;; the first tick of the first attempt: put the runner at the
          ;; arrival spot; the rules start on the next tick, from there
