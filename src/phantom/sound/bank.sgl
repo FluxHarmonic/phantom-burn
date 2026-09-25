@@ -3,7 +3,7 @@
 ;;; S1. David's phone (S0 bench, 2026-09-25) pays ~2 ms a frame for each motif
 ;;; player even when it is silent, so the game does not play a footstep on a
 ;;; player: it renders every short sound ONCE, on one player, into a bank of
-;;; mono samples, and a small mixer plays them. The bank is one generated tune
+;;; stereo samples, and a small mixer plays them. The bank is one generated tune
 ;;; with a slot per sample (SLOT-S seconds each); rendering it and cutting it
 ;;; at the slot boundaries gives the samples, the same bytes every time.
 ;;;
@@ -24,9 +24,9 @@
 ;;; after the bed. They are longer than a slot and carry the sketchbook's small
 ;;; reverb, so they are not slots.
 ;;;
-;;; Stages, one player at a time: the slots, the bed, then each event. A sample
-;;; is usable as soon as its own stage is done (the steps do not wait for the
-;;; bed, nor the bed for the events).
+;;; Stages, one player at a time: the slots, then each event, then the bed. A sample
+;;; is usable as soon as its own stage is done (the steps wait for nothing, the
+;;; events only for the steps; the bed, a quiet drone, comes last).
 ;;;
 ;;;   (bank-tune-text)       the bank's tune, as text
 ;;;   (bank-slots)           ((key . slot) ...)
@@ -34,9 +34,9 @@
 ;;;                          text or #f, for the events (a kind it has no text for
 ;;;                          is skipped: silence). (bank-render! b frames) renders up
 ;;;                          to that many frames and answers #t when complete
-;;;   (bank-sample b key)    the key's mono f32 bytevector, or #f until rendered
+;;;   (bank-sample b key)    the key's stereo f32 bytevector, or #f until rendered
 ;;;   (bank-render-for! b ms) the same, for about ms milliseconds of work (the frame budget)
-;;;   (bank-bed-loop b)      the hum and room air as a seamless mono loop (BED-LOOP-S s), once ready
+;;;   (bank-bed-loop b)      the hum and room air as a seamless stereo loop (BED-LOOP-S s), once ready
 ;;;   (bank-ready? b)
 
 (define-library (phantom sound bank)
@@ -48,11 +48,29 @@
           (motif tune)
           (motif tune player))
   (export bank-tune-text bank-slots make-bank bank-render! bank-render-for! bank-sample bank-ready? bank-rate
+          bank-events-ready?
           bank-bed-loop crossfade-loop BED-TUNE-TEXT BED-LOOP-S
           SLOT-S BANK-SURFACES EVENT-KINDS EVENT-S event-seconds)
   (begin
-    (define SLOT-S 0.6)
-    (define SLOT-ROWS 30)                 ; tempo 125, speed 1: a row is 20 ms
+    (define SLOT-S 0.6)                   ; the longest slot (the grate rings through it)
+    (define ROW-S 0.02)                   ; tempo 125, speed 1: a row is 20 ms
+
+    ;; Each slot is as long as its sound (measured: the last sample above -60
+    ;; dBFS, plus ~15%, in rows): rendering silence costs as much as sound
+    ;; (a motif player is ~40 ms a second of audio even silent), and the bank
+    ;; has to be ready soon after the start press. The grate rings through
+    ;; its 0.6 s. (S1 integration, 2026-09-26; test/measure-bank.sgl's run.)
+    (define (slot-rows key)
+      (case (car key)
+        ((step) (let ((surface (cadr key)) (heel? (eq? (caddr key) 'heel)))
+                  (case surface
+                    ((carpet) 22)
+                    ((tile) (if heel? 11 18))
+                    ((marble) (if heel? 10 16))
+                    ((grate) 30)
+                    (else (if heel? 11 9)))))
+        ((guard) (if (eq? (cadr key) 'clear) 7 11))
+        (else (if (eq? (cadr key) 'there) 19 25))))
     (define BANK-SURFACES '(carpet tile marble grate raised))
 
     ;; (surface heel-patch heel-layers toe-patch toe-layers rattle-patch heel-notes)
@@ -111,6 +129,14 @@
       (let loop ((es (plan)) (i 0) (acc '()))
         (if (null? es) (reverse acc) (loop (cdr es) (+ i 1) (cons (cons (car (car es)) i) acc)))))
 
+    ;; ((key start-row rows) ...): where each slot sits in the bank's tune
+    (define (slot-layout)
+      (let loop ((es (plan)) (at 0) (acc '()))
+        (if (null? es) (reverse acc)
+            (let ((r (slot-rows (car (car es)))))
+              (loop (cdr es) (+ at r) (cons (list (car (car es)) at r) acc))))))
+    (define (slot-total-rows) (apply + (map caddr (slot-layout))))
+
     (define (num x) (number->string x))
 
     (define (instrument-text id name patch layers gain)
@@ -135,8 +161,8 @@
     ;; Channels: one per surface (carpet 1, tile 2, marble 3, grate 4 with its rattle
     ;; on 5, raised 6), the guard 7, the stings 8: motif plays at most 8 voices a
     ;; channel, instruments and their layers counted (the first test run, all on
-    ;; one channel, was refused). Nothing rings into the next slot: 0.6 s is longer
-    ;; than any of these sounds.
+    ;; one channel, was refused). Nothing rings into the next slot: each slot is
+    ;; longer than its sound (slot-rows).
     (define (channel-of key)
       (case (car key)
         ((step) (case (cadr key) ((carpet) 1) ((tile) 2) ((marble) 3) ((grate) 4) (else 6)))
@@ -144,18 +170,19 @@
         (else 8)))
     (define (bank-tune-text)
       (let* ((entries (plan))
+             (starts (map cadr (slot-layout)))
              (events
                (apply append
-                      (map (lambda (e i)
-                             (let ((base (* i SLOT-ROWS)) (inst (cadr e)) (notes (caddr e)))
+                      (map (lambda (e base)
+                             (let ((inst (cadr e)) (notes (caddr e)))
                                (map (lambda (n k)
                                       ;; a grate heel's later notes are its rattle, on channel 2
                                       (let ((rattle? (and (> k 0) (eq? (car (car e)) 'step)
                                                           (eq? (list-ref (car e) 2) 'heel) (eq? (cadr (car e)) 'grate))))
                                         (list (+ base (car n)) (if rattle? 5 (channel-of (car e))) (cadr n) (if rattle? (+ inst 2) inst) (caddr n))))
                                     notes (iota (length notes)))))
-                           entries (iota (length entries)))))
-             (total (* SLOT-ROWS (length entries)))
+                           entries starts)))
+             (total (slot-total-rows))
              (npat (quotient (+ total 255) 256))
              (cell (lambda (e) (string-append " (" (num (list-ref e 1)) " \"" (list-ref e 2) "\" "
                                               (num (list-ref e 3)) " " (num (list-ref e 4)) " \"000\")")))
@@ -213,82 +240,97 @@
     ;; the kinds agreed with P2 (topics/phantom-sound-api); each tune is 125 rows
     ;; of 20 ms, the event at row 0, rendered for its first (event-seconds KIND) seconds
     (define EVENT-KINDS '(door-open door-close panel-on panel-off reader-ok reader-deny badge caught note))
-    ;; each event renders for its own length: EVENT-S, 1.6 s, is enough for seven
-    ;; of the nine (the tests hold each silent in its last 100 ms); the stairwell
-    ;; air (door-open) and the capture (caught) ring on, so they get the tune's
-    ;; whole 2.5 s. 28% less to render than 2.5 s for all.
-    (define EVENT-S 1.6)
-    (define EVENT-LONG (quote ((door-open . 2.5) (caught . 2.5))))
-    (define (event-seconds kind) (let ((e (assq kind EVENT-LONG))) (if e (cdr e) EVENT-S)))
+    ;; each event renders for its own length: its sound measured (the last sample
+    ;; above -60 dBFS, plus ~15%; the tests hold each quiet in its last 100 ms).
+    ;; The stairwell air (door-open) and the capture (caught) ring on for the
+    ;; tune's whole 2.5 s; the note's chime for 1.6. 9.8 s in all, not 22.5.
+    (define EVENT-S 1.6)                  ; a kind not listed below
+    (define EVENT-LENGTHS
+      (quote ((door-open . 2.5) (door-close . 0.52) (panel-on . 0.62) (panel-off . 0.44)
+              (reader-ok . 0.54) (reader-deny . 0.5) (badge . 1.06) (caught . 2.5) (note . 1.6))))
+    (define (event-seconds kind) (let ((e (assq kind EVENT-LENGTHS))) (if e (cdr e) EVENT-S)))
 
     ;; --- rendering -------------------------------------------------------------------------------
-    ;; Stages, each one player opened once: the slots, the bed, then each event.
-    ;; #(player rate mono done total samples slot-frames stage bed-loop slots loader kinds-left)
-    ;;   stage: 'slots | 'bed | (event KIND) | 'ready; mono/done/total are the
-    ;;   current stage's; samples: ((key . bv) ...), the cut slots and the events;
-    ;;   slots: the slots' buffer once that stage is done (mono again when ready)
+    ;; Stages, each one player opened once, in the order the game needs them: the
+    ;; slots (your steps, the guard's), then each event, then the bed (it is a
+    ;; quiet drone now; nothing waits on it). Every sample is STEREO f32, the
+    ;; player's own output copied natively: folding it to mono sample by sample
+    ;; in Sigil cost more than motif's render (10 s of the slots' tune: 5.2 s to
+    ;; pull, 6.2 s more to fold, natively).
+    ;; #(player rate buf done total samples layout stage bed-loop slots loader kinds-left)
+    ;;   stage: 'slots | (event KIND) | 'bed | 'ready; buf/done/total are the
+    ;;   current stage's (frames); samples: ((key . bv) ...), the cut slots and the
+    ;;   events; layout: ((key start-frame frames) ...); slots: the slots' buffer
+    ;;   once that stage is done (buf again when ready)
+    (define (rows->frames rows rate) (exact (round (* rows ROW-S rate))))
+
     (define (make-bank rate . opt)
       (let* ((t (read-tune-string (bank-tune-text)))
-             (slots (length (plan)))
-             (slot-frames (exact (round (* SLOT-S rate))))
-             (total (* slots slot-frames)))
-        (vector (open-tune-player t rate) rate (make-bytevector (* 4 total) 0) 0 total '() slot-frames 'slots #f #f
+             (layout (map (lambda (e) (list (car e) (rows->frames (cadr e) rate) (rows->frames (caddr e) rate)))
+                          (slot-layout)))
+             (total (rows->frames (slot-total-rows) rate)))
+        (vector (open-tune-player t rate) rate (make-bytevector (* 8 total) 0) 0 total '() layout 'slots #f #f
                 (if (pair? opt) (car opt) (lambda (name) #f)) EVENT-KINDS)))
 
     (define (bank-rate b) (vector-ref b 1))
     (define (bank-ready? b) (eq? (vector-ref b 7) 'ready))
+    ;; every event rendered (or skipped): the bed's stage or later
+    (define (bank-events-ready? b) (and (memq (vector-ref b 7) '(bed ready)) #t))
     (define (bank-bed-loop b) (vector-ref b 8))
 
     (define BLOCK 1024)
-    (define *buf* (make-bytevector (* 8 BLOCK) 0))
 
-    ;; one pull of the current stage into its mono buffer
+    ;; one pull of the current stage, straight into its stereo buffer
     (define (pull-block! b)
-      (let* ((p (vector-ref b 0)) (mono (vector-ref b 2)) (done (vector-ref b 3))
+      (let* ((done (vector-ref b 3))
              (n (min BLOCK (- (vector-ref b 4) done))))
-        (player-pull! p *buf* 0 n)
-        (let fill ((i 0))
-          (when (< i n)
-            (bytevector-ieee-single-set! mono (* 4 (+ done i))
-                                         (* 0.5 (+ (bytevector-ieee-single-ref *buf* (* 8 i) 'little)
-                                                   (bytevector-ieee-single-ref *buf* (+ 4 (* 8 i)) 'little)))
-                                         'little)
-            (fill (+ i 1))))
+        (player-pull! (vector-ref b 0) (vector-ref b 2) (* 8 done) n)
         (vector-set! b 3 (+ done n))))
 
     (define (f32 bv i) (bytevector-ieee-single-ref bv (* 4 i) 'little))
 
-    ;; A seamless loop of l frames from src, starting w frames in: its first x
-    ;; frames are crossfaded (equal power) with the x that follow its end, so its
-    ;; last frame and its first are neighbours in src (src needs w + l + x frames).
-    (define (crossfade-loop src w l x)
-      (let ((loop-bv (make-bytevector (* 4 l) 0)))
+    ;; A seamless loop of l frames of `channels` interleaved f32 from src,
+    ;; starting w frames in: its first x frames are crossfaded (equal power) with
+    ;; the x that follow its end, so its last frame and its first are neighbours
+    ;; in src (src needs w + l + x frames). Only the crossfade is computed per
+    ;; sample; the rest is copied natively.
+    (define (crossfade-loop src w l x . opt)
+      (let* ((ch (if (pair? opt) (car opt) 1))
+             (fb (* 4 ch))
+             (loop-bv (make-bytevector (* fb l) 0)))
+        (bytevector-copy! loop-bv (* fb x) src (* fb (+ w x)) (* fb (+ w l)))
         (let fill ((i 0))
-          (when (< i l)
-            (let ((v (if (< i x)
-                         (let ((a (* (/ i (* 1.0 x)) 1.5707963267948966)))
-                           (+ (* (f32 src (+ w i)) (sin a)) (* (f32 src (+ w l i)) (cos a))))
-                         (f32 src (+ w i)))))
-              (bytevector-ieee-single-set! loop-bv (* 4 i) v (quote little)))
+          (when (< i x)
+            (let ((a (* (/ i (* 1.0 x)) 1.5707963267948966)))
+              (let chan ((c 0))
+                (when (< c ch)
+                  (bytevector-ieee-single-set! loop-bv (* 4 (+ c (* ch i)))
+                                               (+ (* (f32 src (+ c (* ch (+ w i)))) (sin a))
+                                                  (* (f32 src (+ c (* ch (+ w l i)))) (cos a)))
+                                               (quote little))
+                  (chan (+ c 1)))))
             (fill (+ i 1))))
         loop-bv))
 
-    ;; open a stage: its player, a fresh buffer of `total` frames
+    ;; open a stage: its player, a fresh stereo buffer of `total` frames
     (define (open-stage! b player total stage)
       (vector-set! b 0 player)
-      (vector-set! b 2 (make-bytevector (* 4 total) 0))
+      (vector-set! b 2 (make-bytevector (* 8 total) 0))
       (vector-set! b 3 0)
       (vector-set! b 4 total)
       (vector-set! b 7 stage))
 
-    ;; the next event the loader has a tune for, or ready when none is left
+    (define (open-bed! b)
+      (let ((rate (vector-ref b 1)))
+        (open-stage! b (open-tune-player (read-tune-string BED-TUNE-TEXT) rate loop: #t)
+                     (exact (round (* (+ BED-WARM-S BED-LOOP-S BED-XFADE-S) rate))) 'bed)))
+
+    ;; the next event the loader has a tune for, or the bed when none is left
     (define (next-event! b)
       (let loop ()
         (let ((left (vector-ref b 11)))
           (if (null? left)
-              (begin (vector-set! b 0 #f)
-                     (vector-set! b 2 (vector-ref b 9))   ; the slots' buffer, as before the events
-                     (vector-set! b 7 'ready))
+              (open-bed! b)
               (let* ((kind (car left))
                      (text ((vector-ref b 10) (string-append "event-" (symbol->string kind)))))
                 (vector-set! b 11 (cdr left))
@@ -305,14 +347,16 @@
         (cond
           ((eq? stage 'slots)
            (vector-set! b 9 (vector-ref b 2))                      ; keep the slots' buffer
-           (open-stage! b (open-tune-player (read-tune-string BED-TUNE-TEXT) rate loop: #t)
-                        (exact (round (* (+ BED-WARM-S BED-LOOP-S BED-XFADE-S) rate))) 'bed))
+           (next-event! b))
           ((eq? stage 'bed)
            (vector-set! b 8 (crossfade-loop (vector-ref b 2)
                                             (exact (round (* BED-WARM-S rate)))
                                             (exact (round (* BED-LOOP-S rate)))
-                                            (exact (round (* BED-XFADE-S rate)))))
-           (next-event! b))
+                                            (exact (round (* BED-XFADE-S rate)))
+                                            2))
+           (vector-set! b 0 #f)
+           (vector-set! b 2 (vector-ref b 9))                      ; the slots' buffer, as before
+           (vector-set! b 7 'ready))
           (else                                                    ; (event KIND): the whole render is the sample
            (vector-set! b 5 (cons (cons stage (vector-ref b 2)) (vector-ref b 5)))
            (next-event! b)))))
@@ -341,15 +385,15 @@
             (when (< (- (current-milliseconds) t0) ms) (loop))))
         (bank-ready? b)))
 
-    ;; the key's samples: an event's once its stage is done; a slot's cut from
-    ;; the slots' buffer on first use, once the slots' stage is done
+    ;; the key's stereo samples: an event's once its stage is done; a slot's cut
+    ;; from the slots' buffer on first use, once the slots' stage is done
     (define (bank-sample b key)
       (let ((hit (assoc key (vector-ref b 5))))
         (if hit (cdr hit)
-            (let ((slot (assoc key (bank-slots))) (buf (vector-ref b 9)))
+            (let ((slot (assoc key (vector-ref b 6))) (buf (vector-ref b 9)))
               (and slot buf
-                   (let* ((sf (vector-ref b 6))
-                          (s (make-bytevector (* 4 sf) 0)))
-                     (bytevector-copy! s 0 buf (* 4 sf (cdr slot)) (* 4 sf (+ 1 (cdr slot))))
+                   (let* ((start (cadr slot)) (n (caddr slot))
+                          (s (make-bytevector (* 8 n) 0)))
+                     (bytevector-copy! s 0 buf (* 8 start) (* 8 (+ start n)))
                      (vector-set! b 5 (cons (cons key s) (vector-ref b 5)))
                      s))))))))

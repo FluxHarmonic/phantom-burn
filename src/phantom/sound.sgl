@@ -90,7 +90,7 @@
     ;; your steps); listener: (x y yaw) from the last frame, for placed events
     ;; The bed (the hum and the room air) is a loop in bed-mixer, from the bank
     ;; (bank-bed-loop), started once the bed's stage is done: no player of its own.
-    ;; Live, the loop is copied natively into its own MONO stream (bed-stream, at
+    ;; Live, the loop is copied natively into its own stereo stream (bed-stream, at
     ;; BED-GAIN as the stream's volume; bed-pos its place in the loop): mixing it
     ;; in per sample cost more than everything else (the S1 integration's trace);
     ;; the bed-mixer is the headless render's.
@@ -148,7 +148,7 @@
           (let ((ctx (vector-ref s 9)))
             (when ctx (guard (e (#t #f)) (audio-context-resume ctx))))
           (vector-set! s 10 (open-stream))
-          (vector-set! s 22 (guard (e (#t #f)) (open-audio-stream channels: 1 buffer-frames: BUFFER volume: BED-GAIN)))
+          (vector-set! s 22 (guard (e (#t #f)) (open-audio-stream channels: 2 buffer-frames: BUFFER volume: BED-GAIN)))
           (when (vector-ref s 21)
             (vector-set! s 11 (open-stream))
             (when (vector-ref s 11) (set-audio-stream-volume! (vector-ref s 11) MUSIC-GAIN))))
@@ -182,10 +182,12 @@
       (vector-set! s 18 #f))
 
     ;; --- a frame --------------------------------------------------------------------------------
+    ;; a one-shot under MIN-GAIN (-50 dB: a far guard's step) is not mixed at all
+    (define MIN-GAIN 0.003)
     (define (play! s key gain pan)
-      (let ((sample (bank-sample (sound-bank s) key)))
+      (let ((sample (and (>= gain MIN-GAIN) (bank-sample (sound-bank s) key))))
         (when sample
-          (mixer-play! (sound-mixer s) sample gain pan)
+          (mixer-play! (sound-mixer s) sample gain pan 2)
           (vector-set! s 16 (cons (list key gain pan) (vector-ref s 16))))))
 
     (define (guard-entry s i)
@@ -237,7 +239,7 @@
       (bank-slice! s BANK-MS)
       (when (sound-started? s) (open-players! s))
       (when (and (sound-started? s) (bank-bed-loop (sound-bank s)) (not (vector-ref s 12)))
-        (mixer-loop! (sound-bed-mixer s) (bank-bed-loop (sound-bank s)) BED-GAIN)
+        (mixer-loop! (sound-bed-mixer s) (bank-bed-loop (sound-bank s)) BED-GAIN 2)
         (vector-set! s 12 #t))
       (let* ((lx (list-ref you 0)) (ly (list-ref you 1)) (yaw (list-ref you 2)))
         (vector-set! s 20 (list lx ly yaw))
@@ -302,15 +304,15 @@
                                        'little)
           (add (+ i 1)))))
 
-    ;; the bed's mono stream: n frames of the loop from bed-pos, copied (wrapping)
+    ;; the bed's stereo stream: n frames of the loop from bed-pos, copied (wrapping)
     (define (bed-fill! s b n)
       (let ((l (bank-bed-loop (sound-bank s))))
         (let loop ((at 0))
           (when (< at n)
-            (let* ((len (quotient (bytevector-length l) 4))
+            (let* ((len (quotient (bytevector-length l) 8))
                    (pos (if (>= (vector-ref s 23) len) 0 (vector-ref s 23)))
                    (k (min (- n at) (- len pos))))
-              (bytevector-copy! b (* 4 at) l (* 4 pos) (* 4 (+ pos k)))
+              (bytevector-copy! b (* 8 at) l (* 8 pos) (* 8 (+ pos k)))
               (vector-set! s 23 (+ pos k))
               (loop (+ at k)))))))
 
