@@ -17,6 +17,7 @@
 ;;;   ("press", "KEY")       a button on the page (the crouch button sends c)
 ;;;   ("dpr", "N")           window.devicePixelRatio, at boot and on a resize
 ;;;   ("floorinfo", TEXT)    a compiled floor's floor.sexp (before its assets load)
+;;;   ("playinfo", TEXT)     ?play=1: the floor's play.sexp (before the collision)
 
 (define-library (phantom shell web)
   (import (sigil core)
@@ -28,7 +29,8 @@
           (phantom render)
           (phantom game)
           (phantom title)
-          (phantom stand-in))
+          (phantom stand-in)
+          (phantom play mode))
 
   (export web-main web-dispatch)
 
@@ -41,6 +43,7 @@
     (define *params-seen* #f)    ; nothing is fetched before the page names the floor
     (define *fetches* '())       ; (name . handle)
     (define *collide* #f)        ; the base64 text, once the page sends it
+    (define *play-text* #f)      ; ?play=1: the floor's play.sexp, sent before the collision
     (define *started* #f)        ; #f, #t, or 'failed
     (define *said-ready* #f)
     (define *last-ms* #f)
@@ -143,6 +146,11 @@
       (game-init! load-mesh* load-texture* (pbc1->collision (base64->bytevector *collide*)) *info*)
       (set! *collide* #f)
       (apply-params!)
+      (when (and *play-text* *info*)
+        (play-mode-start! (game-collision) *info* *play-text* (not (param "view")))
+        (set! *play-text* #f)
+        (game-set-play! (vector play-hold? play-after-tick! play-frame! play-hud!))
+        (unless (param "hud") (game-set-hud! 0)))
       (set! *started* #t))
 
     ;; ?title=1: the title screen, which needs no floor.
@@ -267,5 +275,8 @@
              0)
             ((string=? type "collide")
              (set! *collide* payload)
+             0)
+            ((string=? type "playinfo")
+             (set! *play-text* payload)
              0)
             (else 0)))))

@@ -45,6 +45,14 @@
     #labgrid button.down { background: rgba(204, 230, 255, 0.35); }
     #labgrid .sep { grid-column: 1 / -1; height: 1px; background: rgba(204, 230, 255, 0.2); }
     body.touch #crouch { display: block; }
+    /* ?play=1: how to play, over the bottom of the frame until the first input */
+    #how { display: none; position: fixed; left: 50%; bottom: 64px; transform: translateX(-50%); z-index: 3;
+           max-width: min(92vw, 640px); padding: 10px 14px; box-sizing: border-box; pointer-events: none;
+           color: #CCE6FF; background: rgba(13, 10, 26, 0.82); border: 1px solid rgba(204, 230, 255, 0.35);
+           border-radius: 6px; font: 13px/1.45 ui-monospace, monospace; transition: opacity 0.6s; }
+    #how b { font-weight: bold; color: #E6F2FF; }
+    #how .phone { display: none; }
+    @media (pointer: coarse) { #how .phone { display: inline; } #how .desk { display: none; } }
   </style>
 </head>
 <body>
@@ -66,6 +74,11 @@
     </div>
   </div>
   <div id="status"></div>
+  <div id="how">
+    <b>Get the FACILITIES badge from the FM office desk, then leave by the stairwell door under the mezzanine. A guard patrols; if he hunts you down, the floor restarts.</b><br>
+    <span class="desk">Click, then WASD and mouse. Shift sneaks, C crouches, Q and E lean. 1 2 3 switch the lights: the dark hides you. The eye at the bottom shows how visible you are.</span>
+    <span class="phone">Left thumb moves, right thumb looks, C crouches. LAB, then C1 C2 C3, switches the lights: the dark hides you. The eye at the bottom shows how visible you are.</span>
+  </div>
   <script>
   // Phantom Burn's page. The generic loader (sigil-web-app.js) boots the
   // wasm, forwards keydown/keyup and runs the frame loop. This page adds:
@@ -86,6 +99,8 @@
   //                   host (report?LINE, the host's log), so the phone's numbers
   //                   need no transcribing; ?auto walks by itself
   //     ?title=1      the title screen (its own scene; no floor)
+  //     ?play=1       P1's game: the guard, the badge and the exit (the floor's
+  //                   play.sexp, sent as ("playinfo", TEXT) before the collision)
   //     ?card         the test card (a sweep of the colour cube) through the post pass
   //     ?touch        show the phone controls without a touch screen
   //   the collision (assets/NAME/floor14.collide.b64) as ("collide", BASE64);
@@ -105,6 +120,17 @@
       document.addEventListener("sigil-web-app-ready", function (e) { fn(e.detail); }, { once: true });
     }
     if (params.has("touch")) document.body.classList.add("touch");
+    // ?play=1: P1's game (the guard, the badge, the exit), with a how-to-play
+    // line that goes away on the first key, click or touch.
+    var playing = params.has("play") && params.get("play") !== "0";
+    if (playing) {
+      var how = document.getElementById("how");
+      how.style.display = "block";
+      var hide = function () { how.style.opacity = "0"; setTimeout(function () { how.style.display = "none"; }, 600); };
+      ["keydown", "mousedown", "touchstart"].forEach(function (ev) {
+        window.addEventListener(ev, function once() { window.removeEventListener(ev, once, true); setTimeout(hide, 2500); }, true);
+      });
+    }
     if (params.has("trace")) {
       var log = console.log.bind(console);
       console.log = function () {
@@ -134,6 +160,9 @@
         var info = floor === "stand-in" ? Promise.resolve(null) : text("floor.sexp");
         return info.then(function (t) {
           if (t !== null) app.dispatch("floorinfo", t);
+          return playing && floor !== "stand-in" ? text("play.sexp") : null;
+        }).then(function (t) {
+          if (t !== null) app.dispatch("playinfo", t);
           return text(collideFile);
         }).then(function (t) { app.dispatch("collide", t); });
       }).catch(function (e) { status.textContent = String(e.message || e); });
