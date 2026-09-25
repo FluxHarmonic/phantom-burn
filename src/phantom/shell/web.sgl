@@ -43,7 +43,8 @@
           (phantom stand-in)
           (phantom walker)
           (phantom floor replay)
-          (phantom play mode))
+          (phantom play mode)
+          (phantom sound game))
 
   (export web-main web-dispatch)
 
@@ -69,6 +70,19 @@
     (define *look-y* 0)
     (define *move-x* 0.0) (define *move-y* 0.0)
     (define *stick-x* 0.0) (define *stick-y* 0.0)
+
+    ;; S1's sound ((phantom sound game)): the page fetches its tunes
+    ;; (SOUND-TUNES) and hands each over as ("tune", "NAME\nTEXT"); the loader
+    ;; answers from what has landed. ?mute=1: no sound at all. ?trace=1: a
+    ;; line of the sound's costs every 120 frames.
+    (define *tunes* '())
+    (define (tune-loader name) (let ((e (assoc name *tunes*))) (and e (cdr e))))
+    (define *sound-frames* 0)
+    (define (sound-traced!)
+      (set! *sound-frames* (+ *sound-frames* 1))
+      (when (and (param "trace") (= 0 (modulo *sound-frames* 120)))
+        (let ((t (sound-game-trace)))
+          (when t (display "phantom-burn: sound ") (write t) (newline)))))
 
     (define (param key) (let ((p (assoc key *params*))) (and p (cdr p))))
 
@@ -288,7 +302,9 @@
       (set! *mode* 'title)
       (display "phantom-burn: mode title") (newline))
 
-    (define (flow-to-title!) (flow-title-start!))
+    (define (flow-to-title!)
+      (sound-game-stop!)
+      (flow-title-start!))
 
     ;; The floor's game, from the title: the first time as the game starts
     ;; (once its files have landed: web-tick* waits for them), after that by
@@ -306,8 +322,9 @@
 
     (define (flow-title-tick payload)
       (let ((dt (frame-dt payload)))
-        ;; the floor's files load behind the title
+        ;; the floor's files load behind the title, and the sound's bank renders
         (prefetch-game!)
+        (sound-game-idle!)
         (when (and (not *t-info*) *t-info-text*)
           (let ((text *t-info-text*))
             (set! *t-info-text* #f)
@@ -370,6 +387,9 @@
                  (set! *pressed* '())
                  (game-frame! dt (gles3-canvas-width) (gles3-canvas-height)
                               (make-controls held? pressed dx dy *move-x* *move-y* *stick-x* *stick-y*))
+                 ;; the sound: P2's feed for this frame (steps, events, you, the guard)
+                 (sound-game-frame! dt (game-walker))
+                 (sound-traced!)
                  ;; ready once the first frame is drawn (shots wait for this line)
                  (unless *said-ready*
                    (set! *said-ready* #t)
@@ -377,6 +397,7 @@
               ((eq? *started* 'failed) #f)
               ((all-ready?) (start!))
               (else
+               (sound-game-idle!)
                ;; a fetch that fails never becomes ready, and the bridge
                ;; cannot tell Sigil it failed: after 20 s, say what is missing
                (when *params-seen* (set! *waited* (+ *waited* dt)))
@@ -454,6 +475,21 @@
              (set! *params* (split-query payload))
              (set! *params-seen* #t)
              (when (param "floor") (set! *floor* (param "floor")))
+             (unless (param "mute") (sound-game-init! tune-loader))
+             0)
+            ((string=? type "tune")
+             ;; "NAME\nTEXT": one of SOUND-TUNES, fetched by the page
+             (let loop ((i 0))
+               (cond ((>= i (string-length payload)) #f)
+                     ((char=? (string-ref payload i) #\newline)
+                      (set! *tunes* (cons (cons (substring payload 0 i) (substring payload (+ i 1) (string-length payload)))
+                                          *tunes*)))
+                     (else (loop (+ i 1)))))
+             0)
+            ((string=? type "gesture")
+             ;; a user gesture (the page sends pointerup, touchend, click, keydown):
+             ;; a browser starts audio only inside one
+             (sound-game-gesture!)
              0)
             ((string=? type "dpr")
              (render-set-dpr! (string->number payload))

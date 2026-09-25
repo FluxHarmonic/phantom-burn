@@ -129,13 +129,30 @@
   //     half a look stick, each ("move"|"lookstick", "x,y") in -1..1; the C
   //     button is ("press", "c"); the LAB button (top left) opens the style
   //     lab's keys as buttons, each ("press", KEY), for the phone.
+  //   S1's sound: the tunes it renders (assets/tunes/NAME.cts, the game's
+  //     SOUND-TUNES) as ("tune", "NAME\nTEXT"); every user gesture as
+  //     ("gesture", TYPE), since a browser starts audio only inside one; the
+  //     AudioContext at 44100 Hz (the game renders at that rate and the bridge
+  //     does not resample). ?mute=1: no sound.
   //   window.phantomDispatch("replay", SCRIPT): gate 5's driver hands the game
   //     a replay script ((phantom floor replay)'s text form); the game prints
   //     "phantom-burn: replay LINE" per tick, then "phantom-burn: replay-done N".
   (function () {
     "use strict";
     var params = new URLSearchParams(location.search);
-    var floor = (params.get("floor") || (params.has("title") ? "root-room" : "14-slice")).replace(/[^A-Za-z0-9_-]/g, "");
+    // S1's sound renders at 44100 Hz: the bridge opens `new AudioContext()`
+    // with no options, so the page supplies the rate (the browser resamples
+    // to the device)
+    var SOUND_RATE = 44100;
+    (function () {
+      var Base = window.AudioContext || window.webkitAudioContext;
+      if (!Base || params.has("mute")) return;
+      var Wrapped = function (opts) { return new Base(Object.assign({ sampleRate: SOUND_RATE }, opts || {})); };
+      Wrapped.prototype = Base.prototype;
+      window.AudioContext = Wrapped;
+      if (window.webkitAudioContext) window.webkitAudioContext = Wrapped;
+    })();
+    var floor =(params.get("floor") || (params.has("title") ? "root-room" : "14-slice")).replace(/[^A-Za-z0-9_-]/g, "");
     var dir = floor === "stand-in" ? "assets/stand-in/" : "assets/floors/" + floor + "/";
     var collideFile = floor === "stand-in" ? "floor14.collide.b64" : "collide.b64";
     function withApp(fn) {
@@ -200,7 +217,7 @@
       var log = console.log.bind(console);
       console.log = function () {
         var line = Array.prototype.join.call(arguments, " ");
-        if (/^phantom-burn: (stats|pixel|ready)/.test(line)) {
+        if (/^phantom-burn: (stats|pixel|ready|sound)/.test(line)) {
           fetch("report?" + encodeURIComponent(line + " | " + navigator.userAgent)).catch(function () {});
         }
         log.apply(null, arguments);
@@ -216,6 +233,21 @@
         app.dispatch("floor", floor);
         app.dispatch("dpr", String(window.devicePixelRatio || 1));
         window.addEventListener("resize", function () { app.dispatch("dpr", String(window.devicePixelRatio || 1)); });
+        // S1's sound: its tunes (the nine events; no music), and the gestures
+        if (!params.has("mute")) {
+          ["door-open", "door-close", "panel-on", "panel-off", "reader-ok", "reader-deny", "badge", "caught", "note"]
+            .forEach(function (k) {
+              var name = "event-" + k;
+              fetch("assets/tunes/" + name + ".cts").then(function (r) {
+                if (!r.ok) throw new Error(String(r.status));
+                return r.text();
+              }).then(function (t) { app.dispatch("tune", name + "\n" + t); },
+                      function (e) { console.log("phantom-burn: sound: no " + name + " (" + e.message + ")"); });
+            });
+          ["pointerup", "touchend", "click", "keydown"].forEach(function (n) {
+            document.addEventListener(n, function () { app.dispatch("gesture", n); }, true);
+          });
+        }
         function text(f) {
           return fetch(dir + f).then(function (r) {
             if (!r.ok) throw new Error("no floor " + floor + " (" + f + ": " + r.status + ")");

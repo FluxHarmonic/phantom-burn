@@ -9,6 +9,11 @@
 ;;;                [--guard X,Y[,Z[,R]]] [--guard-speed V] [--guard-state S] [--guard-light L]
 ;;;   phantom-burn --title [--title-at T] [--freeze]   the title screen
 ;;;   phantom-burn --play [...]                        P1: the guard, the badge, the exit
+;;;                [--mute]                            S1's sound off
+;;;
+;;; --play has S1's sound ((phantom sound game): your steps, the guard, the
+;;; hum, the events; assets/tunes/*.cts), except with --mute and in the
+;;; automated runs (--frames, --seconds, --shot), which open no audio device.
 ;;;
 ;;; --trace prints a stats line every 120 frames (frame, CPU, world and post
 ;;; pass CPU, draws, allocations per frame); --auto walks forward, turning.
@@ -49,7 +54,8 @@
           (phantom game)
           (phantom guard body)
           (phantom title)
-          (phantom play mode))
+          (phantom play mode)
+          (phantom sound game))
 
   (export native-main)
 
@@ -168,6 +174,11 @@
                   (render-set-extra-draw! guard-preview-draw!))
                 (begin (display (string-append "phantom-burn: --guard: no " GUARD-SGM)) (newline)))))))
 
+    ;; S1's sound: with --play, not muted, and not an automated run
+    (define (sound-wanted? args frames seconds)
+      (and (member "--play" args) (not (member "--mute" args))
+           (not frames) (not seconds) (not (arg-value args "--shot" #f))))
+
     (define (game-loop args frames seconds)
       (lambda ()
         (gfx-setup)
@@ -175,6 +186,11 @@
         (load-guard!)
         (apply-settings! args)
         (start-play! args (load-info))
+        (when (sound-wanted? args frames seconds)
+          (sound-game-init! (lambda (name)
+                              (let ((f (string-append "assets/tunes/" name ".cts")))
+                                (and (file-exists? f) (read-file-string f)))))
+          (sound-game-gesture!))                 ; natively no gesture is needed: start now
 
         (guard-preview! args)
         (let loop ((n 0) (seen (stamps)) (elapsed 0.0))
@@ -187,6 +203,7 @@
                          (make-controls key-down? (pressed-keys)
                                         (if captured? (mouse-dx) 0) (if captured? (mouse-dy) 0)
                                         0.0 0.0 0.0 0.0))
+            (sound-game-frame! dt (game-walker))
             ;; ready once the first frame is drawn (shots wait for this line)
             (when (= n 0) (display "phantom-burn: ready") (newline))
             (let ((seen (if (= 0 (modulo n 30))

@@ -1,0 +1,66 @@
+;;; (phantom sound game) - The shells' side of the game's sound
+;;;
+;;; S1 integration (tasks/phantom-burn-s1-sound, with P2: topics/phantom-sound-api).
+;;; The shells own what the sound needs: the frame's dt, a way to load the
+;;; tunes (native reads the files; the web page fetches them and hands the
+;;; text over), and the user's gestures (a browser starts audio only on one).
+;;; So each shell calls these, and play mode stays unaware of the sound:
+;;;
+;;;   (sound-game-init! loader)   once, at boot: the sound, its bank starting to
+;;;                               render (a slice a frame, from here on)
+;;;   (sound-game-gesture!)       every user gesture: the first starts the audio
+;;;   (sound-game-idle!)          a frame without play (the title): the bank's
+;;;                               slice only, and nothing sounds
+;;;   (sound-game-frame! dt walker)  a frame of play: P2's feed
+;;;                               (play-mode-sound-feed walker): your steps, the
+;;;                               placed events, then the frame (you and the guards)
+;;;   (sound-game-trace)          the costs since the last call, or #f (?trace)
+;;;   (sound-game-stop!)          leaving play (the title again): silence; the next
+;;;                               gesture starts it again
+;;;
+;;; SOUND-RATE: the audio context's rate. sigil-audio does not resample, and the
+;;; native device runs at a fixed 44100, so the web page opens its AudioContext
+;;; at 44100 too; the bank is rendered at this rate before any context exists.
+;;; SOUND-TUNES: the tunes the web page fetches (assets/tunes/NAME.cts).
+
+(define-library (phantom sound game)
+  (import (sigil core)
+          (phantom sound)
+          (phantom sound bank)
+          (phantom play mode))
+  (export sound-game-init! sound-game-gesture! sound-game-idle! sound-game-frame! sound-game-stop!
+          sound-game sound-game-trace SOUND-RATE SOUND-TUNES)
+  (begin
+    (define SOUND-RATE 44100)
+
+    (define SOUND-TUNES
+      (append (if MUSIC-TUNE (list MUSIC-TUNE) '())
+              (map (lambda (k) (string-append "event-" (symbol->string k))) EVENT-KINDS)))
+
+    (define *s* #f)
+    (define (sound-game) *s*)
+
+    ;; the costs since the last call (sound-trace), and whether the bank is done
+    (define (sound-game-trace)
+      (and *s* (cons (cons (quote bank-ready) (bank-ready? (sound-bank *s*))) (sound-trace *s*))))
+
+    (define (sound-game-init! loader)
+      (unless *s* (set! *s* (make-sound SOUND-RATE loader))))
+
+    (define (sound-game-gesture!)
+      (when *s* (sound-gesture! *s*)))
+
+    (define (sound-game-idle!)
+      (when *s* (sound-prepare! *s*)))
+
+    (define (sound-game-frame! dt walker)
+      (when *s*
+        (let ((feed (play-mode-sound-feed walker)))
+          (for-each (lambda (st) (sound-step! *s* (car st) (cadr st) (caddr st)))
+                    (caddr feed))
+          (for-each (lambda (e) (sound-event! *s* (list-ref e 0) (list-ref e 1) (list-ref e 2) (list-ref e 3) (list-ref e 4)))
+                    (cadddr feed))
+          (sound-frame! *s* dt (car feed) (cadr feed)))))
+
+    (define (sound-game-stop!)
+      (when (and *s* (sound-started? *s*)) (sound-stop! *s*)))))
