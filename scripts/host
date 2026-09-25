@@ -40,6 +40,18 @@ stop_port() {
 }
 stop_port $PORT_TLS
 stop_port $PORT_HTTP
+# and scripts/host-site's servers on the same ports (its site-PORT.pid, the
+# same checks: our node, this directory, serve-site.mjs)
+for p in $PORT_TLS $PORT_HTTP; do
+  f="site-$p.pid"; [ -f "$f" ] || continue
+  pid="$(cat "$f")"
+  if [ "$(basename "$(readlink "/proc/$pid/exe" 2>/dev/null || true)")" = node ] &&
+     [ "$(readlink "/proc/$pid/cwd" 2>/dev/null || true)" = "$HERE" ] &&
+     tr '\0' ' ' < "/proc/$pid/cmdline" | grep -q "serve-site.mjs"; then
+    kill "$pid" && echo "host: stopped host-site's pid $pid (port $p)"
+  fi
+  rm -f "$f"
+done
 [ "${1:-}" = "--stop" ] && exit 0
 
 [ -f "$WEB/phantom-burn.wasm" ] || { echo "host: build/web/phantom-burn.wasm missing; build --config web first"; exit 1; }

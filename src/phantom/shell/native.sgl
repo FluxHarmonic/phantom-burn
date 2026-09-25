@@ -161,13 +161,15 @@
         (display "phantom-burn: status ") (write (game-status)) (newline)
         (gfx-shutdown)))
 
-    ;; The title screen (--title): its own loop, no floor. --title-at T
+    ;; The title screen (--title): its own loop, in the root-console room
+    ;; (assets/floors/root-room, or --floor DIR; a DIR with no floor.sexp,
+    ;; e.g. --floor none, gives the stand-in room built in title.sgl). --title-at T
     ;; starts its clock at T seconds, --freeze holds it there (shots of one
     ;; moment of the animation).
     (define (title-loop args frames seconds)
       (lambda ()
         (gfx-setup)
-        (title-init!)
+        (title-init! load-mesh* load-texture* (load-info))
         (apply-settings! args)
         (let ((freeze? (member "--freeze" args))
               (t0 (or (string->number (arg-value args "--title-at" "none")) 0.0)))
@@ -189,7 +191,7 @@
              (frames (string->number (arg-value args "--frames" "none")))
              (seconds (string->number (arg-value args "--seconds" "none")))
              (size (size-of (arg-value args "--size" "1440x810"))))
-        (set! *dir* (arg-value args "--floor" *dir*))
+        (set! *dir* (arg-value args "--floor" (if (member "--title" args) "assets/floors/root-room" *dir*)))
         (run-game "Phantom Burn" (car size) (cdr size)
                   (if (member "--title" args)
                       (title-loop args frames seconds)

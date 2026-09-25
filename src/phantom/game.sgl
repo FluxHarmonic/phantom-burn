@@ -83,7 +83,9 @@
     ;; The trace (?trace / --trace): every WINDOW frames one console line
     ;; with that window's means, for scripts and the phone numbers.
     ;; Allocations come from gc-stats, less what the gc-stats call itself
-    ;; allocates (measured once).
+    ;; allocates (measured once: stats-cost, 100 on 0.22.7), once for each
+    ;; interval and once for each mark taken inside it (*n-marks* counts
+    ;; them), so every number is net of the trace itself.
     (define WINDOW 120)
     (define *trace* #f)
     (define *w-frames* 0) (define *w-frame* 0.0) (define *w-cpu* 0.0) (define *w-cpu-max* 0.0)
@@ -91,7 +93,14 @@
     ;; the window's allocations split: in the walker's ticks, and in the rest
     ;; of the frame (input, render, HUD), with the ticks counted
     (define *w-ticks* 0) (define *w-tick-alloc* 0) (define *w-rest-alloc* 0)
-    (define (alloc-mark) (if *trace* (allocations) 0))
+    ;; and all of game-frame! (the remainder, less ticks and rest, is its
+    ;; input and camera; the window's total less this is the shell's, between frames)
+    (define *w-frame-alloc* 0) (define *a-frame0* 0)
+    (define *n-marks* 0) (define *m-frame0* 0) (define *w-marks0* 0)
+    (define (alloc-mark)
+      (if *trace*
+          (begin (set! *n-marks* (+ *n-marks* 1)) (allocations))
+          0))
     ;; auto-walk (?auto / --auto): forward and turning, so a measurement
     ;; includes the walker's collision work
     (define *auto* #f)
@@ -115,7 +124,7 @@
 
     (define (trace-frame! dt cpu)
       (when *trace*
-        (when (= *w-frames* 0) (set! *w-alloc0* (allocations)))
+        (when (= *w-frames* 0) (set! *w-alloc0* (allocations)) (set! *w-marks0* *n-marks*))
         (set! *w-frames* (+ *w-frames* 1))
         (set! *w-frame* (+ *w-frame* (* 1000.0 dt)))
         (set! *w-cpu* (+ *w-cpu* cpu))
@@ -123,7 +132,7 @@
         (set! *w-world* (+ *w-world* (render-world-ms)))
         (set! *w-post* (+ *w-post* (render-post-ms)))
         (when (>= *w-frames* WINDOW)
-          (let ((alloc (- (allocations) *w-alloc0* *stats-cost*))
+          (let ((alloc (- (allocations) *w-alloc0* (* *stats-cost* (+ 1 (- *n-marks* *w-marks0*)))))
                 (n (* 1.0 *w-frames*)))
             (display (string-append
                       "phantom-burn: stats frames " (number->string *w-frames*)
@@ -137,11 +146,14 @@
                       " ticks-per-frame " (fixed2 (/ *w-ticks* n))
                       " alloc-per-tick " (if (> *w-ticks* 0) (number->string (exact (round (/ *w-tick-alloc* *w-ticks*)))) "-")
                       " alloc-rest-per-frame " (number->string (exact (round (/ *w-rest-alloc* n))))
+                      " alloc-other-per-frame " (number->string (exact (round (/ (- *w-frame-alloc* *w-tick-alloc* *w-rest-alloc*) n))))
+                      " alloc-shell-per-frame " (number->string (exact (round (/ (- alloc *w-frame-alloc*) n))))
+                      " stats-cost " (number->string *stats-cost*)
                       " dither " (if (render-dither?) "on" "off")))
             (newline))
           (set! *w-frames* 0) (set! *w-frame* 0.0) (set! *w-cpu* 0.0) (set! *w-cpu-max* 0.0)
           (set! *w-world* 0.0) (set! *w-post* 0.0)
-          (set! *w-ticks* 0) (set! *w-tick-alloc* 0) (set! *w-rest-alloc* 0))))
+          (set! *w-ticks* 0) (set! *w-tick-alloc* 0) (set! *w-rest-alloc* 0) (set! *w-frame-alloc* 0))))
 
     (define (fixed2 x)
       (let* ((t (exact (round (* (abs x) 100))))
@@ -349,6 +361,8 @@
     (define (lerp a b t) (+ a (* t (- b a))))
 
     (define (game-frame! dt w h ctl)
+      (set! *a-frame0* (alloc-mark))
+      (set! *m-frame0* *n-marks*)
       (let ((t0 (current-jiffy))
             (dt (min MAX-DT (max 0.0 dt)))
             (held? (vector-ref ctl 0)))
@@ -411,7 +425,10 @@
             (draw-hud! k)))
         (end-frame)
         (when *trace*
-          (set! *w-rest-alloc* (+ *w-rest-alloc* (- (alloc-mark) *a-rest0* *stats-cost*))))
+          (set! *w-rest-alloc* (+ *w-rest-alloc* (- (alloc-mark) *a-rest0* *stats-cost*)))
+          ;; the marks taken inside this frame (after its first): ticks and rest
+          (let ((inner (- *n-marks* *m-frame0*)))
+            (set! *w-frame-alloc* (+ *w-frame-alloc* (- (alloc-mark) *a-frame0* (* *stats-cost* (+ 1 inner)))))))
         (let ((spent (/ (* 1000.0 (- (current-jiffy) t0)) (jiffies-per-second))))
           (set! *cpu-ms* (+ (* 0.9 *cpu-ms*) (* 0.1 spent)))
           (trace-frame! dt spent))))

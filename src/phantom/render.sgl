@@ -42,6 +42,7 @@
           render-lift? render-lift!
           render-world-ms render-post-ms
           render-scene! render-make-world-mesh render-draw-world-mesh render-title-scene!
+          render-draw-floor! render-floor-kind
           render-set-extra-draw! render-draw-object!
           make-camera camera-set!)
 
@@ -216,6 +217,7 @@ void main() {
     (define (circuit-index name)
       (let ((c (assq name *circuits*))) (and c (cadr c))))
     (define (render-circuits) (map car *circuits*))
+    (define (render-floor-kind) *kind*)
     (define (render-switchable) (map car (filter (lambda (c) (list-ref c 6)) *circuits*)))
     (define (render-circuit-on? name)
       (let ((i (circuit-index name))) (and i (> (vector-ref *on* i) 0.5))))
@@ -225,7 +227,9 @@ void main() {
     (define (lit-fraction)
       (let* ((sw (filter (lambda (c) (list-ref c 6)) *circuits*))
              (n (length sw)))
-        (if (= n 0) 1.0
+        ;; a floor with nothing switchable (the root room) is lit only by
+        ;; its fixtures: the night's floor, no bounce
+        (if (= n 0) 0.0
             (/ (apply + (map (lambda (c) (vector-ref *on* (cadr c))) sw)) n))))
     (define (sync-light!)
       (when *opaque*
@@ -594,6 +598,12 @@ void main() {
       (let ((t0 (current-jiffy)))
         (camera! cam)
         (with-3d-pass *view* (list BG-R BG-G BG-B 1.0)
+          (render-draw-floor!))
+        (set! *world-ms* (ms-since t0))))
+
+    ;; The loaded floor, inside a 3D pass whose camera! has run: its opaque
+    ;; parts, the city, the extra draw (P1's things that move), the glass.
+    (define (render-draw-floor!)
           (f32! *eye* 3 *fog*)
           (let ((opaque (if (eq? *kind* 'compiled) *c-opaque* *opaque*)))
             (set-pipeline-uniform! opaque 'eye *eye*)
@@ -607,7 +617,7 @@ void main() {
           ;; it is the city circuit's: switched off, it is not drawn.
           (f32! *eye* 3 900.0)
           (set-pipeline-uniform! *opaque* 'eye *eye*)
-          (unless (and (eq? *kind* 'compiled) (not (render-circuit-on? 'city)))
+          (unless (and (eq? *kind* 'compiled) (circuit-index 'city) (not (render-circuit-on? 'city)))
             (draw-mesh *opaque* *city*))
           (when *extra-draw* (*extra-draw*))
           ;; glass last, blended over what is behind it
@@ -616,7 +626,6 @@ void main() {
                         (when (cadddr d)
                           (draw-mesh-range glass *floor* (car d) (cadr d))))
                       *draws*)))
-        (set! *world-ms* (ms-since t0))))
 
     (define (render-post!)
       (let ((t0 (current-jiffy)))

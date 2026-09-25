@@ -18,8 +18,11 @@
 ;;; as one sheared quad each, in the 3D pass, after the room: about 25
 ;;; draws a frame.
 ;;;
-;;; The room is a stand-in built here from boxes until the floor compiler's
-;;; root-console room lands.
+;;; The room is the floor compiler's root-console room (floors/root-room.floor,
+;;; imported by scripts/floor-import to assets/floors/root-room) when the
+;;; shell hands it over: the camera drifts between its two views (title,
+;;; title-end) over 40 s, and a blinking # cursor sits on the console's screen.
+;;; Without it (no floor given), a stand-in room built here from boxes.
 ;;;
 ;;; Time is seconds since the title started; (title-frame! t w h) draws one
 ;;; frame. The pace: letters from 0.3 s, 0.09 s apart, 0.22 s each; the
@@ -29,6 +32,7 @@
   (import (sigil core)
           (sigil math)
           (sigil graphics)
+          (sigil geometry)
           (phantom render))
 
   (export title-init! title-frame! TITLE-SETTLED)
@@ -307,7 +311,15 @@ void main() {
       (bytevector-ieee-single-set! bv 12 (* 1.0 d) 'little)
       bv)
 
-    (define (title-init!)
+    ;; (title-init! [load-mesh* load-texture* info]): with a compiled floor
+    ;; (the root room), the room is that floor; without, the stand-in.
+    (define *compiled* #f)
+    (define *path* #f)               ; (eye0 eye1 target fov): the drift between the views
+    (define *cursor* #f)             ; the # on the console's screen (a mesh)
+    (define *cursor-n* 0)
+    (define *ident* (make-mat4))
+
+    (define (title-init! . floor)
       (render-init!)
       (let* ((a (atlas-pixels)))
         (set! *atlas* (make-texture-from-pixels (car a) GH (cdr a) 'nearest)))
@@ -321,13 +333,56 @@ void main() {
                                       (string-append (glsl-header) SPRITE-VERTEX)
                                       (string-append (glsl-header) SPRITE-FRAGMENT)
                                       '(depth-test #f depth-write #f cull none blend normal))))
-      (let ((counts (build-room!)))
-        (set! *room-count* (car counts))
-        (set! *cursor-count* (cdr counts)))
-      (set! *room* (render-make-world-mesh (pack-vertices)))
-      (set! *verts* '())
       (set! *letters* (layout))
-      (render-title-scene! ROOM-LIGHTS))
+      (mat4-identity! *ident*)
+      (if (and (= (length floor) 3) (caddr floor))
+          (let ((info (caddr floor)))
+            (set! *compiled* #t)
+            (render-load-compiled! (car floor) (cadr floor) info)
+            (set! *path* (view-path info))
+            (build-cursor!)
+            (set! *cursor* (render-make-world-mesh (pack-vertices)))
+            (set! *cursor-n* *nverts*)
+            (set! *verts* '()))
+          (let ((counts (build-room!)))
+            (set! *compiled* #f)
+            (set! *room-count* (car counts))
+            (set! *cursor-count* (cdr counts))
+            (set! *room* (render-make-world-mesh (pack-vertices)))
+            (set! *verts* '())
+            (render-title-scene! ROOM-LIGHTS))))
+
+    ;; The room's views title and title-end: both eyes, the shared target,
+    ;; and the field of view from the lens (36 mm wide, 16:9).
+    (define (view-path info)
+      (let* ((vs (cdr (assq 'views info)))
+             (find (lambda (n) (let loop ((l vs)) (cond ((null? l) #f) ((eq? (caar l) n) (car l)) (else (loop (cdr l)))))))
+             (a (or (find 'title) (car vs)))
+             (b (or (find 'title-end) a))
+             (lens (or (list-ref a 7) 24.0)))
+        (list (list (list-ref a 1) (list-ref a 2) (list-ref a 3))
+              (list (list-ref b 1) (list-ref b 2) (list-ref b 3))
+              (list (list-ref a 4) (list-ref a 5) (list-ref a 6))
+              (/ (* 2.0 (atan (/ 10.125 lens)) 180.0) 3.141592653589793))))
+
+    ;; The # on the root console's screen (props/root-console.prop: the
+    ;; console at the room's centre + (0, 0.3), (4.5, 3.8); its screen's
+    ;; front face at y 3.8 + 0.275, x -0.4..0.4, z 1.15..1.65, facing -y),
+    ;; with two lines of prompt before it.
+    (define (build-cursor!)
+      (set! *verts* '()) (set! *nverts* 0)
+      (let ((sy (+ 3.8 0.27)) (x0 4.16) (pale '(204 230 255)))
+        (glow-rect! x0 1.56 (+ x0 0.36) 1.59 sy pale)
+        (glow-rect! x0 1.51 (+ x0 0.22) 1.54 sy pale)
+        (let rows ((r 0) (lines '(" x x " "xxxxx" " x x " "xxxxx" " x x ")))
+          (unless (null? lines)
+            (let cols ((c 0))
+              (when (< c 5)
+                (when (char=? (string-ref (car lines) c) #\x)
+                  (let* ((cx (+ x0 (* c 0.014))) (z1 (- 1.48 (* r 0.014))))
+                    (glow-rect! cx (- z1 0.014) (+ cx 0.014) z1 sy pale)))
+                (cols (+ c 1))))
+            (rows (+ r 1) (cdr lines))))))
 
     (define TITLE-SETTLED 3.2)       ; seconds: everything has landed and cooled
     (define (clamp01 x) (if (< x 0.0) 0.0 (if (> x 1.0) 1.0 x)))
@@ -406,20 +461,39 @@ void main() {
                   (draw-letter! x slot TOP 1.0 #f heat hit))))
             (loop (cdr ls) (+ i 1))))))
 
+    (define (lerp a b s) (+ a (* s (- b a))))
+    (define (blink? t) (< (- (* t 1.2) (floor (* t 1.2))) 0.55))   ; 1.2 Hz
+
+    (define (title-camera! t)
+      (if *compiled*
+          ;; from title to title-end and back, 40 s a round, eased at the ends
+          (let* ((s (- 0.5 (* 0.5 (cos (* t (/ 6.283185307179586 40.0))))))
+                 (e0 (car *path*)) (e1 (cadr *path*)) (tg (caddr *path*))
+                 (ex (lerp (car e0) (car e1) s)) (ey (lerp (cadr e0) (cadr e1) s)) (ez (lerp (caddr e0) (caddr e1) s))
+                 (dx (- (car tg) ex)) (dy (- (cadr tg) ey)) (dz (- (caddr tg) ez)))
+            (camera-set! *cam* ex ey ez (atan (- dx) dy) (atan dz (sqrt (+ (* dx dx) (* dy dy)))) 0.0 (cadddr *path*)))
+          (let* ((a (* 0.26 (sin (* t 0.11))))
+                 (ex (* 3.3 (sin a))) (ey (- (* 3.5 (cos a))))
+                 (ez (+ 1.5 (* 0.08 (sin (* t 0.23)))))
+                 (dx (- 0.0 ex)) (dy (- -0.3 ey)) (dz (- 1.2 ez)))
+            (camera-set! *cam* ex ey ez (atan (- dx) dy) (atan dz (sqrt (+ (* dx dx) (* dy dy)))) 0.0 50.0))))
+
     (define (title-frame! t w h)
-      (let* ((a (* 0.26 (sin (* t 0.11))))
-             (ex (* 3.3 (sin a))) (ey (- (* 3.5 (cos a))))
-             (ez (+ 1.5 (* 0.08 (sin (* t 0.23)))))
-             (dx (- 0.0 ex)) (dy (- -0.3 ey)) (dz (- 1.2 ez)))
-        (camera-set! *cam* ex ey ez (atan (- dx) dy) (atan dz (sqrt (+ (* dx dx) (* dy dy)))) 0.0 50.0)
+      (title-camera! t)
+      (let ()
         (begin-frame)
         (clear-screen 0.0 0.0 0.0)
         (render-scene! *cam*
           (lambda ()
-            (render-draw-world-mesh *room* 0 *room-count*)
-            ;; the cursor blinks at 1.2 Hz
-            (when (< (- (* t 1.2) (floor (* t 1.2))) 0.55)
-              (render-draw-world-mesh *room* *room-count* *cursor-count*))
+            (if *compiled*
+                (begin
+                  (render-draw-floor!)
+                  (when (blink? t)
+                    (render-draw-object! *cursor* 0 *cursor-n* *ident* 1.0 1.0 1.0)))
+                (begin
+                  (render-draw-world-mesh *room* 0 *room-count*)
+                  (when (blink? t)
+                    (render-draw-world-mesh *room* *room-count* *cursor-count*))))
             (draw-letters! t)
             (draw-beam! t)))
         (render-post!)
