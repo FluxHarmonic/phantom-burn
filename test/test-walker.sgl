@@ -1,0 +1,193 @@
+;;; The walker ((phantom walker)) over small built scenes: walls stop it,
+;;; stairs lift it, a cabinet-height block is climbed (crouched, under a
+;;; 2.7 m ceiling), a block out of reach is not, a 1 m tunnel admits only a
+;;; crouched body and will not let it stand, an edge drops it, and a lean
+;;; into a wall stops short of it. Plus the deterministic sine and cosine.
+
+(import (sigil test)
+        (sigil math)
+        (phantom detmath)
+        (phantom collide)
+        (phantom walker))
+
+;; --- building scenes ---------------------------------------------------------
+
+;; A box's twelve triangles, each front face counter-clockwise from outside.
+(define (box x0 y0 z0 x1 y1 z1)
+  (list (list x0 y0 z0 x0 y1 z0 x1 y1 z0) (list x0 y0 z0 x1 y1 z0 x1 y0 z0)      ; bottom
+        (list x0 y0 z1 x1 y0 z1 x1 y1 z1) (list x0 y0 z1 x1 y1 z1 x0 y1 z1)      ; top
+        (list x0 y0 z0 x1 y0 z0 x1 y0 z1) (list x0 y0 z0 x1 y0 z1 x0 y0 z1)      ; south
+        (list x0 y1 z0 x0 y1 z1 x1 y1 z1) (list x0 y1 z0 x1 y1 z1 x1 y1 z0)      ; north
+        (list x0 y0 z0 x0 y0 z1 x0 y1 z1) (list x0 y0 z0 x0 y1 z1 x0 y1 z0)      ; west
+        (list x1 y0 z0 x1 y1 z0 x1 y1 z1) (list x1 y0 z0 x1 y1 z1 x1 y0 z1)))    ; east
+
+(define (scene . boxes)
+  (let* ((tris (apply append boxes))
+         (n (length tris))
+         (bv (make-bytevector (* 36 n) 0)))
+    (let loop ((ts tris) (i 0))
+      (unless (null? ts)
+        (let each ((vs (car ts)) (j 0))
+          (unless (null? vs)
+            (bytevector-ieee-single-set! bv (* 4 (+ (* 9 i) j)) (car vs) 'little)
+            (each (cdr vs) (+ j 1))))
+        (loop (cdr ts) (+ i 1))))
+    (collision-from-soup bv (make-bytevector n 0) (make-bytevector n 255))))
+
+;; The ground: a 40 x 40 slab whose top is z 0.
+(define (ground) (box -20.0 -20.0 -0.2 20.0 20.0 0.0))
+
+(define (run w c n input)
+  (if (= n 0) w (run (walker-step w input TICK c) c (- n 1) input)))
+
+;; Step until (done? w), at most n ticks; #f if it never was.
+(define (run-until w c input done? n)
+  (cond ((done? w) w)
+        ((= n 0) #f)
+        (else (run-until (walker-step w input TICK c) c input done? (- n 1)))))
+
+(define FORWARD (make-input 0.0 1.0 0.0 0.0 #f #f #f 0))
+(define STRAFE-RIGHT (make-input 1.0 0.0 0.0 0.0 #f #f #f 0))
+(define CROUCH-PRESS (make-input 0.0 0.0 0.0 0.0 #f #f #t 0))
+(define (lean-input d) (make-input 0.0 0.0 0.0 0.0 #f #f #f d))
+
+(define (near? a b eps) (< (abs (- a b)) eps))
+
+;; facing east: yaw -pi/2 (yaw 0 is north, turning left is positive)
+(define EAST (- (/ PI 2.0)))
+
+;; --- the tests ---------------------------------------------------------------
+
+(test-group "detmath"
+  (test "dsin and dcos agree with the platform's to 1e-14 over many turns"
+    (let loop ((k -400) (worst 0.0))
+      (if (> k 400)
+          (assert-true (< worst 1e-13))
+          (let ((x (* k 0.0371)))
+            (loop (+ k 1) (max worst (abs (- (dsin x) (sin x))) (abs (- (dcos x) (cos x))))))))))
+
+(test-group "walls and floors"
+  (test "standing still on the ground stays put"
+    (let* ((c (scene (ground)))
+           (w (run (make-walker 0.0 0.0 0.0 0.0) c 60 NO-INPUT)))
+      (assert-true (near? (walker-z w) 0.0 1e-9))
+      (assert-true (walker-grounded? w))))
+  (test "walking north covers about walk speed a second"
+    (let* ((c (scene (ground)))
+           (w (run (make-walker 0.0 0.0 0.0 0.0) c 120 FORWARD)))
+      (assert-true (near? (walker-x w) 0.0 1e-9))
+      (assert-true (> (walker-y w) 4.0))
+      (assert-true (< (walker-y w) (* 2 SPEED-WALK)))))
+  (test "a wall stops the body a radius short of it"
+    (let* ((c (scene (ground) (box 3.0 -5.0 0.0 3.2 5.0 3.0)))
+           (w (run (make-walker 0.0 0.0 0.0 EAST) c 180 FORWARD)))
+      (assert-true (near? (walker-x w) (- 3.0 RADIUS) 0.01))
+      (assert-true (near? (walker-y w) 0.0 0.01))))
+  (test "a desk top at waist height blocks a sideways walk (a slab, seen from above)"
+    (let* ((c (scene (ground) (box 3.0 -1.0 0.72 4.6 1.0 0.76)))
+           (w (run (make-walker 0.0 0.0 0.0 0.0) c 180 STRAFE-RIGHT)))
+      (assert-true (< (walker-x w) (- 3.0 (* 0.9 RADIUS))))))
+  (test "walking off an edge drops to the floor below"
+    (let* ((c (scene (ground) (box -2.0 -2.0 2.8 2.0 2.0 3.0)))
+           (w (run (make-walker 0.0 0.0 3.0 0.0) c 240 FORWARD)))
+      (assert-true (> (walker-y w) 2.0))
+      (assert-true (near? (walker-z w) 0.0 1e-9))
+      (assert-true (walker-grounded? w)))))
+
+(test-group "stairs"
+  (test "ten 0.18 m steps are climbed by walking"
+    (let* ((steps (let loop ((k 0) (acc '()))
+                    (if (= k 10) acc
+                        (loop (+ k 1) (cons (box -1.0 (+ 2.0 (* 0.3 k)) 0.0 1.0 (+ 2.3 (* 0.3 k)) (* 0.18 (+ k 1))) acc)))))
+           (landing (box -1.0 5.0 0.0 1.0 20.0 1.8))
+           (c (apply scene (ground) landing steps))
+           (w (run (make-walker 0.0 0.0 0.0 0.0) c 200 FORWARD)))
+      (assert-true (> (walker-y w) 5.5))
+      (assert-true (near? (walker-z w) 1.8 1e-6))))
+  (test "a 0.5 m step is not stepped onto: walked into sideways, it blocks"
+    (let* ((c (scene (ground) (box 3.0 -5.0 0.0 6.0 5.0 0.5)))
+           (w (run (make-walker 0.0 0.0 0.0 0.0) c 180 STRAFE-RIGHT)))
+      (assert-true (< (walker-x w) 3.0))
+      (assert-true (near? (walker-z w) 0.0 1e-9))))
+  (test "the same step, pushed into going forward, is climbed (a mantle)"
+    (let* ((c (scene (ground) (box 3.0 -5.0 0.0 6.0 5.0 0.5)))
+           (w (run-until (make-walker 0.0 0.0 0.0 EAST) c FORWARD
+                         (lambda (w) (and (not (walker-mantling? w)) (> (walker-z w) 0.4))) 300)))
+      (assert-true (and w (near? (walker-z w) 0.5 1e-6))))))
+
+(test-group "mantling"
+  (test "a 1.3 m cabinet under a 2.7 m ceiling is climbed, and the body crouches on it"
+    (let* ((c (scene (ground)
+                     (box 3.0 -0.3 0.0 3.5 0.3 1.3)             ; the cabinet
+                     (box -5.0 -5.0 2.7 10.0 5.0 2.9)))         ; the office ceiling
+           (m (run-until (make-walker 0.0 0.0 0.0 EAST) c FORWARD walker-mantling? 200))
+           (w (and m (run m c 60 NO-INPUT))))
+      (assert-true (and w (near? (walker-z w) 1.3 1e-6)))
+      (assert-true (> (walker-x w) 3.0))
+      (assert-true (walker-crouching? w))
+      (assert-true (<= (+ (walker-z w) (walker-height w)) 2.7))))
+  (test "a 2.5 m block is out of reach"
+    (let* ((c (scene (ground) (box 3.0 -3.0 0.0 4.0 3.0 2.5)))
+           (w (run (make-walker 0.0 0.0 0.0 EAST) c 240 FORWARD)))
+      (assert-true (near? (walker-z w) 0.0 1e-9))
+      (assert-true (< (walker-x w) 3.0))))
+  (test "up through a hatch: from a cabinet into a 1 m duct over it"
+    ;; the duct's floor at 3.0 with a 0.7 m hole, its ceiling at 4.0,
+    ;; the cabinet under the hole
+    (let* ((c (scene (ground)
+                     (box 1.0 -0.3 0.0 1.6 0.3 1.3)                        ; cabinet
+                     (box -3.0 -0.5 2.8 1.0 0.5 3.0) (box 1.7 -0.5 2.8 8.0 0.5 3.0)   ; duct floor, hole x 1.0..1.7
+                     (box -3.0 -0.5 4.0 8.0 0.5 4.2)                        ; duct ceiling
+                     (box -3.0 -0.7 2.8 8.0 -0.5 4.2) (box -3.0 0.5 2.8 8.0 0.7 4.2)))  ; duct walls
+           ;; onto the cabinet (room to stand: the hole is overhead), then on
+           ;; into the duct, crouched
+           (m (run-until (make-walker -1.0 0.0 0.0 EAST) c FORWARD
+                         (lambda (w) (> (walker-z w) 2.9)) 400))
+           (w (and m (run m c 60 NO-INPUT))))
+      (assert-true (and w (near? (walker-z w) 3.0 1e-6)))
+      (assert-true (walker-crouching? w))
+      (assert-true (<= (+ (walker-z w) (walker-height w)) 4.0)))))
+
+(test-group "crouching"
+  (test "a standing body will not enter a 1 m tunnel"
+    (let* ((c (scene (ground) (box 3.0 -2.0 1.0 9.0 2.0 3.0)))
+           (w (run (make-walker 0.0 0.0 0.0 EAST) c 180 FORWARD)))
+      (assert-true (< (walker-x w) (- 3.0 (* 0.9 RADIUS))))))
+  (test "a crouched body goes through, and cannot stand inside"
+    (let* ((c (scene (ground) (box 3.0 -2.0 1.0 9.0 2.0 3.0)))
+           (w0 (run (walker-step (make-walker 0.0 0.0 0.0 EAST) CROUCH-PRESS TICK c) c 60 NO-INPUT))
+           (w1 (run w0 c 240 FORWARD))
+           (w2 (run (walker-step w1 CROUCH-PRESS TICK c) c 60 NO-INPUT)))
+      (assert-true (> (walker-x w1) 4.0))
+      (assert-true (< (walker-x w1) 9.0))
+      (assert-true (<= (walker-height w2) 1.0))
+      (assert-true (near? (walker-height w0) CROUCH 1e-9)))))
+
+(test-group "leaning"
+  (test "a lean right in the open moves the eyes 0.4 m right"
+    (let* ((c (scene (ground)))
+           (w (run (make-walker 0.0 0.0 0.0 0.0) c 30 (lean-input 1))))
+      (assert-true (near? (walker-eye-x w) 0.4 1e-6))
+      (assert-true (near? (walker-eye-y w) 0.0 1e-6))
+      (assert-true (> (walker-roll w) 0.0))))
+  (test "a lean into a wall 0.3 m away stops short of it"
+    (let* ((c (scene (ground) (box 0.3 -3.0 0.0 0.5 3.0 3.0)))
+           (w (run (make-walker 0.0 0.0 0.0 0.0) c 30 (lean-input 1))))
+      (assert-true (< (walker-eye-x w) 0.3))
+      (assert-true (> (walker-eye-x w) 0.0)))))
+
+(test-group "determinism"
+  (test "the same inputs from the same state give the same bits"
+    (let* ((c (scene (ground) (box 3.0 -5.0 0.0 3.2 5.0 3.0)))
+           (turn (make-input 0.3 0.8 0.013 0.0 #f #t #f 1))
+           (a (run (make-walker 0.0 0.0 0.0 0.2) c 200 turn))
+           (b (run (make-walker 0.0 0.0 0.0 0.2) c 200 turn)))
+      (assert-equal (walker-x a) (walker-x b))
+      (assert-equal (walker-y a) (walker-y b))
+      (assert-equal (walker-yaw a) (walker-yaw b))))
+  (test "a step does not change the state it was given"
+    (let* ((c (scene (ground)))
+           (w (make-walker 1.0 2.0 0.0 0.0))
+           (w2 (walker-step w FORWARD TICK c)))
+      (assert-equal 2.0 (walker-y w))
+      (assert-true (> (walker-y w2) 2.0)))))

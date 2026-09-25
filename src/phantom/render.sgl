@@ -1,0 +1,294 @@
+;;; (phantom render) - The render path (design §6, §8): the world drawn
+;;; into a 480x270 target with depth, the palette-and-dither post pass
+;;; into a second 480x270 target, and that target put on the window at the
+;;; largest whole-number scale that fits, black around it. The 2D HUD
+;;; draws over it afterwards, at window resolution.
+;;;
+;;; The world is design coordinates (z up). The stand-in floor is G0's
+;;; Blender export, which is Y-up, so it is drawn through a model matrix
+;;; that turns it (x, y, z) -> (x, -z, y); its 14 lights are already in
+;;; design coordinates. Light is per vertex from those lights, as in G0,
+;;; and fades with distance to C-BG (#0D0A1A).
+;;;
+;;; A frame is: (render-world! cam) (render-post!) (render-composite! w h)
+;;; then the HUD, all between begin-frame and end-frame. With the dither
+;;; off, render-post! does nothing and the composite shows the raw frame.
+
+(define-library (phantom render)
+  (import (sigil core)
+          (sigil math)
+          (sigil time)
+          (sigil graphics)
+          (sigil geometry)
+          (phantom dither))
+
+  (export VIEW-W VIEW-H
+          render-init! render-load-stand-in!
+          render-world! render-post! render-composite!
+          render-dither? render-dither! render-spread render-spread!
+          render-bayer render-bayer! render-palette render-palette!
+          render-fog render-fog!
+          render-world-ms render-post-ms
+          make-camera camera-set!)
+
+  (begin
+
+    (define VIEW-W 480)
+    (define VIEW-H 270)
+    (define NLIGHTS 16)
+    ;; C-BG, the colour the distance fades to and the clear colour
+    (define BG-R (/ 13.0 255.0))
+    (define BG-G (/ 10.0 255.0))
+    (define BG-B (/ 26.0 255.0))
+
+    (define (world-layout)
+      (make-vertex-layout '((position float3) (uv float2) (normal float3) (color ubyte4n) (emission ubyte4n))))
+
+    (define WORLD-VERTEX
+      "uniform mat4 view_proj;
+uniform mat4 model;
+uniform vec4 eye;           // xyz camera, w fog distance
+uniform vec4 lights[16];    // xyz, radius (design coordinates)
+uniform vec4 light_rgb[16]; // rgb, circuit
+uniform vec4 levels;        // each circuit's level
+uniform vec4 ambient;
+in vec3 position;
+in vec2 uv;
+in vec3 normal;
+in vec4 color;
+in vec4 emission;
+out vec2 v_uv;
+out vec3 v_color;
+out float v_fog;
+void main() {
+  vec3 wp = (model * vec4(position, 1.0)).xyz;
+  vec3 wn = mat3(model) * normal;
+  vec3 lit = ambient.rgb;
+  for (int i = 0; i < 16; i++) {
+    vec3 d = lights[i].xyz - wp;
+    float dist = length(d);
+    float att = clamp(1.0 - dist / max(lights[i].w, 0.001), 0.0, 1.0);
+    float ndl = max(dot(wn, d / max(dist, 0.001)), 0.0);
+    lit += light_rgb[i].rgb * (att * att * (0.3 + 0.7 * ndl)) * levels[int(light_rgb[i].a)];
+  }
+  // an emissive surface shows its hue at full strength, whatever the light
+  v_color = mix(color.rgb * lit, emission.rgb, emission.a);
+  v_uv = uv;
+  v_fog = clamp(length(wp - eye.xyz) / eye.w, 0.0, 1.0);
+  gl_Position = view_proj * vec4(wp, 1.0);
+}
+")
+
+    (define WORLD-FRAGMENT
+      "uniform vec4 fog_color;
+uniform float alpha;
+uniform sampler2D tex;
+in vec2 v_uv;
+in vec3 v_color;
+in float v_fog;
+out vec4 frag_color;
+void main() {
+  vec3 c = texture(tex, v_uv).rgb * v_color;
+  frag_color = vec4(mix(c, fog_color.rgb, v_fog * v_fog), alpha);
+}
+")
+
+    ;; --- state ---------------------------------------------------------------
+
+    (define *view* #f)        ; the 3D target
+    (define *post* #f)        ; the dithered target
+    (define *view-tex* #f)    ; *view* as a texture for the post pass
+    (define *opaque* #f)
+    (define *glass* #f)
+    (define *post-pipe* #f)
+    (define *tri* #f)         ; the full-screen triangle
+    (define *floor* #f)
+    (define *city* #f)
+    (define *draws* '())      ; ((first count texture-or-#f glass?) ...)
+
+    (define *dither* #t)
+    (define *spread* dither-spread-default)
+    (define *bayer* dither-size-default)
+    (define *palette* 'embers)
+    (define *fog* 45.0)
+    (define *flip* 1.0)       ; see POST-FRAGMENT's opts.x
+    (define *world-ms* 0.0)
+    (define *post-ms* 0.0)
+
+    (define *proj* (make-mat4))
+    (define *cam-m* (make-mat4))
+    (define *vp* (make-mat4))
+    (define *model* (make-mat4))
+    (define *eye-at* (vec3 0 0 0))
+    (define *look-at* (vec3 0 1 0))
+    (define *up* (vec3 0 0 1))
+    (define *eye* (make-bytevector 16 0))
+    (define *params* (make-bytevector 16 0))
+    (define *opts* (make-bytevector 16 0))
+
+    (define (f32! bv i x) (bytevector-ieee-single-set! bv (* 4 i) x))
+    (define (both f) (f *opaque*) (f *glass*))
+
+    (define (render-dither?) *dither*)
+    (define (render-dither! on?) (set! *dither* on?))
+    (define (render-spread) *spread*)
+    (define (render-spread! s) (set! *spread* (max 0.0 (min 255.0 (* 1.0 s)))) (sync-post!))
+    (define (render-bayer) *bayer*)
+    (define (render-bayer! n) (set! *bayer* (if (= n 8) 8 4)) (sync-post!))
+    (define (render-palette) *palette*)
+    (define (render-palette! name)
+      (when (palette-colors name)
+        (set! *palette* name)
+        (when *post-pipe*
+          (set-pipeline-uniform! *post-pipe* 'pal (palette-uniform (palette-colors name))))
+        (sync-post!)))
+    (define (render-fog) *fog*)
+    (define (render-fog! d) (set! *fog* (max 1.0 (* 1.0 d))))
+    (define (render-world-ms) *world-ms*)
+    (define (render-post-ms) *post-ms*)
+
+    (define (sync-post!)
+      (when *post-pipe*
+        (f32! *params* 0 *spread*)
+        (f32! *params* 1 (* 1.0 *bayer*))
+        (f32! *params* 2 (* 1.0 (length (palette-colors *palette*))))
+        (f32! *params* 3 (* 1.0 VIEW-H))
+        (f32! *opts* 0 *flip*)
+        (f32! *opts* 1 1.0)
+        (set-pipeline-uniform! *post-pipe* 'params *params*)
+        (set-pipeline-uniform! *post-pipe* 'opts *opts*)))
+
+    ;; --- setup ---------------------------------------------------------------
+
+    (define (render-init!)
+      (let ((layout (world-layout))
+            (vs (string-append (glsl-header) WORLD-VERTEX))
+            (fs (string-append (glsl-header) WORLD-FRAGMENT)))
+        (set! *opaque* (make-pipeline layout vs fs))
+        (set! *glass* (make-pipeline layout vs fs '(blend normal depth-write #f cull none))))
+      (let ((pl (make-vertex-layout '((position float2))))
+            (tri (make-bytevector 24 0)))
+        ;; one triangle covering the whole of clip space
+        (f32! tri 0 -1.0) (f32! tri 1 -1.0)
+        (f32! tri 2 3.0) (f32! tri 3 -1.0)
+        (f32! tri 4 -1.0) (f32! tri 5 3.0)
+        (set! *tri* (make-mesh pl tri))
+        (set! *post-pipe* (make-pipeline pl
+                                         (string-append (glsl-header) POST-VERTEX)
+                                         (string-append (glsl-header) POST-FRAGMENT)
+                                         '(depth-test #f depth-write #f cull none))))
+      (set! *view* (make-render-target VIEW-W VIEW-H 'nearest 'depth))
+      (set! *post* (make-render-target VIEW-W VIEW-H 'nearest 'depth))
+      (set! *view-tex* (render-target->texture *view*))
+      (render-palette! *palette*)
+      (sync-post!)
+      ;; the Y-up stand-in turned Z-up: columns x -> x, y -> z, z -> -y
+      (mat4-identity! *model*)
+      (f32! *model* 5 0.0) (f32! *model* 6 1.0)
+      (f32! *model* 9 -1.0) (f32! *model* 10 0.0)
+      (both (lambda (p)
+              (set-pipeline-uniform! p 'model *model*)
+              ;; the world ambient #21173D at 0.6, lifted a little so a dark room reads
+              (set-pipeline-uniform! p 'ambient '(0.2 0.14 0.34 1.0))
+              (set-pipeline-uniform! p 'fog_color (list BG-R BG-G BG-B 1.0))
+              (set-pipeline-uniform! p 'levels '(1.0 1.0 1.0 1.0))))
+      (set-pipeline-uniform! *opaque* 'alpha 1.0)
+      (set-pipeline-uniform! *glass* 'alpha 0.3))
+
+    (define (pad-lights ls n)
+      (cond ((= n 0) '())
+            ((null? ls) (cons '(0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0) (pad-lights '() (- n 1))))
+            (else (cons (car ls) (pad-lights (cdr ls) (- n 1))))))
+
+    ;; The stand-in floor: (load-mesh* layout name) and (load-texture*
+    ;; name) are the shell's loaders; draws and lights are (phantom
+    ;; stand-in)'s data.
+    (define (render-load-stand-in! load-mesh* load-texture* draws lights)
+      (when *floor* (mesh-free! *floor*))
+      (when *city* (mesh-free! *city*))
+      (let ((layout (world-layout)))
+        (set! *floor* (load-mesh* layout "floor14.sgm"))
+        (set! *city* (load-mesh* layout "city.sgm")))
+      (set! *draws*
+            (map (lambda (d)
+                   (list (car d) (cadr d)
+                         (and (caddr d)
+                              (let ((tex (load-texture* (caddr d))))
+                                (set-texture-sampling! tex 'nearest 'repeat)
+                                tex))
+                         (cadddr d)))
+                 draws))
+      (let ((ls (pad-lights lights NLIGHTS)))
+        (both (lambda (p)
+                (set-pipeline-uniform! p 'lights (map (lambda (l) (list (list-ref l 0) (list-ref l 1) (list-ref l 2) (list-ref l 3))) ls))
+                (set-pipeline-uniform! p 'light_rgb (map (lambda (l) (list (list-ref l 4) (list-ref l 5) (list-ref l 6) (list-ref l 7))) ls))))))
+
+    ;; --- the camera ------------------------------------------------------------
+
+    ;; A camera: eye x y z, yaw, pitch, roll (radians), vertical field of
+    ;; view (degrees). Yaw 0 looks north (+y), growing counter-clockwise
+    ;; from above; roll is positive to the right.
+    (define (make-camera) (make-vector 7 0.0))
+    (define (camera-set! c x y z yaw pitch roll fov)
+      (vector-set! c 0 x) (vector-set! c 1 y) (vector-set! c 2 z)
+      (vector-set! c 3 yaw) (vector-set! c 4 pitch) (vector-set! c 5 roll) (vector-set! c 6 fov)
+      c)
+
+    (define (ms-since t0)
+      (/ (* 1000.0 (- (current-jiffy) t0)) (jiffies-per-second)))
+
+    (define (render-world! cam)
+      (let* ((t0 (current-jiffy))
+             (x (vector-ref cam 0)) (y (vector-ref cam 1)) (z (vector-ref cam 2))
+             (yaw (vector-ref cam 3)) (pitch (vector-ref cam 4)) (roll (vector-ref cam 5))
+             (cp (cos pitch)) (sp (sin pitch)) (sy (sin yaw)) (cy (cos yaw))
+             (cr (cos roll)) (sr (sin roll))
+             ;; forward, right, and up tilted by the roll toward the right
+             (fx (* -1.0 sy cp)) (fy (* cy cp)) (fz sp)
+             (rx cy) (ry sy))
+        ;; up0 = right x forward = (ry*fz, -rx*fz, rx*fy - ry*fx)
+        (let ((u0x (* ry fz)) (u0y (- (* rx fz))) (u0z (- (* rx fy) (* ry fx))))
+          (vec3-set! *up* (+ (* cr u0x) (* sr rx)) (+ (* cr u0y) (* sr ry)) (* cr u0z)))
+        (vec3-set! *eye-at* x y z)
+        (vec3-set! *look-at* (+ x fx) (+ y fy) (+ z fz))
+        (mat4-perspective! *proj* (degrees->radians (vector-ref cam 6)) (/ VIEW-W VIEW-H) 0.05 600.0)
+        (mat4-look-at! *cam-m* *eye-at* *look-at* *up*)
+        (mat4-mul! *vp* *proj* *cam-m*)
+        (f32! *eye* 0 x) (f32! *eye* 1 y) (f32! *eye* 2 z)
+        (set-pipeline-uniform! *opaque* 'view_proj *vp*)
+        (set-pipeline-uniform! *glass* 'view_proj *vp*)
+        (with-3d-pass *view* (list BG-R BG-G BG-B 1.0)
+          (f32! *eye* 3 *fog*)
+          (set-pipeline-uniform! *opaque* 'eye *eye*)
+          (set-pipeline-uniform! *glass* 'eye *eye*)
+          (for-each (lambda (d)
+                      (cond ((cadddr d) #f)
+                            ((caddr d) (draw-mesh-range *opaque* *floor* (car d) (cadr d) (caddr d)))
+                            (else (draw-mesh-range *opaque* *floor* (car d) (cadr d)))))
+                    *draws*)
+          ;; the city is far away; it fades much later
+          (f32! *eye* 3 900.0)
+          (set-pipeline-uniform! *opaque* 'eye *eye*)
+          (draw-mesh *opaque* *city*)
+          ;; glass last, blended over what is behind it
+          (for-each (lambda (d)
+                      (when (cadddr d)
+                        (draw-mesh-range *glass* *floor* (car d) (cadr d))))
+                    *draws*))
+        (set! *world-ms* (ms-since t0))))
+
+    (define (render-post!)
+      (let ((t0 (current-jiffy)))
+        (when *dither*
+          (with-3d-pass *post* #f
+            (draw-mesh *post-pipe* *tri* *view-tex*)))
+        (set! *post-ms* (ms-since t0))))
+
+    ;; Put the frame on a w x h window at the largest whole scale that
+    ;; fits, centred; returns the scale.
+    (define (render-composite! w h)
+      (let* ((k (max 1 (exact (floor (min (/ w VIEW-W) (/ h VIEW-H))))))
+             (ox (exact (floor (/ (- w (* VIEW-W k)) 2))))
+             (oy (exact (floor (/ (- h (* VIEW-H k)) 2)))))
+        (draw-render-target (if *dither* *post* *view*) ox oy (* VIEW-W k) (* VIEW-H k))
+        k))))

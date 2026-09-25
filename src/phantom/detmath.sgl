@@ -1,0 +1,68 @@
+;;; (phantom detmath) - sine and cosine from plain arithmetic, so the walker
+;;; computes the same bits on every target.
+;;;
+;;; The walker's step has to replay identically natively and on the web
+;;; (gate 5). IEEE add, multiply, divide and sqrt are correctly rounded on
+;;; both, but sin and cos come from the platform's libm (glibc natively,
+;;; the wasm libc on the web), which may differ in the last bit, and a
+;;; last-bit difference in a heading grows into a different position over a
+;;; walk. These use only + - * / and round, so they agree everywhere. They
+;;; are accurate to about 1e-15 on |x| < 1000, which is all a heading needs.
+
+(define-library (phantom detmath)
+  (import (sigil core)
+          (sigil math))
+
+  (export dsin dcos PI TAU)
+
+  (begin
+
+    (define PI 3.141592653589793)
+    (define TAU 6.283185307179586)
+    (define PIO2 1.5707963267948966)
+
+    ;; sin r for |r| <= pi/4: the Taylor series to r^15 (the next term is
+    ;; below 1e-17 there), evaluated by Horner's rule.
+    (define (sin-kernel r)
+      (let ((r2 (* r r)))
+        (* r (+ 1.0 (* r2 (+ -0.16666666666666666
+                            (* r2 (+ 0.008333333333333333
+                                     (* r2 (+ -1.984126984126984e-4
+                                              (* r2 (+ 2.7557319223985893e-6
+                                                       (* r2 (+ -2.505210838544172e-8
+                                                                (* r2 (+ 1.6059043836821613e-10
+                                                                         (* r2 -7.647163731819816e-13))))))))))))))))
+
+    ;; cos r for |r| <= pi/4: the series to r^16.
+    (define (cos-kernel r)
+      (let ((r2 (* r r)))
+        (+ 1.0 (* r2 (+ -0.5
+                        (* r2 (+ 0.041666666666666664
+                                 (* r2 (+ -0.001388888888888889
+                                          (* r2 (+ 2.48015873015873e-5
+                                                   (* r2 (+ -2.755731922398589e-7
+                                                            (* r2 (+ 2.08767569878681e-9
+                                                                     (* r2 (+ -1.1470745597729725e-11
+                                                                              (* r2 4.779477332387385e-14)))))))))))))))))
+
+    ;; x = k pi/2 + r with |r| <= pi/4; the quadrant is k mod 4.
+    (define (quadrant x) (modulo (exact (round (/ x PIO2))) 4))
+    (define (reduced x) (- x (* (round (/ x PIO2)) PIO2)))
+
+    (define (dsin x)
+      (let ((r (reduced x)))
+        (let ((q (quadrant x)))
+        (cond
+          ((= q 0) (sin-kernel r))
+          ((= q 1) (cos-kernel r))
+          ((= q 2) (- (sin-kernel r)))
+          (else (- (cos-kernel r)))))))
+
+    (define (dcos x)
+      (let ((r (reduced x)))
+        (let ((q (quadrant x)))
+        (cond
+          ((= q 0) (cos-kernel r))
+          ((= q 1) (- (sin-kernel r)))
+          ((= q 2) (- (cos-kernel r)))
+          (else (sin-kernel r))))))))

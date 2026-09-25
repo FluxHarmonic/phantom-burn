@@ -1,0 +1,252 @@
+;;; (phantom game) - The P0 game: walk the floor.
+;;;
+;;; The shells hand it a floor (meshes, textures and the collision) and
+;;; call (game-frame! dt w h controls) once a frame. The walker steps at a
+;;; fixed TICK (1/60 s) from an accumulator; the camera draws the eyes
+;;; interpolated between the last two ticks, with any look not yet stepped
+;;; added on top, so the view turns the frame the mouse moves.
+;;;
+;;; Controls (one vector a frame, from the shell):
+;;;   0 held?     (lambda (key) bool): w a s d, shift (sneak), control or
+;;;               r (run; the web uses r alone, since Ctrl+W closes a tab),
+;;;               q e (lean), and the arrows (look)
+;;;   1 pressed   the keys pressed this frame (symbols): c crouch; the
+;;;               style lab's p (dither on/off), [ ] (spread -/+ 8),
+;;;               b (Bayer 4x4 / 8x8), n (next palette), - = (fog), h (HUD);
+;;;               7 8 9 (go to the export's three views)
+;;;   2 3         mouse motion this frame, pixels
+;;;   4 5         the move stick, -1..1, y down (the phone's left thumb)
+;;;   6 7         the look stick, -1..1, y down (the right thumb)
+;;;
+;;; A shot (the floor-shot review surface) holds the camera exactly at one
+;;; of the floor's views with that view's field of view, and steps nothing.
+
+(define-library (phantom game)
+  (import (sigil core)
+          (sigil math)
+          (sigil time)
+          (sigil graphics)
+          (phantom detmath)
+          (phantom collide)
+          (phantom walker)
+          (phantom render)
+          (phantom dither)
+          (phantom text)
+          (phantom stand-in))
+
+  (export game-init! game-frame! game-reload!
+          game-set-view! game-set-shot! game-set-hud! game-status
+          make-controls FOV)
+
+  (begin
+
+    (define FOV 62.0)               ; vertical, degrees (the export's 17 mm lens)
+    (define MOUSE-SENS 0.0022)      ; rad per pixel
+    (define STICK-YAW 2.6)          ; rad/s at full push
+    (define STICK-PITCH 1.6)
+    (define KEY-YAW 2.0)
+    (define MAX-DT 0.25)
+
+    (define (make-controls held? pressed mdx mdy sx sy lx ly)
+      (vector held? pressed mdx mdy sx sy lx ly))
+
+    ;; --- state ---------------------------------------------------------------
+
+    (define *coll* #f)
+    (define *walker* #f)
+    (define *prev* #f)
+    (define *acc* 0.0)
+    (define *pending-yaw* 0.0)
+    (define *pending-pitch* 0.0)
+    (define *crouch-press* #f)
+    (define *shot* #f)              ; #f, or a view index
+    (define *hud* 1)                ; 0 off, 1 stats, 2 stats and keys
+    (define *cam* (make-camera))
+    (define *frame-ms* 16.7)
+    (define *cpu-ms* 0.0)
+    (define *hud-lines* '())
+    (define *hud-age* 1.0)
+    (define *draws* 0)
+    (define *ticks* 0)
+
+    (define (game-status)
+      (list 'x (walker-x *walker*) 'y (walker-y *walker*) 'z (walker-z *walker*)
+            'ticks *ticks* 'dither (render-dither?) 'spread (render-spread)
+            'bayer (render-bayer) 'palette (render-palette)))
+
+    (define (view-ref k) (list-ref stand-in-views (min k (- (length stand-in-views) 1))))
+
+    ;; The walker at view k: the eyes' place, feet on the floor under them.
+    (define (walker-at-view k)
+      (let* ((v (view-ref k))
+             (x (list-ref v 1)) (y (list-ref v 2)) (ez (list-ref v 3))
+             (floor (and *coll* (collide-floor *coll* x y (- ez 3.0) ez)))
+             (w (make-walker x y (or floor (- ez (- STAND EYE-DROP))) (list-ref v 4))))
+        w))
+
+    (define (game-set-view! k)
+      (set! *walker* (walker-at-view k))
+      (set! *prev* *walker*)
+      (set! *acc* 0.0))
+
+    (define (game-set-shot! k) (set! *shot* k))
+    (define (game-set-hud! n) (set! *hud* n))
+
+    ;; The floor: (load-mesh* layout name) and (load-texture* name) load
+    ;; the stand-in's files; coll is its (phantom collide) collision.
+    (define (game-init! load-mesh* load-texture* coll)
+      (render-init!)
+      (text-init!)
+      (game-reload! load-mesh* load-texture* coll)
+      (game-set-view! 0))
+
+    ;; A new floor under the walker's feet (live reload): the walker keeps
+    ;; its place.
+    (define (game-reload! load-mesh* load-texture* coll)
+      (render-load-stand-in! load-mesh* load-texture* stand-in-draws stand-in-lights)
+      (set! *coll* coll))
+
+    ;; --- input ---------------------------------------------------------------
+
+    (define (axis held? plus minus) (+ (if (held? plus) 1.0 0.0) (if (held? minus) -1.0 0.0)))
+
+    (define (style-key! k)
+      (let ((name (symbol->string k)))
+        (cond ((string=? name "p") (render-dither! (not (render-dither?))))
+              ((string=? name "[") (render-spread! (- (render-spread) 8.0)))
+              ((string=? name "]") (render-spread! (+ (render-spread) 8.0)))
+              ((string=? name "b") (render-bayer! (if (= (render-bayer) 4) 8 4)))
+              ((string=? name "n") (render-palette! (next-palette (render-palette))))
+              ((string=? name "-") (render-fog! (* (render-fog) 0.8)))
+              ((string=? name "=") (render-fog! (* (render-fog) 1.25)))
+              ((string=? name "h") (set! *hud* (modulo (+ *hud* 1) 3)))
+              ((string=? name "c") (set! *crouch-press* #t))
+              ((string=? name "7") (game-set-view! 0))
+              ((string=? name "8") (game-set-view! 1))
+              ((string=? name "9") (game-set-view! 2))
+              (else #f))))
+
+    (define (next-palette p)
+      (let loop ((ns (palette-names)))
+        (cond ((null? ns) (car (palette-names)))
+              ((eq? (car ns) p) (if (null? (cdr ns)) (car (palette-names)) (cadr ns)))
+              (else (loop (cdr ns))))))
+
+    (define (tick-input held? sx sy)
+      (let* ((mx (+ (axis held? 'd 'a) sx))
+             (my (- (axis held? 'w 's) sy))
+             (lean (cond ((and (held? 'q) (not (held? 'e))) -1)
+                         ((and (held? 'e) (not (held? 'q))) 1)
+                         (else 0)))
+             (in (make-input mx my *pending-yaw* *pending-pitch*
+                             (held? 'shift) (or (held? 'control) (held? 'r))
+                             *crouch-press* lean)))
+        (set! *pending-yaw* 0.0)
+        (set! *pending-pitch* 0.0)
+        (set! *crouch-press* #f)
+        in))
+
+    ;; --- the frame -------------------------------------------------------------
+
+    (define (lerp a b t) (+ a (* t (- b a))))
+
+    (define (game-frame! dt w h ctl)
+      (let ((t0 (current-jiffy))
+            (dt (min MAX-DT (max 0.0 dt)))
+            (held? (vector-ref ctl 0)))
+        (for-each style-key! (vector-ref ctl 1))
+        ;; look: the mouse, the look stick (squared, for fine aim), the arrows
+        (let ((lx (vector-ref ctl 6)) (ly (vector-ref ctl 7)))
+          (set! *pending-yaw* (+ *pending-yaw*
+                                 (* -1.0 MOUSE-SENS (vector-ref ctl 2))
+                                 (* -1.0 STICK-YAW dt lx (abs lx))
+                                 (* KEY-YAW dt (axis held? 'left 'right))))
+          (set! *pending-pitch* (+ *pending-pitch*
+                                   (* -1.0 MOUSE-SENS (vector-ref ctl 3))
+                                   (* -1.0 STICK-PITCH dt ly (abs ly))
+                                   (* KEY-YAW dt (axis held? 'up 'down)))))
+        (if *shot*
+            (let ((v (view-ref *shot*)))
+              (camera-set! *cam* (list-ref v 1) (list-ref v 2) (list-ref v 3)
+                           (list-ref v 4) (list-ref v 5) 0.0 (list-ref v 6)))
+            (begin
+              (set! *acc* (+ *acc* dt))
+              (let loop ()
+                (when (>= *acc* TICK)
+                  (set! *prev* *walker*)
+                  (set! *walker* (walker-step *walker* (tick-input held? (vector-ref ctl 4) (vector-ref ctl 5)) TICK *coll*))
+                  (set! *ticks* (+ *ticks* 1))
+                  (set! *acc* (- *acc* TICK))
+                  (loop)))
+              (let ((a (/ *acc* TICK)) (p *prev*) (c *walker*))
+                (camera-set! *cam*
+                             (lerp (walker-eye-x p) (walker-eye-x c) a)
+                             (lerp (walker-eye-y p) (walker-eye-y c) a)
+                             (lerp (walker-eye-z p) (walker-eye-z c) a)
+                             (+ (walker-yaw c) *pending-yaw*)
+                             (max -1.5 (min 1.5 (+ (walker-pitch c) *pending-pitch*)))
+                             (lerp (walker-roll p) (walker-roll c) a)
+                             FOV))))
+        (set! *frame-ms* (+ (* 0.9 *frame-ms*) (* 0.1 1000.0 dt)))
+        (begin-frame)
+        (clear-screen 0.0 0.0 0.0)
+        (render-world! *cam*)
+        (render-post!)
+        (let ((k (render-composite! w h)))
+          (when (> *hud* 0)
+            (set! *hud-age* (+ *hud-age* dt))
+            (when (> *hud-age* 0.25)
+              (set! *hud-age* 0.0)
+              (refresh-hud! k))
+            (draw-hud! k)))
+        (end-frame)
+        (let ((spent (/ (* 1000.0 (- (current-jiffy) t0)) (jiffies-per-second))))
+          (set! *cpu-ms* (+ (* 0.9 *cpu-ms*) (* 0.1 spent))))))
+
+    ;; --- the HUD ---------------------------------------------------------------
+
+    (define (fixed0 x) (number->string (exact (round x))))
+
+    (define (surface-name tag)
+      (let ((names stand-in-surfaces))
+        (if (< tag (length names)) (symbol->string (list-ref names tag)) "?")))
+
+    (define (refresh-hud! k)
+      (let ((s (gfx-frame-stats)) (w *walker*))
+        (set! *hud-lines*
+              (append
+               (list (string-append "FRAME " (fixed1 *frame-ms*) "  CPU " (fixed1 *cpu-ms*)
+                                    "  WORLD " (fixed1 (render-world-ms)) "  POST " (fixed1 (render-post-ms))
+                                    "  DRAWS " (number->string (vector-ref s 0)) "  X" (number->string k))
+                     (string-append (if (render-dither?) "DITHER ON" "DITHER OFF")
+                                    "  BAYER " (number->string (render-bayer))
+                                    "  SPREAD " (fixed0 (render-spread))
+                                    "  " (symbol->string (render-palette))
+                                    "  FOG " (fixed0 (render-fog)))
+                     (if *shot*
+                         (string-append "SHOT " (symbol->string (car (view-ref *shot*))))
+                         (string-append (fixed1 (walker-x w)) " " (fixed1 (walker-y w)) " " (fixed1* (walker-z w))
+                                        (if (walker-crouching? w) "  CROUCH" "")
+                                        (if (walker-mantling? w) "  MANTLE" "")
+                                        "  " (surface-name (walker-surface w)))))
+               (if (= *hud* 2)
+                   (list "WASD MOVE  SHIFT SNEAK  R RUN  C CROUCH  Q E LEAN  MOUSE LOOK"
+                         "P DITHER  [ ] SPREAD  B BAYER  N PALETTE  - = FOG  7 8 9 VIEWS  H HUD")
+                   '())))))
+
+    ;; fixed1 for a number that may be negative
+    (define (fixed1* x) (if (< x 0.0) (string-append "-" (fixed1 (- x))) (fixed1 x)))
+
+    (define (draw-hud! k)
+      (let* ((ts (max 1 (min 3 k)))
+             (n (length *hud-lines*))
+             (wmax (let loop ((ls *hud-lines*) (m 0)) (if (null? ls) m (loop (cdr ls) (max m (text-width (car ls) ts)))))))
+        (set-color 0.0 0.0 0.0 0.55)
+        (with-blend-mode 'normal (draw-filled-rect 0 0 (+ 8 wmax) (+ 8 (* n 9 ts))))
+        (set-color 1.0 0.9 0.4)
+        (let loop ((ls *hud-lines*) (y 4))
+          (unless (null? ls)
+            (draw-text (car ls) 4 y ts)
+            (set-color 0.8 0.85 1.0)
+            (loop (cdr ls) (+ y (* 9 ts)))))
+        (set-color 1.0 1.0 1.0)))))

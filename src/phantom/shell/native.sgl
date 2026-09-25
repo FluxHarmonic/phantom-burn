@@ -1,12 +1,28 @@
 ;;; (phantom shell native) - The desktop window.
 ;;;
-;;;   phantom-burn [--size WxH] [--frames N]
+;;;   phantom-burn [--floor DIR] [--size WxH] [--frames N] [--view K]
+;;;                [--shot K] [--hud 0|1|2] [--dither on|off] [--spread S]
+;;;                [--bayer 4|8] [--palette NAME] [--fog M]
+;;;
+;;; --floor names the floor's directory (default assets/stand-in, the G0
+;;; export: floor14.sgm, city.sgm, the textures, floor14.collide). The
+;;; floor reloads by itself when floor14.sgm or floor14.collide changes
+;;; (checked twice a second), with the walker where it stands.
+;;; --view starts at one of the floor's views (0 arrival, 1 overlook,
+;;; 2 office); --shot holds the camera exactly there, for floor shots.
+;;;
+;;; Click to capture the mouse for looking (sigil-desktop 0.12's cursor
+;;; capture); Escape gives it back, and quits when it is not captured.
 
 (define-library (phantom shell native)
   (import (sigil core)
           (sigil process)
+          (sigil fs)
           (sigil desktop)
-          (sigil graphics))
+          (sigil graphics)
+          (phantom soup)
+          (phantom render)
+          (phantom game))
 
   (export native-main)
 
@@ -17,24 +33,95 @@
             ((and (string=? (car args) flag) (pair? (cdr args))) (cadr args))
             (else (arg-value (cdr args) flag default))))
 
-    (define (game-loop frames)
+    (define (size-of s)
+      (let ((x-at (let find ((i 0))
+                    (cond ((>= i (string-length s)) #f)
+                          ((char=? (string-ref s i) #\x) i)
+                          (else (find (+ i 1)))))))
+        (if x-at
+            (cons (or (string->number (substring s 0 x-at)) 1440)
+                  (or (string->number (substring s (+ x-at 1) (string-length s))) 810))
+            (cons 1440 810))))
+
+    (define *dir* "assets/stand-in")
+    (define (path name) (string-append *dir* "/" name))
+
+    (define (load-mesh* layout name) (load-mesh layout (path name)))
+
+    (define (load-texture* name)
+      (let* ((img (load-image (path name)))
+             (tex (load-texture img)))
+        (image-free! img)
+        tex))
+
+    (define (load-collision)
+      (pbc1->collision (read-file-bytes (path "floor14.collide"))))
+
+    (define WATCHED '("floor14.sgm" "floor14.collide"))
+    (define (stamps) (map (lambda (n) (or (file-mtime-ns (path n)) 0)) WATCHED))
+
+    ;; The keys whose presses the game reads (style lab, crouch, views).
+    (define PRESS-KEYS
+      (map string->symbol '("c" "p" "[" "]" "b" "n" "-" "=" "h" "7" "8" "9")))
+
+    (define (pressed-keys)
+      (let loop ((ks PRESS-KEYS) (acc '()))
+        (cond ((null? ks) acc)
+              ((key-pressed? (car ks)) (loop (cdr ks) (cons (car ks) acc)))
+              (else (loop (cdr ks) acc)))))
+
+    (define (apply-settings! args)
+      (let ((d (arg-value args "--dither" #f))
+            (s (string->number (arg-value args "--spread" "none")))
+            (b (string->number (arg-value args "--bayer" "none")))
+            (p (arg-value args "--palette" #f))
+            (f (string->number (arg-value args "--fog" "none")))
+            (h (string->number (arg-value args "--hud" "none")))
+            (v (string->number (arg-value args "--view" "none")))
+            (shot (string->number (arg-value args "--shot" "none"))))
+        (when d (render-dither! (string=? d "on")))
+        (when s (render-spread! s))
+        (when b (render-bayer! b))
+        (when p (render-palette! (string->symbol p)))
+        (when f (render-fog! f))
+        (when h (game-set-hud! h))
+        (when v (game-set-view! v))
+        (when shot (game-set-shot! shot))))
+
+    (define (game-loop args frames)
       (lambda ()
         (gfx-setup)
+        (game-init! load-mesh* load-texture* (load-collision))
+        (apply-settings! args)
         (display "phantom-burn: ready") (newline)
-        (let loop ((n 0))
-          (wait-frame)
-          (begin-frame)
-          ;; C-BG, Crash's violet-black
-          (clear-screen (/ 13 255) (/ 10 255) (/ 26 255))
-          (end-frame)
-          (cond ((key-pressed? 'escape) (request-quit))
-                ((quit-requested?) #t)
-                ((and frames (>= n frames)) (request-quit))
-                (else (loop (+ n 1)))))
+        (let loop ((n 0) (seen (stamps)))
+          (let* ((dt (wait-frame))
+                 (captured? (cursor-captured?)))
+            (when (and (not captured?) (mouse-pressed? 'left))
+              (set-cursor-captured! #t #f))
+            (game-frame! dt (frame-width) (frame-height)
+                         (make-controls key-down? (pressed-keys)
+                                        (if captured? (mouse-dx) 0) (if captured? (mouse-dy) 0)
+                                        0.0 0.0 0.0 0.0))
+            (let ((seen (if (= 0 (modulo n 30))
+                            (let ((now (stamps)))
+                              (unless (equal? now seen)
+                                (display "phantom-burn: floor changed, reloading") (newline)
+                                (game-reload! load-mesh* load-texture* (load-collision)))
+                              now)
+                            seen)))
+              (cond ((and (key-pressed? 'escape) captured?) (set-cursor-captured! #f) (loop (+ n 1) seen))
+                    ((key-pressed? 'escape) (request-quit))
+                    ((quit-requested?) #t)
+                    ((and frames (>= n frames)) (request-quit))
+                    (else (loop (+ n 1) seen))))))
+        (display "phantom-burn: status ") (write (game-status)) (newline)
         (gfx-shutdown)))
 
     (define (native-main . _args)
       (let* ((args (cdr (command-line)))
-             (frames (string->number (arg-value args "--frames" "none"))))
-        (run-game "Phantom Burn" 1440 810 (game-loop frames))
+             (frames (string->number (arg-value args "--frames" "none")))
+             (size (size-of (arg-value args "--size" "1440x810"))))
+        (set! *dir* (arg-value args "--floor" *dir*))
+        (run-game "Phantom Burn" (car size) (cdr size) (game-loop args frames))
         0))))

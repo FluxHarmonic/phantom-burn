@@ -17,11 +17,131 @@
              -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
     #status { position: fixed; left: 8px; bottom: 8px; color: #aab; font: 13px ui-monospace, monospace; }
     #status:empty, #status [data-sigil-booting] { display: none; }
+    /* The phone's controls: a stick under each thumb where it lands (left
+       half moves, right half looks), and a crouch button. Shown on the
+       first touch, or with ?touch. */
+    .ring, .knob, #crouch { position: fixed; border-radius: 50%; pointer-events: none; box-sizing: border-box;
+                            display: none; z-index: 2; }
+    .ring { width: 120px; height: 120px; margin: -60px 0 0 -60px;
+            border: 2px solid rgba(204, 230, 255, 0.35); background: rgba(204, 230, 255, 0.05); }
+    .knob { width: 48px; height: 48px; margin: -24px 0 0 -24px; background: rgba(204, 230, 255, 0.4); }
+    #crouch { right: 24px; top: 24px; width: 64px; height: 64px; pointer-events: auto; touch-action: none;
+              border: 2px solid rgba(204, 230, 255, 0.35); background: rgba(204, 230, 255, 0.06);
+              color: rgba(204, 230, 255, 0.7); font: bold 22px ui-monospace, monospace;
+              text-align: center; line-height: 60px; }
+    #crouch.down { background: rgba(204, 230, 255, 0.3); }
+    body.touch #crouch { display: block; }
   </style>
 </head>
 <body>
   <canvas id="stage"></canvas>
+  <div class="ring" id="lring"></div><div class="knob" id="lknob"></div>
+  <div class="ring" id="rring"></div><div class="knob" id="rknob"></div>
+  <div id="crouch">C</div>
   <div id="status"></div>
+  <script>
+  // Phantom Burn's page. The generic loader (sigil-web-app.js) boots the
+  // wasm, forwards keydown/keyup and runs the frame loop. This page adds:
+  //   the query, sent to the game as ("params", QUERY) before anything loads:
+  //     ?floor=NAME   the floor under assets/NAME/ (default stand-in)
+  //     ?view=K       start at the floor's view K (0 arrival, 1 overlook, 2 office)
+  //     ?shot=K       hold the camera at view K (floor shots)
+  //     ?hud=0|1|2    the readout: off, stats, stats and keys
+  //     ?dither=off   ?spread=S  ?bayer=4|8  ?palette=embers|ramped  ?fog=M
+  //     ?touch        show the phone controls without a touch screen
+  //   the collision (assets/NAME/floor14.collide.b64) as ("collide", BASE64);
+  //   the mouse: a click locks the pointer, movement is ("look", "dx,dy");
+  //   touch: a thumb landing on the left half is a move stick, on the right
+  //     half a look stick, each ("move"|"lookstick", "x,y") in -1..1; the C
+  //     button is ("press", "c").
+  (function () {
+    "use strict";
+    var params = new URLSearchParams(location.search);
+    var floor = (params.get("floor") || "stand-in").replace(/[^A-Za-z0-9_-]/g, "");
+    function withApp(fn) {
+      if (globalThis.SigilWebApp) { fn(globalThis.SigilWebApp); return; }
+      document.addEventListener("sigil-web-app-ready", function (e) { fn(e.detail); }, { once: true });
+    }
+    if (params.has("touch")) document.body.classList.add("touch");
+    withApp(function (app) {
+      var canvas = document.getElementById("stage");
+      var status = document.getElementById("status");
+      if (app.ready && app.ready.then) app.ready.then(function () { status.textContent = ""; });
+      var booted = app.ready && app.ready.then ? app.ready : Promise.resolve();
+      booted.then(function () {
+        app.dispatch("params", location.search.replace(/^\?/, ""));
+        return fetch("assets/" + floor + "/floor14.collide.b64").then(function (r) {
+        if (!r.ok) throw new Error("no floor " + floor + " (" + r.status + ")");
+        return r.text();
+      }).then(function (t) { app.dispatch("collide", t); });
+      }).catch(function (e) { status.textContent = String(e.message || e); });
+
+      canvas.addEventListener("click", function () {
+        if (document.pointerLockElement !== canvas && canvas.requestPointerLock) canvas.requestPointerLock();
+      });
+      document.addEventListener("mousemove", function (e) {
+        if (document.pointerLockElement === canvas && (e.movementX || e.movementY)) {
+          app.dispatch("look", e.movementX + "," + e.movementY);
+        }
+      });
+
+      var R = 60;
+      function stickEl(side) {
+        return { ring: document.getElementById(side + "ring"), knob: document.getElementById(side + "knob") };
+      }
+      var sticks = { l: null, r: null }, els = { l: stickEl("l"), r: stickEl("r") };
+      var events = { l: "move", r: "lookstick" };
+      function show(side, s) {
+        var e = els[side];
+        e.ring.style.display = e.knob.style.display = s ? "block" : "none";
+        if (!s) return;
+        e.ring.style.left = s.x + "px"; e.ring.style.top = s.y + "px";
+        e.knob.style.left = (s.x + s.dx * R) + "px"; e.knob.style.top = (s.y + s.dy * R) + "px";
+      }
+      function send(side) {
+        var s = sticks[side];
+        app.dispatch(events[side], s ? s.dx.toFixed(3) + "," + s.dy.toFixed(3) : "0,0");
+      }
+      canvas.addEventListener("touchstart", function (e) {
+        document.body.classList.add("touch");
+        for (var i = 0; i < e.changedTouches.length; i++) {
+          var t = e.changedTouches[i];
+          var side = t.clientX < window.innerWidth / 2 ? "l" : "r";
+          if (!sticks[side]) { sticks[side] = { id: t.identifier, x: t.clientX, y: t.clientY, dx: 0, dy: 0 }; show(side, sticks[side]); }
+        }
+        e.preventDefault();
+      }, { passive: false });
+      canvas.addEventListener("touchmove", function (e) {
+        for (var i = 0; i < e.changedTouches.length; i++) {
+          var t = e.changedTouches[i];
+          ["l", "r"].forEach(function (side) {
+            var s = sticks[side];
+            if (!s || s.id !== t.identifier) return;
+            var dx = (t.clientX - s.x) / R, dy = (t.clientY - s.y) / R, m = Math.hypot(dx, dy);
+            if (m > 1) { dx /= m; dy /= m; }
+            s.dx = dx; s.dy = dy; show(side, s); send(side);
+          });
+        }
+        e.preventDefault();
+      }, { passive: false });
+      function end(e) {
+        for (var i = 0; i < e.changedTouches.length; i++) {
+          var t = e.changedTouches[i];
+          ["l", "r"].forEach(function (side) {
+            if (sticks[side] && sticks[side].id === t.identifier) { sticks[side] = null; show(side, null); send(side); }
+          });
+        }
+      }
+      canvas.addEventListener("touchend", end);
+      canvas.addEventListener("touchcancel", end);
+      var crouch = document.getElementById("crouch");
+      crouch.addEventListener("touchstart", function (e) {
+        crouch.classList.add("down"); app.dispatch("press", "c"); e.preventDefault();
+      }, { passive: false });
+      crouch.addEventListener("touchend", function () { crouch.classList.remove("down"); });
+    });
+  })();
+  </script>
   <!--sigil:app-->
 </body>
 </html>

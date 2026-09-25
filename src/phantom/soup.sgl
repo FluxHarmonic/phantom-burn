@@ -1,0 +1,61 @@
+;;; (phantom soup) - Collision soup files: the floor compiler's PBC1 bytes
+;;; (contract draft 1) read into a (phantom collide) collision, and base64
+;;; decoding for the web, where the page hands the bytes over as a string.
+;;;
+;;; PBC1, little-endian: "PBC1", u32 N, N x 9 float32 (design
+;;; coordinates), N x u8 surface, N x u8 room.
+
+(define-library (phantom soup)
+  (import (sigil core)
+          (sigil math)
+          (phantom collide))
+
+  (export pbc1->collision base64->bytevector)
+
+  (begin
+
+    (define (u32 bv k)
+      (+ (bytevector-u8-ref bv k)
+         (* 256 (bytevector-u8-ref bv (+ k 1)))
+         (* 65536 (bytevector-u8-ref bv (+ k 2)))
+         (* 16777216 (bytevector-u8-ref bv (+ k 3)))))
+
+    ;; The collision in bv, or an error naming what is wrong.
+    (define (pbc1->collision bv)
+      (unless (and (>= (bytevector-length bv) 8)
+                   (= (bytevector-u8-ref bv 0) 80) (= (bytevector-u8-ref bv 1) 66)
+                   (= (bytevector-u8-ref bv 2) 67) (= (bytevector-u8-ref bv 3) 49))
+        (error "pbc1->collision: not a PBC1 file"))
+      (let ((n (u32 bv 4)))
+        (unless (= (bytevector-length bv) (+ 8 (* 38 n)))
+          (error "pbc1->collision: the size does not match the triangle count"))
+        (collision-from-soup (bytevector-copy bv 8 (+ 8 (* 36 n)))
+                             (bytevector-copy bv (+ 8 (* 36 n)) (+ 8 (* 37 n)))
+                             (bytevector-copy bv (+ 8 (* 37 n)) (+ 8 (* 38 n))))))
+
+    (define (b64-value c)
+      (let ((i (char->integer c)))
+        (cond ((and (>= i 65) (<= i 90)) (- i 65))
+              ((and (>= i 97) (<= i 122)) (+ 26 (- i 97)))
+              ((and (>= i 48) (<= i 57)) (+ 52 (- i 48)))
+              ((= i 43) 62)
+              ((= i 47) 63)
+              (else #f))))
+
+    ;; Standard base64 (with or without padding; whitespace skipped).
+    (define (base64->bytevector s)
+      (let* ((n (string-length s))
+             (out (make-bytevector (+ 3 (* 3 (exact (floor (/ n 4))))) 0)))
+        (let loop ((i 0) (acc 0) (bits 0) (k 0))
+          (if (>= i n)
+              (bytevector-copy out 0 k)
+              (let ((v (b64-value (string-ref s i))))
+                (if (not v)
+                    (loop (+ i 1) acc bits k)
+                    (let ((acc (+ (* acc 64) v)) (bits (+ bits 6)))
+                      (if (>= bits 8)
+                          (let* ((shift (expt 2 (- bits 8)))
+                                 (byte (exact (floor (/ acc shift)))))
+                            (bytevector-u8-set! out k byte)
+                            (loop (+ i 1) (- acc (* byte shift)) (- bits 8) (+ k 1)))
+                          (loop (+ i 1) acc bits k)))))))))))

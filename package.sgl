@@ -79,6 +79,8 @@
       description: "Compile the game (and, on the web config, link the browser app)"
       steps: (list
         (compile-sigil-modules sources: "src/**/*.sgl")
+        ;; assets/ (the floors' meshes, textures and collision) beside the page
+        (link-assets)
         (lambda (ctx)
           (if (memq (target-os ctx) '(wasm wasi))
               ((link-web-application name: "phantom-burn" html-mount-id: "status") ctx)
