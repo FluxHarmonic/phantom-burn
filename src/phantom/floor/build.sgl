@@ -436,7 +436,7 @@
     (define CITY-OUT 1.5)
     (define CITY-RGB (list (/ 255 255.0) (/ 89 255.0) (/ 217 255.0)))   ; #FF59D9
 
-    (define CITY-DEFAULT '(0.55 9.0))   ; (strength radius)
+    (define CITY-DEFAULT '(0.3 6.0))    ; (strength radius): David's pick (2026-09-25), a glow by the glass, not pools across the floor
 
     ;; The city light's (strength radius): the look-lab setting, or the default.
     (define (look-city c)

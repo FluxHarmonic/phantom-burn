@@ -58,9 +58,12 @@
     (define LAYOUT-SPEC '((position float3) (uv float2) (normal float3) (color ubyte4n)
                           (emission ubyte4n) (light float4) (circuit ubyte4)))
     (define STRIDE 60)
-    ;; The light every surface gets with every circuit off (G0's demo value:
-    ;; the export's world ambient #21173D at 0.6, lifted so a dark room reads).
-    (define AMBIENT '(0.2 0.14 0.34))
+    ;; The contract's ambient, the light every surface gets besides the baked
+    ;; circuits: the shell's night floor plus its full bounce, NIGHT (0.042
+    ;; 0.042 0.042) + BOUNCE (0.138 0.138 0.138) in render.sgl. Neutral grey,
+    ;; David's pick (2026-09-25); it was G0's violet (0.2 0.14 0.34), which
+    ;; tinted every floor lavender and pushed the embers mapping to magenta.
+    (define AMBIENT '(0.18 0.18 0.18))
 
     (define-struct compiled-floor
       (name default: "") (path default: "") (problems default: '())
