@@ -1,0 +1,57 @@
+#!/bin/sh
+# floor-shot FLOOR [K...] - in-game shots of a compiled floor's views, beside
+# the Blender export's renders of the same views (design section 7, "Review
+# surfaces"; P0: "each floor-shot sits beside the export's render").
+#
+#   scripts/floor-shot 14-slice            the three export views (0 1 2)
+#   scripts/floor-shot 14-slice 0 3 6      views by the game's index
+#
+# Needs build/floors/FLOOR.{sgm,sgm.json,collide} and textures (phantom-burn
+# --floor-compile floors/FLOOR.floor) and SHOT_DISPLAY (your own Xvfb, never
+# David's display), as scripts/shot-native does. The shots come from the
+# game's own render path: the shell's scripts/floor-import.mjs brings the
+# floor in (run from a scratch copy, so the tracked assets/floors/ is never
+# touched), and scripts/shot-native takes each view with --shot K.
+#
+# The game orders a compiled floor's views: arrival overlook office (the
+# export's three), then its three dark views, then the floor's others.
+#
+# Writes build/floors/shots/FLOOR-K.png, and for K = 0 1 2 a side-by-side
+# FLOOR-K-vs-export.png (the game's 480x270 frame at 2x, then the export's
+# look-test render). Exit 0, or 2 when anything it needs is missing.
+set -eu
+cd "$(dirname "$0")/.."
+FLOOR="${1:?usage: scripts/floor-shot FLOOR [K...]}"; shift
+[ $# -gt 0 ] || set -- 0 1 2
+: "${SHOT_DISPLAY:?set SHOT_DISPLAY to your own Xvfb display}"
+SRC=build/floors
+for f in "$SRC/$FLOOR.sgm" "$SRC/$FLOOR.sgm.json" "$SRC/$FLOOR.collide"; do
+  [ -f "$f" ] || { echo "SETUP-FAILED: $f missing (phantom-burn --floor-compile floors/$FLOOR.floor)"; exit 2; }
+done
+EXPORT="${EXPORT_DIR:-$HOME/Ops/attachments/stealth-game-design}"
+TMP="$(mktemp -d /tmp/floor-shot.XXXXXX)"
+trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/scripts" "$TMP/assets"
+cp scripts/floor-import.mjs "$TMP/scripts/"
+ln -s "$PWD/assets/stand-in" "$TMP/assets/stand-in"
+node "$TMP/scripts/floor-import.mjs" "$PWD/$SRC" "$FLOOR"
+DIR="$TMP/assets/floors/$FLOOR"
+[ -f "$DIR/floor.sexp" ] || { echo "SETUP-FAILED: the import wrote no $DIR/floor.sexp"; exit 2; }
+mkdir -p "$SRC/shots"
+for k in "$@"; do
+  out="$SRC/shots/$FLOOR-$k.png"
+  rm -f "$out"
+  scripts/shot-native "$out" --floor "$DIR" --shot "$k" --hud 0
+  [ -f "$out" ] || { echo "SETUP-FAILED: no shot for view $k"; exit 2; }
+  case "$k" in
+    0) ref="$EXPORT/look-2-arrival.png" ;;
+    1) ref="$EXPORT/look-3-overlook.png" ;;
+    2) ref="$EXPORT/look-4-office.png" ;;
+    *) ref="" ;;
+  esac
+  if [ -n "$ref" ] && [ -f "$ref" ]; then
+    guix shell imagemagick -- convert \( "$out" -filter point -resize 200% \) \( "$ref" -resize 960x540 \) +append \
+      "$SRC/shots/$FLOOR-$k-vs-export.png"
+    echo "floor-shot: $SRC/shots/$FLOOR-$k-vs-export.png (game | export)"
+  fi
+done
