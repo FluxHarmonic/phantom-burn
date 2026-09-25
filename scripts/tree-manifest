@@ -1,0 +1,17 @@
+#!/bin/sh
+# Print the identity of a deploy: one "sha256  path" line per file under DIR
+# (the staged tree, as `wrangler pages deploy` uploads it). After Harkfell's
+# scripts/tree-manifest, without its Functions and wrangler config (this site
+# has neither).
+#
+#   scripts/tree-manifest DIR
+#
+# REFUSES (exit 1, nothing on stdout) when DIR holds anything but regular
+# files and directories: `find -type f` skips a symlink and wrangler's upload
+# follows it, so two trees with different link targets would share a manifest.
+set -eu
+DIR="${1:-}"
+[ -n "$DIR" ] && [ -d "$DIR" ] || { echo "tree-manifest: give the staged directory" >&2; exit 2; }
+ODD="$(find "$DIR" ! -type f ! -type d | head -5)"
+[ -z "$ODD" ] || { echo "tree-manifest: REFUSED: not a regular file or directory (a symlink?): $ODD" >&2; exit 1; }
+( cd "$DIR" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum ) | sed 's|  \./|  |'

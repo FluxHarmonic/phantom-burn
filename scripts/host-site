@@ -1,0 +1,31 @@
+#!/bin/sh
+# host-site DIR          serve a staged phantomburn.net tree on wg0 (https 8811,
+#                        http 8812) through scripts/serve-site.mjs, Pages' rules;
+#                        stops the game servers scripts/host started first
+# host-site --stop       stop them
+#
+# The certificate is scripts/host's ($HOSTDIR/tls). PIDs in $HOSTDIR/site-PORT.pid.
+set -eu
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+HOSTDIR="${HOSTDIR:-$HOME/Projects/Code/sigil/phantom-burn-hosted}"
+"$REPO/scripts/host" --stop > /dev/null 2>&1 || true
+cd "$HOSTDIR"
+HERE="$(pwd)"
+live_pid() {
+  f="site-$1.pid"; [ -f "$f" ] || return 0
+  pid="$(cat "$f")"
+  [ "$(basename "$(readlink "/proc/$pid/exe" 2>/dev/null || true)")" = node ] || return 0
+  [ "$(readlink "/proc/$pid/cwd" 2>/dev/null || true)" = "$HERE" ] || return 0
+  tr '\0' ' ' < "/proc/$pid/cmdline" | grep -q "serve-site.mjs" || return 0
+  echo "$pid"
+}
+for p in 8811 8812; do pid="$(live_pid $p)"; [ -z "$pid" ] || kill "$pid"; rm -f "site-$p.pid"; done
+[ "${1:-}" = --stop ] && exit 0
+DIR="$(cd "$REPO" && cd "${1:?usage: host-site DIR}" && pwd)"
+[ -f tls/cert.pem ] || { echo "host-site: no $HERE/tls (run scripts/host once)"; exit 1; }
+nohup node "$REPO/scripts/serve-site.mjs" "$DIR" 8811 --wg0 --tls --tls-dir tls > site-8811.log 2>&1 &
+echo $! > site-8811.pid
+nohup node "$REPO/scripts/serve-site.mjs" "$DIR" 8812 --wg0 > site-8812.log 2>&1 &
+echo $! > site-8812.pid
+sleep 1
+cat site-8811.log site-8812.log
