@@ -35,7 +35,7 @@
           (motif tune)
           (motif tune player))
   (export bank-tune-text bank-slots make-bank bank-render! bank-render-for! bank-sample bank-ready? bank-rate
-          bank-bed-loop BED-TUNE-TEXT BED-LOOP-S
+          bank-bed-loop crossfade-loop BED-TUNE-TEXT BED-LOOP-S
           SLOT-S BANK-SURFACES)
   (begin
     (define SLOT-S 0.6)
@@ -223,6 +223,21 @@
 
     (define (f32 bv i) (bytevector-ieee-single-ref bv (* 4 i) 'little))
 
+    ;; A seamless loop of l frames from src, starting w frames in: its first x
+    ;; frames are crossfaded (equal power) with the x that follow its end, so its
+    ;; last frame and its first are neighbours in src (src needs w + l + x frames).
+    (define (crossfade-loop src w l x)
+      (let ((loop-bv (make-bytevector (* 4 l) 0)))
+        (let fill ((i 0))
+          (when (< i l)
+            (let ((v (if (< i x)
+                         (let ((a (* (/ i (* 1.0 x)) 1.5707963267948966)))
+                           (+ (* (f32 src (+ w i)) (sin a)) (* (f32 src (+ w l i)) (cos a))))
+                         (f32 src (+ w i)))))
+              (bytevector-ieee-single-set! loop-bv (* 4 i) v (quote little)))
+            (fill (+ i 1))))
+        loop-bv))
+
     ;; the stage's buffer is full: move on
     (define (next-stage! b)
       (player-close! (vector-ref b 0))
@@ -237,19 +252,11 @@
            (vector-set! b 4 total)
            (vector-set! b 7 'bed)))
         ((bed)
-         (let* ((rate (vector-ref b 1)) (src (vector-ref b 2))
-                (w (exact (round (* BED-WARM-S rate))))
-                (l (exact (round (* BED-LOOP-S rate))))
-                (x (exact (round (* BED-XFADE-S rate))))
-                (loop-bv (make-bytevector (* 4 l) 0)))
-           (let fill ((i 0))
-             (when (< i l)
-               (let ((v (if (< i x)
-                            (let ((a (* (/ i (* 1.0 x)) 1.5707963267948966)))
-                              (+ (* (f32 src (+ w i)) (sin a)) (* (f32 src (+ w l i)) (cos a))))
-                            (f32 src (+ w i)))))
-                 (bytevector-ieee-single-set! loop-bv (* 4 i) v 'little))
-               (fill (+ i 1))))
+         (let* ((rate (vector-ref b 1))
+                (loop-bv (crossfade-loop (vector-ref b 2)
+                                         (exact (round (* BED-WARM-S rate)))
+                                         (exact (round (* BED-LOOP-S rate)))
+                                         (exact (round (* BED-XFADE-S rate))))))
            (vector-set! b 0 #f)
            (vector-set! b 2 (cdr (assq 'slots (vector-ref b 5))))
            (vector-set! b 5 '())

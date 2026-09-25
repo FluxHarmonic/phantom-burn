@@ -217,19 +217,20 @@
 ;; --- the bed as a loop (David's second bench: the bed as a player cost 1.86 ms) ---
 
 (test-group "the bed loop"
-  (test "is BED-LOOP-S long, sounds, and its wrap is an ordinary step (at or under the 99th percentile of its own)"
-    ;; with the crossfade, the last sample and the first are neighbours in the
-    ;; rendered audio; without it they are two unrelated points, a jump far above
-    ;; the loop's own steps for audio carried by a 120 Hz hum
-    (let* ((l (bank-bed-loop BANK-A)) (n (quotient (bytevector-length l) 4))
-           (steps (let loop ((i 7) (acc (quote ()))) (if (>= i n) acc (loop (+ i 7) (cons (abs (- (f32 l i) (f32 l (- i 1)))) acc)))))
-           (sorted (list->vector (list-sort < steps)))
-           (p99 (vector-ref sorted (exact (floor (* 0.99 (- (vector-length sorted) 1))))))
-           (wrap (abs (- (f32 l 0) (f32 l (- n 1))))))
+  (test "is BED-LOOP-S long and sounds"
+    (let* ((l (bank-bed-loop BANK-A)) (n (quotient (bytevector-length l) 4)))
       (assert-equal (exact (round (* BED-LOOP-S RATE))) n)
-      (assert-true (> (rms l) 0.001))
-      (unless (<= wrap p99) (display "wrap step ") (display wrap) (display " over the 99th percentile ") (display p99) (newline))
-      (assert-true (<= wrap p99))))
+      (assert-true (> (rms l) 0.001))))
+  (test "wraps seamlessly: on a ramp, the loop's last-to-first step is the ramp's own step"
+    ;; exact, not statistical: a percentile test on the real bed passed with the
+    ;; crossfade removed (the saw's own jumps are that large), so the
+    ;; construction is held on a signal whose every step is 1. Without the
+    ;; crossfade this wrap is 19.
+    (let* ((src (make-bytevector (* 4 29) 0))
+           (_ (let fill ((i 0)) (when (< i 29) (f32! src i (* 1.0 i)) (fill (+ i 1)))))
+           (l (crossfade-loop src 5 20 4)))
+      (assert-true (near? (- (f32 l 0) (f32 l 19)) 1.0 1e-5))
+      (assert-true (near? (f32 l 10) 15.0 1e-6))))
   (test "renders byte-identically twice"
     (assert-true (equal? (bank-bed-loop BANK-A) (bank-bed-loop (rendered-bank)))))
   (test "a mixer loop wraps: three lengths of a 4-frame loop repeat it"
