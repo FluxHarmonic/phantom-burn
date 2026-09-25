@@ -1,0 +1,465 @@
+;;; (phantom game) - The P0 game: walk the floor.
+;;;
+;;; The shells hand it a floor (meshes, textures and the collision) and
+;;; call (game-frame! dt w h controls) once a frame. The walker steps at a
+;;; fixed TICK (1/60 s) from an accumulator; the camera draws the eyes
+;;; interpolated between the last two ticks, with any look not yet stepped
+;;; added on top, so the view turns the frame the mouse moves.
+;;;
+;;; Controls (one vector a frame, from the shell):
+;;;   0 held?     (lambda (key) bool): w a s d, shift (sneak), control or
+;;;               r (run; the web uses r alone, since Ctrl+W closes a tab),
+;;;               q e (lean), and the arrows (look)
+;;;   1 pressed   the keys pressed this frame (symbols): c crouch; the
+;;;               style lab's p (dither on/off), [ ] (spread -/+ 4), / (spread
+;;;               back to automatic),
+;;;               b (Bayer 4x4 / 8x8), n (next palette), - = (fog), h (HUD),
+;;;               v (vertex snapping), x (affine textures);
+;;;               7 8 9 (go to the export's three views), j k l (the three
+;;;               dark-room views); 1 2 3 (switch c1, c2, c3), 4 5 6 (the
+;;;               always-lit emergency, screens and city, for comparison),
+;;;               0 (every switchable circuit off, or on); , .
+;;;               (the night's ambient floor down and up: how much of a dark
+;;;               room still reads); ; ' (the always-lit circuits' gain: the
+;;;               pools a dark room keeps); g (the black-level lift on or off)
+;;;   2 3         mouse motion this frame, pixels
+;;;   4 5         the move stick, -1..1, y down (the phone's left thumb)
+;;;   6 7         the look stick, -1..1, y down (the right thumb)
+;;;
+;;; A shot (the floor-shot review surface) holds the camera exactly at one
+;;; of the floor's views with that view's field of view, and steps nothing.
+
+(define-library (phantom game)
+  (import (sigil core)
+          (sigil math)
+          (sigil time)
+          (sigil gc)
+          (sigil graphics)
+          (phantom detmath)
+          (phantom collide)
+          (phantom walker)
+          (phantom render)
+          (phantom dither)
+          (phantom text)
+          (phantom stand-in))
+
+  (export game-init! game-frame! game-reload!
+          game-set-view! game-set-shot! game-set-hud! game-set-on! game-set-trace! game-set-auto! game-status
+          game-set-play! game-collision
+          make-controls FOV)
+
+  (begin
+
+    (define FOV 62.0)               ; vertical, degrees (the export's 17 mm lens)
+    (define MOUSE-SENS 0.0022)      ; rad per pixel
+    (define STICK-YAW 2.6)          ; rad/s at full push
+    (define STICK-PITCH 1.6)
+    (define KEY-YAW 2.0)
+    (define MAX-DT 0.25)
+
+    (define (make-controls held? pressed mdx mdy sx sy lx ly)
+      (vector held? pressed mdx mdy sx sy lx ly))
+
+    ;; --- state ---------------------------------------------------------------
+
+    (define *coll* #f)
+    (define *walker* #f)
+    (define *prev* #f)
+    (define *acc* 0.0)
+    (define *pending-yaw* 0.0)
+    (define *pending-pitch* 0.0)
+    (define *crouch-press* #f)
+    (define *shot* #f)              ; #f, or a view index
+    (define *hud* 1)                ; 0 off, 1 stats, 2 stats and keys
+    (define *cam* (make-camera))
+    (define *frame-ms* 16.7)
+    (define *cpu-ms* 0.0)
+    (define *hud-lines* '())
+    (define *hud-age* 1.0)
+    (define *draws* 0)
+    (define *ticks* 0)
+
+    ;; The trace (?trace / --trace): every WINDOW frames one console line
+    ;; with that window's means, for scripts and the phone numbers.
+    ;; Allocations come from gc-stats, less what the gc-stats call itself
+    ;; allocates (measured once).
+    (define WINDOW 120)
+    (define *trace* #f)
+    (define *w-frames* 0) (define *w-frame* 0.0) (define *w-cpu* 0.0) (define *w-cpu-max* 0.0)
+    (define *w-world* 0.0) (define *w-post* 0.0) (define *w-alloc0* #f) (define *stats-cost* 0)
+    ;; auto-walk (?auto / --auto): forward and turning, so a measurement
+    ;; includes the walker's collision work
+    (define *auto* #f)
+    (define (game-set-auto! on?) (set! *auto* on?))
+
+    ;; P1's play ((phantom play mode)): #f, or a vector of four hooks
+    ;;   0 (hold?)           -> #t to hold the runner still this tick
+    ;;   1 (after-tick! w)   -> a walker to restart from, or #f
+    ;;   2 (frame! alpha cam) before the world is drawn
+    ;;   3 (hud! w h k)       after the frame is composited
+    ;; With no play set, nothing below changes.
+    (define *play* #f)
+    (define (game-set-play! hooks) (set! *play* hooks))
+    (define (game-collision) *coll*)
+    (define (allocations) (cdr (assq 'allocations (gc-stats))))
+    (define (game-set-trace! on?)
+      (set! *trace* on?)
+      (when on?
+        (let* ((a (allocations)) (b (allocations)))
+          (set! *stats-cost* (- b a)))))
+
+    (define (trace-frame! dt cpu)
+      (when *trace*
+        (when (= *w-frames* 0) (set! *w-alloc0* (allocations)))
+        (set! *w-frames* (+ *w-frames* 1))
+        (set! *w-frame* (+ *w-frame* (* 1000.0 dt)))
+        (set! *w-cpu* (+ *w-cpu* cpu))
+        (set! *w-cpu-max* (max *w-cpu-max* cpu))
+        (set! *w-world* (+ *w-world* (render-world-ms)))
+        (set! *w-post* (+ *w-post* (render-post-ms)))
+        (when (>= *w-frames* WINDOW)
+          (let ((alloc (- (allocations) *w-alloc0* *stats-cost*))
+                (n (* 1.0 *w-frames*)))
+            (display (string-append
+                      "phantom-burn: stats frames " (number->string *w-frames*)
+                      " frame-ms " (fixed2 (/ *w-frame* n))
+                      " cpu-ms " (fixed2 (/ *w-cpu* n))
+                      " cpu-max " (fixed2 *w-cpu-max*)
+                      " world-ms " (fixed2 (/ *w-world* n))
+                      " post-ms " (fixed2 (/ *w-post* n))
+                      " draws " (number->string (vector-ref (gfx-frame-stats) 0))
+                      " alloc-per-frame " (number->string (exact (round (/ alloc n))))
+                      " dither " (if (render-dither?) "on" "off")))
+            (newline))
+          (set! *w-frames* 0) (set! *w-frame* 0.0) (set! *w-cpu* 0.0) (set! *w-cpu-max* 0.0)
+          (set! *w-world* 0.0) (set! *w-post* 0.0))))
+
+    (define (fixed2 x)
+      (let* ((t (exact (round (* (abs x) 100))))
+             (whole (exact (floor (/ t 100))))
+             (frac (- t (* whole 100))))
+        (string-append (if (< x 0) "-" "") (number->string whole) "." (if (< frac 10) "0" "") (number->string frac))))
+
+    (define (game-status)
+      (list 'x (walker-x *walker*) 'y (walker-y *walker*) 'z (walker-z *walker*)
+            'ticks *ticks* 'dither (render-dither?) 'spread (render-spread)
+            'bayer (render-bayer) 'palette (render-palette)))
+
+    ;; --- light and views --------------------------------------------------------
+
+    ;; The stand-in's pools of light in a dark room, beyond the export's 14
+    ;; lights (design coordinates; (x y z radius r g b circuit), circuit 4 =
+    ;; always lit): the three monitors left on (#4DF2D9, just in front of
+    ;; each screen), the city through the lobby's window (magenta and cyan,
+    ;; outside), and the exit sign's spill down the door and onto the floor
+    ;; (emergency). The compiled floor bakes its own (screens, city,
+    ;; emergency circuits).
+    (define EMITTERS
+      '((18.0 14.8 1.05 3.2 0.6 1.9 1.7 4)
+        (18.0 18.8 1.05 3.2 0.6 1.9 1.7 4)
+        (24.0 19.2 1.05 3.2 0.6 1.9 1.7 4)
+        (3.0 -0.9 2.2 10.0 1.0 0.35 0.85 4)
+        (8.5 -0.9 3.0 10.0 0.35 1.0 0.95 4)
+        (3.0 9.2 1.6 4.5 1.3 0.75 0.14 3)))
+
+    ;; A view: (name x y z yaw pitch fov-y on), on the switchable circuits
+    ;; left on (#t: all of them). Indices 0 to 5 are the same on every
+    ;; floor: the export's arrival, overlook and office (all lit), then the
+    ;; three dark rooms; a compiled floor's other views follow.
+    (define (look-from name x y z tx ty tz fov on)
+      (let* ((dx (- tx x)) (dy (- ty y)) (dz (- tz z)))
+        (list name x y z (atan (- dx) dy) (atan dz (sqrt (+ (* dx dx) (* dy dy)))) fov on)))
+    (define (lens->fov mm) (if mm (/ (* 2.0 (atan (/ 10.125 mm)) 180.0) PI) FOV))
+    (define DARK-VIEWS
+      (list
+       ;; the lobby, every switchable circuit off: the exit sign's glow under
+       ;; the mezzanine, the city through the window
+       (look-from 'lobby-dark 9.4 2.6 1.6 2.0 6.2 1.0 FOV '())
+       ;; the office at night: the monitors' glow on the desks, the FM
+       ;; office lit behind its glass
+       (look-from 'office-night 20.5 12.2 1.6 19.4 18.8 1.0 FOV '(c3))
+       ;; the dark corridor, the lit office through its doorway
+       (look-from 'corridor-dark 17.6 9.6 1.6 20.6 14.0 1.1 FOV '(c1))))
+    (define STAND-IN-VIEWS
+      (append (map (lambda (v) (append v (list #t))) stand-in-views) DARK-VIEWS))
+    (define (compiled-views info)
+      (let* ((vs (map (lambda (v)
+                        (look-from (list-ref v 0) (list-ref v 1) (list-ref v 2) (list-ref v 3)
+                                   (list-ref v 4) (list-ref v 5) (list-ref v 6) (lens->fov (list-ref v 7)) #t))
+                      (cdr (assq 'views info))))
+             (named (lambda (n) (let find ((l vs)) (cond ((null? l) #f) ((eq? (caar l) n) (car l)) (else (find (cdr l)))))))
+             ;; the export's office view is "into-office" in the compiler's
+             ;; floors since 2026-09-25 (a view cannot share a room's name)
+             (main (filter (lambda (v) v) (list (named 'arrival) (named 'overlook)
+                                                (or (named 'into-office) (named 'office)))))
+             (rest (filter (lambda (v) (not (memq (car v) '(arrival overlook office into-office)))) vs)))
+        (append main DARK-VIEWS rest)))
+    (define *views* STAND-IN-VIEWS)
+    (define *surfaces* stand-in-surfaces)   ; the collision's surface tags, by index
+
+    (define (view-ref k) (list-ref *views* (max 0 (min k (- (length *views*) 1)))))
+
+    (define (apply-view-light! v)
+      (let ((on (list-ref v 7)))
+        (for-each (lambda (c) (render-circuit-set! c (or (eq? on #t) (and (memq c on) #t))))
+                  (render-switchable))
+        ;; the always-lit circuits come back on with a view
+        (for-each (lambda (c) (render-circuit-set! c #t))
+                  (filter (lambda (c) (not (memq c (render-switchable)))) (render-circuits)))))
+
+    (define (toggle-circuit! name)
+      (when (memq name (render-circuits))
+        (render-circuit-set! name (not (render-circuit-on? name)))))
+
+    ;; 0: every switchable circuit off, or all on again if they already are
+    (define (toggle-all!)
+      (let* ((sw (render-switchable))
+             (any-on (let loop ((l sw)) (and (pair? l) (or (render-circuit-on? (car l)) (loop (cdr l)))))))
+        (for-each (lambda (c) (render-circuit-set! c (not any-on))) sw)))
+
+    ;; The walker at view k: the eyes' place, feet on the floor under them.
+    (define (walker-at-view k)
+      (let* ((v (view-ref k))
+             (x (list-ref v 1)) (y (list-ref v 2)) (ez (list-ref v 3))
+             (floor (and *coll* (collide-floor *coll* x y (- ez 3.0) ez)))
+             (w (make-walker x y (or floor (- ez (- STAND EYE-DROP))) (list-ref v 4))))
+        w))
+
+    (define (game-set-view! k)
+      (apply-view-light! (view-ref k))
+      (set! *walker* (walker-at-view k))
+      (set! *prev* *walker*)
+      (set! *acc* 0.0))
+
+    (define (game-set-shot! k)
+      (set! *shot* k)
+      (apply-view-light! (view-ref k)))
+    (define (game-set-hud! n) (set! *hud* n))
+
+    ;; Switch the switchable circuits by a spec: "all", "none", or names
+    ;; separated by commas ("c1,c3"): those on, the rest off.
+    (define (game-set-on! spec)
+      (let ((names (let split ((i 0) (start 0) (acc '()))
+                     (cond ((>= i (string-length spec))
+                            (reverse (if (> i start) (cons (string->symbol (substring spec start i)) acc) acc)))
+                           ((char=? (string-ref spec i) #\,)
+                            (split (+ i 1) (+ i 1) (if (> i start) (cons (string->symbol (substring spec start i)) acc) acc)))
+                           (else (split (+ i 1) start acc))))))
+        (for-each (lambda (c)
+                    (render-circuit-set! c (or (string=? spec "all")
+                                               (and (not (string=? spec "none")) (memq c names) #t))))
+                  (render-switchable))))
+
+    ;; The floor: (load-mesh* layout name) and (load-texture* name) load its
+    ;; files; coll is its (phantom collide) collision; info is a compiled
+    ;; floor's floor.sexp datum, or #f for the stand-in.
+    (define (game-init! load-mesh* load-texture* coll info)
+      (render-init!)
+      (text-init!)
+      (game-reload! load-mesh* load-texture* coll info)
+      (game-set-view! 0))
+
+    ;; A new floor under the walker's feet (live reload): the walker keeps
+    ;; its place, and the circuits their switches.
+    (define (game-reload! load-mesh* load-texture* coll info)
+      (let ((saved (map (lambda (c) (cons c (render-circuit-on? c))) (render-circuits))))
+        (if info
+            (begin
+              (render-load-compiled! load-mesh* load-texture* info)
+              (set! *views* (compiled-views info))
+              (set! *surfaces* (let ((s (assq 'surfaces info))) (if s (cdr s) '()))))
+            (begin
+              (render-load-stand-in! load-mesh* load-texture* stand-in-draws (append stand-in-lights EMITTERS))
+              (set! *views* STAND-IN-VIEWS)
+              (set! *surfaces* stand-in-surfaces)))
+        (when *walker*
+          (for-each (lambda (p) (render-circuit-set! (car p) (cdr p))) saved)))
+      (set! *coll* coll))
+
+    ;; --- input ---------------------------------------------------------------
+
+    (define (axis held? plus minus) (+ (if (held? plus) 1.0 0.0) (if (held? minus) -1.0 0.0)))
+
+    (define (style-key! k)
+      (let ((name (symbol->string k)))
+        (cond ((string=? name "p") (render-dither! (not (render-dither?))))
+              ((string=? name "[") (render-spread! (- (render-spread) 4.0)))
+              ((string=? name "]") (render-spread! (+ (render-spread) 4.0)))
+              ((string=? name "/") (render-spread-auto! #t))
+              ((string=? name "b") (render-bayer! (if (= (render-bayer) 4) 8 4)))
+              ((string=? name "n") (render-palette! (next-palette (render-palette))))
+              ((string=? name "-") (render-fog! (* (render-fog) 0.8)))
+              ((string=? name "=") (render-fog! (* (render-fog) 1.25)))
+              ((string=? name "h") (set! *hud* (modulo (+ *hud* 1) 3)))
+              ((string=? name "v") (render-snap! (if (> (render-snap) 0.0) 0.0 1.0)))
+              ((string=? name "x") (render-affine! (not (render-affine?))))
+              ((string=? name "c") (set! *crouch-press* #t))
+              ((string=? name "7") (game-set-view! 0))
+              ((string=? name "8") (game-set-view! 1))
+              ((string=? name "9") (game-set-view! 2))
+              ((string=? name "j") (game-set-view! 3))
+              ((string=? name "k") (game-set-view! 4))
+              ((string=? name "l") (game-set-view! 5))
+              ((string=? name "1") (toggle-circuit! 'c1))
+              ((string=? name "2") (toggle-circuit! 'c2))
+              ((string=? name "3") (toggle-circuit! 'c3))
+              ((string=? name "4") (toggle-circuit! 'emergency))
+              ((string=? name "5") (toggle-circuit! 'screens))
+              ((string=? name "6") (toggle-circuit! 'city))
+              ((string=? name "0") (toggle-all!))
+              ((string=? name "g") (render-lift! (not (render-lift?))))
+              ((string=? name ";") (render-pools! (* (render-pools) 0.8)))
+              ((string=? name "'") (render-pools! (* (render-pools) 1.25)))
+              ((string=? name ",") (render-night! (* (render-night) 0.8)))
+              ((string=? name ".") (render-night! (* (render-night) 1.25)))
+              (else #f))))
+
+    (define (next-palette p)
+      (let loop ((ns (palette-names)))
+        (cond ((null? ns) (car (palette-names)))
+              ((eq? (car ns) p) (if (null? (cdr ns)) (car (palette-names)) (cadr ns)))
+              (else (loop (cdr ns))))))
+
+    (define (tick-input held? sx sy)
+      (when *auto* (set! *pending-yaw* (+ *pending-yaw* (* 0.6 TICK))))
+      (let* ((mx (+ (axis held? 'd 'a) sx))
+             (my (if *auto* 1.0 (- (axis held? 'w 's) sy)))
+             (lean (cond ((and (held? 'q) (not (held? 'e))) -1)
+                         ((and (held? 'e) (not (held? 'q))) 1)
+                         (else 0)))
+             (in (make-input mx my *pending-yaw* *pending-pitch*
+                             (held? 'shift) (or (held? 'control) (held? 'r))
+                             *crouch-press* lean)))
+        (set! *pending-yaw* 0.0)
+        (set! *pending-pitch* 0.0)
+        (set! *crouch-press* #f)
+        in))
+
+    ;; --- the frame -------------------------------------------------------------
+
+    (define (lerp a b t) (+ a (* t (- b a))))
+
+    (define (game-frame! dt w h ctl)
+      (let ((t0 (current-jiffy))
+            (dt (min MAX-DT (max 0.0 dt)))
+            (held? (vector-ref ctl 0)))
+        (for-each style-key! (vector-ref ctl 1))
+        ;; look: the mouse, the look stick (squared, for fine aim), the arrows
+        (let ((lx (vector-ref ctl 6)) (ly (vector-ref ctl 7)))
+          (set! *pending-yaw* (+ *pending-yaw*
+                                 (* -1.0 MOUSE-SENS (vector-ref ctl 2))
+                                 (* -1.0 STICK-YAW dt lx (abs lx))
+                                 (* KEY-YAW dt (axis held? 'left 'right))))
+          (set! *pending-pitch* (+ *pending-pitch*
+                                   (* -1.0 MOUSE-SENS (vector-ref ctl 3))
+                                   (* -1.0 STICK-PITCH dt ly (abs ly))
+                                   (* KEY-YAW dt (axis held? 'up 'down)))))
+        (if *shot*
+            (let ((v (view-ref *shot*)))
+              (camera-set! *cam* (list-ref v 1) (list-ref v 2) (list-ref v 3)
+                           (list-ref v 4) (list-ref v 5) 0.0 (list-ref v 6)))
+            (begin
+              (set! *acc* (+ *acc* dt))
+              (let loop ()
+                (when (>= *acc* TICK)
+                  (set! *prev* *walker*)
+                  (let ((in (tick-input held? (vector-ref ctl 4) (vector-ref ctl 5))))
+                    (set! *walker* (walker-step *walker* (if (and *play* ((vector-ref *play* 0))) NO-INPUT in) TICK *coll*)))
+                  (when *play*
+                    (let ((w ((vector-ref *play* 1) *walker*)))
+                      (when w (set! *walker* w) (set! *prev* w))))
+                  (set! *ticks* (+ *ticks* 1))
+                  (set! *acc* (- *acc* TICK))
+                  (loop)))
+              (let ((a (/ *acc* TICK)) (p *prev*) (c *walker*))
+                (camera-set! *cam*
+                             (lerp (walker-eye-x p) (walker-eye-x c) a)
+                             (lerp (walker-eye-y p) (walker-eye-y c) a)
+                             (lerp (walker-eye-z p) (walker-eye-z c) a)
+                             (+ (walker-yaw c) *pending-yaw*)
+                             (max -1.5 (min 1.5 (+ (walker-pitch c) *pending-pitch*)))
+                             (lerp (walker-roll p) (walker-roll c) a)
+                             FOV))))
+        (set! *frame-ms* (+ (* 0.9 *frame-ms*) (* 0.1 1000.0 dt)))
+        (when *play* ((vector-ref *play* 2) (/ *acc* TICK) *cam*))
+        (begin-frame)
+        (clear-screen 0.0 0.0 0.0)
+        (render-world! *cam*)
+        (render-post!)
+        (let ((k (render-composite! w h)))
+          (when *play* ((vector-ref *play* 3) w h k))
+          (when (> *hud* 0)
+            (set! *hud-age* (+ *hud-age* dt))
+            (when (> *hud-age* 0.25)
+              (set! *hud-age* 0.0)
+              (refresh-hud! k))
+            (draw-hud! k)))
+        (end-frame)
+        (let ((spent (/ (* 1000.0 (- (current-jiffy) t0)) (jiffies-per-second))))
+          (set! *cpu-ms* (+ (* 0.9 *cpu-ms*) (* 0.1 spent)))
+          (trace-frame! dt spent))))
+
+    ;; --- the HUD ---------------------------------------------------------------
+
+    (define (fixed0 x) (number->string (exact (round x))))
+
+    (define (surface-name tag)
+      (let ((names *surfaces*))
+        (if (< tag (length names)) (symbol->string (list-ref names tag)) "?")))
+
+    (define (refresh-hud! k)
+      (let ((s (gfx-frame-stats)) (w *walker*))
+        (set! *hud-lines*
+              (append
+               (list (string-append "FRAME " (fixed1 *frame-ms*) "  CPU " (fixed1 *cpu-ms*)
+                                    "  WORLD " (fixed1 (render-world-ms)) "  POST " (fixed1 (render-post-ms))
+                                    "  DRAWS " (number->string (vector-ref s 0)) "  X" (number->string k))
+                     (string-append (if (render-dither?) "DITHER ON" "DITHER OFF")
+                                    "  BAYER " (number->string (render-bayer))
+                                    "  SPREAD " (fixed0 (render-spread))
+                                    (if (render-spread-auto?)
+                                        (string-append " AUTO " (fixed1 (render-pixel-css)) "PX")
+                                        "")
+                                    "  " (symbol->string (render-palette))
+                                    "  FOG " (fixed0 (render-fog))
+                                    (if (> (render-snap) 0.0) "  SNAP" "")
+                                    (if (render-affine?) "  AFFINE" "")
+                                    "  NIGHT " (fixed1 (render-night))
+                                    "  POOLS " (fixed1 (render-pools))
+                                    (if (render-lift?) "  LIFT" ""))
+                     (apply string-append
+                            (map (lambda (c)
+                                   (string-append (string-upcase* (symbol->string c))
+                                                  (if (render-circuit-on? c) " ON  " " OFF  ")))
+                                 (render-circuits)))
+                     (if *shot*
+                         (string-append "SHOT " (string-upcase* (symbol->string (car (view-ref *shot*)))))
+                         (string-append (fixed1* (walker-x w)) " " (fixed1* (walker-y w)) " " (fixed1* (walker-z w))
+                                        (if (walker-crouching? w) "  CROUCH" "")
+                                        (if (walker-mantling? w) "  MANTLE" "")
+                                        "  " (surface-name (walker-surface w)))))
+               (if (= *hud* 2)
+                   (list "WASD MOVE  SHIFT SNEAK  R RUN  C CROUCH  Q E LEAN  MOUSE LOOK"
+                         "1 2 3 C1 C2 C3  4 EMERGENCY  5 SCREENS  6 CITY  0 ALL OFF  J K L DARK VIEWS  , . NIGHT  ; ' POOLS  G LIFT"
+                         "P DITHER  [ ] / SPREAD  B BAYER  N PALETTE  - = FOG  V SNAP  X AFFINE  7 8 9 VIEWS  H HUD")
+                   '())))))
+
+    (define (string-upcase* s) (list->string (map char-upcase (string->list s))))
+    (define (on-off v) (if (> v 0.5) "ON" "OFF"))
+
+    ;; fixed1 for a number that may be negative
+    (define (fixed1* x) (if (< x 0.0) (string-append "-" (fixed1 (- x))) (fixed1 x)))
+
+    (define (draw-hud! k)
+      (let* ((ts (max 1 (min 3 k)))
+             (n (length *hud-lines*))
+             (wmax (let loop ((ls *hud-lines*) (m 0)) (if (null? ls) m (loop (cdr ls) (max m (text-width (car ls) ts)))))))
+        (set-color 0.0 0.0 0.0 0.55)
+        (with-blend-mode 'normal (draw-filled-rect 0 0 (+ 8 wmax) (+ 8 (* n 9 ts))))
+        (set-color 1.0 0.9 0.4)
+        (let loop ((ls *hud-lines*) (y 4))
+          (unless (null? ls)
+            (draw-text (car ls) 4 y ts)
+            (set-color 0.8 0.85 1.0)
+            (loop (cdr ls) (+ y (* 9 ts)))))
+        (set-color 1.0 1.0 1.0)))))

@@ -1,0 +1,47 @@
+#!/bin/sh
+# shot-native OUT.png [GAME ARGS...]
+#
+# One PNG of the native game's 480x270 frame, at 1x: runs
+# build/dev/bin/phantom-burn (or $PHANTOM_BIN) at --size 480x270 on the X
+# display $SHOT_DISPLAY (a worker's own Xvfb; never David's display), waits
+# for "phantom-burn: ready" and $SHOT_WAIT seconds (default 2), grabs the
+# window's 480x270 with ImageMagick's import, and lets the game quit by
+# itself after $SHOT_WAIT + 3 seconds (--seconds, wall time: a frame count
+# ends early when nothing holds the frame rate; it runs under guix shell, so a
+# signal to the PID here would reach the wrapper, not the game). The
+# game's own args follow (e.g. --shot 0 --hud 0 --dither off).
+#
+# Prints "shot -> OUT"; SETUP-FAILED and exit 2 when the game never said it
+# was ready, or the grab is not 480x270.
+set -eu
+cd "$(dirname "$0")/.."
+OUT="$1"; shift
+BIN="${PHANTOM_BIN:-./build/dev/bin/phantom-burn}"
+: "${SHOT_DISPLAY:?set SHOT_DISPLAY to your own Xvfb display, e.g. :71}"
+WAIT="${SHOT_WAIT:-2}"
+LOG="$(mktemp /tmp/phantom-shot-native.XXXXXX)"
+trap 'rm -f "$LOG"' EXIT
+
+DISPLAY="$SHOT_DISPLAY" scripts/dev "$BIN" --size 480x270 --seconds "$((WAIT + 8))" "$@" > "$LOG" 2>&1 &
+PID=$!
+i=0
+until grep -q 'phantom-burn: ready' "$LOG"; do
+  i=$((i + 1))
+  if [ "$i" -gt 120 ] || ! kill -0 "$PID" 2>/dev/null; then
+    echo "SETUP-FAILED: no ready line; log:"; cat "$LOG"; exit 2
+  fi
+  sleep 0.5
+done
+sleep "$WAIT"
+# a bare Xvfb has no window manager, so the window sits at 0,0
+DISPLAY="$SHOT_DISPLAY" import -window root -crop 480x270+0+0 +repage "$OUT"
+# the game must still be running after the grab (a window that closed before
+# or during it leaves a black root), and its log must hold no error
+kill -0 "$PID" 2>/dev/null || { echo "SETUP-FAILED: the game had exited by the time of the grab; log:"; cat "$LOG"; exit 2; }
+wait "$PID" || { echo "SETUP-FAILED: the game exited non-zero; log:"; cat "$LOG"; exit 2; }
+if grep -a -i -E 'error|unbound|exception' "$LOG" | grep -v -E 'GL_VERTEX_ATTRIBUTE_NOT_FOUND|sokol_gfx.h' | grep -q .; then
+  echo "SETUP-FAILED: the game's log holds an error:"; grep -a -i -E 'error|unbound|exception' "$LOG" | head -5; exit 2
+fi
+SIZE="$(identify -format '%wx%h' "$OUT")"
+[ "$SIZE" = "480x270" ] || { echo "SETUP-FAILED: the grab is $SIZE, not 480x270"; exit 2; }
+echo "shot -> $OUT"

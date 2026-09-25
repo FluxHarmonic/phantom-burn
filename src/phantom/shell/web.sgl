@@ -1,14 +1,257 @@
 ;;; (phantom shell web) - The browser shell: one frame per
 ;;; requestAnimationFrame dispatch.
+;;;
+;;; At boot it fetches the floor's meshes and textures through the gles3
+;;; bridge, from assets/floors/FLOOR/ (a compiled floor; 14-slice by
+;;; default) or assets/stand-in/ (?floor=stand-in). The page fetches the
+;;; collision and a compiled floor's floor.sexp and hands them over as
+;;; strings, because the bridge has no fetch into a bytevector. The game
+;;; starts once all of it has landed.
+;;;
+;;; The page's events, besides the loader's keydown and keyup:
+;;;   ("params", "k=v&...")  the page's query: floor, view, shot, hud,
+;;;                          dither, spread, bayer, palette, fog, card, snap, affine, trace, auto
+;;;   ("look", "dx,dy")      pointer-locked mouse motion, CSS pixels
+;;;   ("move", "x,y")        the left stick, -1..1, y down
+;;;   ("lookstick", "x,y")   the right stick
+;;;   ("press", "KEY")       a button on the page (the crouch button sends c)
+;;;   ("dpr", "N")           window.devicePixelRatio, at boot and on a resize
+;;;   ("floorinfo", TEXT)    a compiled floor's floor.sexp (before its assets load)
 
 (define-library (phantom shell web)
   (import (sigil core)
+          (sigil math)
           (sigil graphics)
-          (sigil browser gles3))
+          (sigil graphics image)
+          (sigil browser gles3)
+          (phantom soup)
+          (phantom render)
+          (phantom game)
+          (phantom title)
+          (phantom stand-in)
+          (phantom walker)
+          (phantom floor replay))
 
   (export web-main web-dispatch)
 
   (begin
+
+    (define *floor* "14-slice")
+    (define *info* #f)           ; a compiled floor's floor.sexp datum
+    (define *info-text* #f)
+    (define *params* '())        ; ((key . value) ...) from the page's query
+    (define *params-seen* #f)    ; nothing is fetched before the page names the floor
+    (define *fetches* '())       ; (name . handle)
+    (define *collide* #f)        ; the base64 text, once the page sends it
+    (define *replay-text* #f)    ; a gate-5 script that came before the game started
+    (define *started* #f)        ; #f, #t, or 'failed
+    (define *said-ready* #f)
+    (define *waited* 0.0)        ; seconds since the page named the floor, until start
+    (define *said-stuck* #f)
+    (define *last-ms* #f)
+    (define *keys* '())
+    (define *pressed* '())
+    (define *look-x* 0)
+    (define *look-y* 0)
+    (define *move-x* 0.0) (define *move-y* 0.0)
+    (define *stick-x* 0.0) (define *stick-y* 0.0)
+
+    (define (param key) (let ((p (assoc key *params*))) (and p (cdr p))))
+
+    (define (stand-in?) (string=? *floor* "stand-in"))
+
+    (define (asset-names)
+      (if (stand-in?)
+          (append '("floor14.sgm" "city.sgm")
+                  (let loop ((ds stand-in-draws))
+                    (cond ((null? ds) '())
+                          ((caddr (car ds)) (cons (caddr (car ds)) (loop (cdr ds))))
+                          (else (loop (cdr ds))))))
+          (append '("floor.sgm" "city.sgm")
+                  (filter (lambda (t) t) (map (lambda (p) (list-ref p 3)) (cdr (assq 'parts *info*)))))))
+
+    (define (url name)
+      (if (stand-in?)
+          (string-append "assets/stand-in/" name)
+          (string-append "assets/floors/" *floor* "/" name)))
+    (define (handle name) (cdr (assoc name *fetches*)))
+
+    (define (load-mesh* layout name)
+      (let ((h (handle name)))
+        (load-mesh-from-memory layout (gles3-image-ptr h) (gles3-image-size h))))
+
+    (define (load-texture* name)
+      (let* ((h (handle name))
+             (img (load-image-from-memory (gles3-image-ptr h) (gles3-image-size h)))
+             (tex (load-texture img)))
+        (image-free! img)
+        tex))
+
+    (define (all-ready?)
+      (and *collide*
+           (pair? *fetches*)
+           (let loop ((fs *fetches*))
+             (or (null? fs)
+                 (and (gles3-image-ready? (cdar fs)) (loop (cdr fs)))))))
+
+    (define (dom-key->sym k)
+      (cond ((string=? k "ArrowLeft") 'left)
+            ((string=? k "ArrowRight") 'right)
+            ((string=? k "ArrowUp") 'up)
+            ((string=? k "ArrowDown") 'down)
+            ((string=? k "Shift") 'shift)
+            ((string=? k "Control") 'control)
+            ((string=? k " ") 'space)
+            ((= (string-length k) 1) (string->symbol (string (char-downcase (string-ref k 0)))))
+            (else #f)))
+
+    ;; Ctrl runs natively but not here: Ctrl+W closes the tab.
+    (define (held? k)
+      (and (not (eq? k 'control)) (memq k *keys*) #t))
+
+    (define (frame-dt payload)
+      (let* ((ms (or (string->number payload) 0.0))
+             (dt (if *last-ms* (/ (- ms *last-ms*) 1000.0) (/ 1.0 60.0))))
+        (set! *last-ms* ms)
+        (if (or (< dt 0.0) (> dt 0.25)) (/ 1.0 60.0) dt)))
+
+    (define (apply-params!)
+      (let ((d (param "dither"))
+            (s (and (param "spread") (string->number (param "spread"))))
+            (b (and (param "bayer") (string->number (param "bayer"))))
+            (p (param "palette"))
+            (f (and (param "fog") (string->number (param "fog"))))
+            (h (and (param "hud") (string->number (param "hud"))))
+            (v (and (param "view") (string->number (param "view"))))
+            (shot (and (param "shot") (string->number (param "shot")))))
+        (when d (render-dither! (not (string=? d "off"))))
+        (when (param "card") (render-card! #t))
+        (when (param "snap") (render-snap! (or (string->number (param "snap")) 1.0)))
+        (when (param "affine") (render-affine! #t))
+        (when (param "trace") (game-set-trace! #t))
+        (when (param "pools") (render-pools! (or (string->number (param "pools")) 2.0)))
+        (when (param "lift") (render-lift! (not (string=? (param "lift") "0"))))
+        (when (param "night") (render-night! (or (string->number (param "night")) 1.0)))
+        (when (param "auto") (game-set-auto! #t))
+        (when s (render-spread! s))
+        (when b (render-bayer! b))
+        (when p (render-palette! (string->symbol p)))
+        (when f (render-fog! f))
+        (when h (game-set-hud! h))
+        (when v (game-set-view! v))
+        (when shot (game-set-shot! shot))
+        (when (param "on") (game-set-on! (param "on")))))
+
+    (define (start!)
+      ;; one attempt: a failure is reported once, not retried per frame
+      (set! *started* 'failed)
+      (game-init! load-mesh* load-texture* (pbc1->collision (base64->bytevector *collide*)) *info*)
+      (set! *collide* #f)
+      (apply-params!)
+      (set! *started* #t)
+      (when *replay-text* (run-replay! *replay-text*) (set! *replay-text* #f)))
+
+    ;; Gate 5: step a replay script through the real walker at TICK over the
+    ;; loaded floor's collision, one line per tick (the native tool prints the
+    ;; same lines; the gate compares them byte for byte).
+    (define (run-replay! text)
+      (let ((script (parse-script text)))
+        (if (not script)
+            (begin (display "phantom-burn: replay-error not a script") (newline))
+            (let ((lines (replay-trace (game-collision) script TICK)))
+              (for-each (lambda (l) (display (string-append "phantom-burn: replay " l)) (newline)) lines)
+              (display (string-append "phantom-burn: replay-done " (number->string (length lines)))) (newline)))))
+
+    ;; ?title=1: the title screen, which needs no floor.
+    (define *title-t* #f)
+    (define (title-tick payload)
+      (let ((dt (frame-dt payload)))
+        (if *title-t*
+            (set! *title-t* (+ *title-t* dt))
+            (begin
+              (title-init!)
+              (apply-params!)
+              (set! *title-t* 0.0)))
+        (title-frame! *title-t* (gles3-canvas-width) (gles3-canvas-height))
+        (unless *said-ready*
+          (set! *said-ready* #t)
+          (display "phantom-burn: ready title") (newline))))
+
+    (define (web-tick payload)
+      (when (and *params-seen* (param "title"))
+        (gles3-resize-to-display)
+        (title-tick payload))
+      (unless (and *params-seen* (param "title"))
+        (web-tick* payload)))
+
+    ;; What the start still waits for, for the load-failed line.
+    (define (missing)
+      (append (if *collide* '() '("collision"))
+              (if (or (stand-in?) *info*) '() '("floor.sexp"))
+              (let loop ((fs *fetches*))
+                (cond ((null? fs) '())
+                      ((gles3-image-ready? (cdar fs)) (loop (cdr fs)))
+                      (else (cons (caar fs) (loop (cdr fs))))))))
+
+    (define (web-tick* payload)
+      (when (and *params-seen* (not *info*) *info-text*)
+        (let ((text *info-text*))
+          ;; one attempt: a floor.sexp that does not read is said once
+          (set! *info-text* #f)
+          (set! *info* (guard (e (#t (display "phantom-burn: load failed: floor.sexp does not read") (newline) #f))
+                         (floor-info-from-string text)))))
+      (when (and *params-seen* (null? *fetches*) (or (stand-in?) *info*))
+        (set! *fetches* (map (lambda (n) (cons n (gles3-fetch-image (url n)))) (asset-names))))
+      (gles3-resize-to-display)
+      (let ((dt (frame-dt payload)))
+        (cond ((eq? *started* #t)
+               (let ((dx *look-x*) (dy *look-y*) (pressed *pressed*))
+                 (set! *look-x* 0)
+                 (set! *look-y* 0)
+                 (set! *pressed* '())
+                 (game-frame! dt (gles3-canvas-width) (gles3-canvas-height)
+                              (make-controls held? pressed dx dy *move-x* *move-y* *stick-x* *stick-y*))
+                 ;; ready once the first frame is drawn (shots wait for this line)
+                 (unless *said-ready*
+                   (set! *said-ready* #t)
+                   (display "phantom-burn: ready ") (display *floor*) (newline))))
+              ((eq? *started* 'failed) #f)
+              ((all-ready?) (start!))
+              (else
+               ;; a fetch that fails never becomes ready, and the bridge
+               ;; cannot tell Sigil it failed: after 20 s, say what is missing
+               (when *params-seen* (set! *waited* (+ *waited* dt)))
+               (when (and (> *waited* 20.0) (not *said-stuck*))
+                 (set! *said-stuck* #t)
+                 (display (string-append "phantom-burn: load failed, still waiting for: "
+                                         (apply string-append (map (lambda (n) (string-append n " ")) (missing)))))
+                 (newline))
+               (begin-frame)
+               (clear-screen (/ 13 255) (/ 10 255) (/ 26 255))
+               (end-frame)))))
+
+    (define (split-pair s)
+      (let loop ((i 0))
+        (cond ((>= i (string-length s)) (cons 0 0))
+              ((char=? (string-ref s i) #\,)
+               (cons (or (string->number (substring s 0 i)) 0)
+                     (or (string->number (substring s (+ i 1) (string-length s))) 0)))
+              (else (loop (+ i 1))))))
+
+    ;; "a=1&b=two" -> (("a" . "1") ("b" . "two")); no decoding (the values
+    ;; are numbers and plain words).
+    (define (split-query s)
+      (let loop ((i 0) (start 0) (acc '()))
+        (if (or (>= i (string-length s)) (char=? (string-ref s i) #\&))
+            (let* ((part (substring s start (min i (string-length s))))
+                   (eq (let find ((j 0)) (cond ((>= j (string-length part)) #f)
+                                               ((char=? (string-ref part j) #\=) j)
+                                               (else (find (+ j 1))))))
+                   (acc (cond ((string=? part "") acc)
+                              (eq (cons (cons (substring part 0 eq) (substring part (+ eq 1) (string-length part))) acc))
+                              (else (cons (cons part "") acc)))))
+              (if (>= i (string-length s)) (reverse acc) (loop (+ i 1) (+ i 1) acc)))
+            (loop (+ i 1) start acc))))
 
     (define (web-main)
       (unless (gles3-use-canvas "#stage")
@@ -16,14 +259,58 @@
       (gles3-resize-to-display)
       (gfx-setup)
       (gles3-start-loop "phantom-burn-tick")
-      (display "phantom-burn: ready") (newline)
       0)
 
+    (define (drop k ks)
+      (cond ((null? ks) '()) ((eq? (car ks) k) (drop k (cdr ks))) (else (cons (car ks) (drop k (cdr ks))))))
+
     (define (web-dispatch type payload)
-      (when (string=? type "frame")
-        (gles3-resize-to-display)
-        (begin-frame)
-        ;; C-BG, Crash's violet-black
-        (clear-screen (/ 13 255) (/ 10 255) (/ 26 255))
-        (end-frame))
-      0)))
+      (cond ((string=? type "frame") (web-tick payload) 0)
+            ((string=? type "keydown")
+             (let ((k (dom-key->sym payload)))
+               (when k
+                 (unless (memq k *keys*)
+                   (set! *keys* (cons k *keys*))
+                   (set! *pressed* (cons k *pressed*)))))
+             0)
+            ((string=? type "keyup")
+             (let ((k (dom-key->sym payload)))
+               (when k (set! *keys* (drop k *keys*))))
+             0)
+            ((string=? type "look")
+             (let ((p (split-pair payload)))
+               (set! *look-x* (+ *look-x* (car p)))
+               (set! *look-y* (+ *look-y* (cdr p))))
+             0)
+            ((string=? type "move")
+             (let ((p (split-pair payload))) (set! *move-x* (car p)) (set! *move-y* (cdr p)))
+             0)
+            ((string=? type "lookstick")
+             (let ((p (split-pair payload))) (set! *stick-x* (car p)) (set! *stick-y* (cdr p)))
+             0)
+            ((string=? type "press")
+             (set! *pressed* (cons (string->symbol payload) *pressed*))
+             0)
+            ((string=? type "params")
+             (set! *params* (split-query payload))
+             (set! *params-seen* #t)
+             (when (param "floor") (set! *floor* (param "floor")))
+             0)
+            ((string=? type "dpr")
+             (render-set-dpr! (string->number payload))
+             (render-spread-auto! (render-spread-auto?))
+             0)
+            ((string=? type "floor")
+             ;; the page's own (sanitised) floor name, which it fetches by
+             (set! *floor* payload)
+             0)
+            ((string=? type "floorinfo")
+             (set! *info-text* payload)
+             0)
+            ((string=? type "collide")
+             (set! *collide* payload)
+             0)
+            ((string=? type "replay")
+             (if (eq? *started* #t) (run-replay! payload) (set! *replay-text* payload))
+             0)
+            (else 0)))))

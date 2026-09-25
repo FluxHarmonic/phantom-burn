@@ -1,0 +1,69 @@
+;;; The slice's architecture: the plan's faces and what covers them, the
+;;; heights, the holes the openings cut, and no problems on the real floor.
+(import (sigil test)
+        (sigil fs)
+        (sigil list)
+        (sigil math)
+        (sigil string)
+        (phantom floor problem)
+        (phantom floor format)
+        (phantom floor sources)
+        (phantom floor poly)
+        (phantom floor plan)
+        (phantom floor stack)
+        (phantom floor mesh)
+        (phantom floor build))
+
+(define (reader path) (and (file-exists? path) (read-file-string path)))
+(define src (load-sources "floors/14-slice.floor" reader))
+(define c (build-architecture! (make-ctx (sources-floor src) (sources-legend src) (sources-props src))))
+(define faces (vector->list (plan-faces (ctx-plan c))))
+(define (names cover)
+  (list-sort (lambda (a b) (string<? a b))
+             (map (lambda (id) (symbol->string (owner-name (vector-ref (ctx-owners c) id)))) cover)))
+(define problems (vector->list (growable-data (ctx-problems c)) 0 (growable-count (ctx-problems c))))
+
+(test-group "the plan"
+  (test "no architecture problems on the real floor"
+    (for-each (lambda (p) (display (problem->string p)) (newline)) problems)
+    (assert-equal 0 (length problems)))
+  (test "the faces' covers"
+    (let ((covers (list-sort (lambda (a b) (string<? (apply string-append a) (apply string-append b)))
+                             (map (lambda (f) (names (face-cover f))) faces))))
+      (for-each (lambda (cv) (display cv) (newline)) covers)
+      (assert-equal '(("corridor") ("corridor" "duct") ("duct" "hatch" "office") ("duct" "office")
+                      ("fm-office") ("lobby") ("lobby" "mezzanine") ("office"))
+                    covers)))
+  (test "each room's faces add up to its outline's area"
+    (for-each (lambda (r)
+                (let* ((name (symbol->string (room-name r)))
+                       (faces-area (fold-left + 0.0 (map face-area (filter (lambda (f) (member name (names (face-cover f)))) faces))))
+                       (outline (abs (poly-area (room-corners r)))))
+                  (display (list name faces-area outline)) (newline)
+                  (assert-true (< (abs (- faces-area outline)) 1e-6))))
+              (floor-rooms (sources-floor src)))))
+
+(test-group "heights"
+  (test "under the mezzanine the lobby's ceiling is 2.75, the mezzanine's air 3 to 6"
+    (let* ((f (find (lambda (f) (equal? (names (face-cover f)) '("lobby" "mezzanine"))) faces))
+           (cols (vector-ref (ctx-cols c) (face-index f))))
+      (assert-equal '((0.0 2.75) (3.0 6.0)) (map (lambda (col) (list (car col) (cadr col))) cols))))
+  (test "through the hatch the office and duct are one column, 0 to 4"
+    (let* ((f (find (lambda (f) (equal? (names (face-cover f)) '("duct" "hatch" "office"))) faces))
+           (cols (vector-ref (ctx-cols c) (face-index f))))
+      (assert-equal '((0.0 4.0)) (map (lambda (col) (list (car col) (cadr col))) cols))))
+  (test "over the corridor the duct is its own column"
+    (let* ((f (find (lambda (f) (equal? (names (face-cover f)) '("corridor" "duct"))) faces))
+           (cols (vector-ref (ctx-cols c) (face-index f))))
+      (assert-equal '((0.0 2.8) (3.0 4.0)) (map (lambda (col) (list (car col) (cadr col))) cols)))))
+
+(test-group "holes"
+  (test "every opening but the hatch cut a hole"
+    (let ((kinds (apply append (map (lambda (hs) (map (lambda (h) (vector-ref h 4)) hs)) (vector->list (ctx-holes c))))))
+      (display kinds) (newline)
+      (for-each (lambda (k) (assert-true (memq k kinds))) '(arch door glass grate window exit))))
+  (test "the arch is 3 m wide in all, 2.75 m high (the mezzanine's underside)"
+    (let ((arches (filter (lambda (h) (eq? (vector-ref h 4) 'arch))
+                          (apply append (vector->list (ctx-holes c))))))
+      (assert-true (< (abs (- (fold-left + 0.0 (map (lambda (h) (- (vector-ref h 1) (vector-ref h 0))) arches)) 3.0)) 1e-6))
+      (assert-true (every (lambda (h) (and (= (vector-ref h 2) 0.0) (= (vector-ref h 3) 2.75))) arches)))))

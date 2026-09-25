@@ -1,0 +1,148 @@
+;;; (phantom floor mesh) - Where the compiler puts what it builds.
+;;;
+;;; A BATCH gathers the render triangles of one material: its vertices, each
+;;; a vector
+;;;
+;;;   #(x y z  u v  nx ny nz  r g b a  er eg eb ea  room)
+;;;     0 1 2  3 4  5  6  7   8 9 10 11 12 13 14 15  16
+;;;
+;;; (colours 0..255; room the owning room's index, or -1), and its triangles
+;;; as index triples. Vertices with the same position, normal and uv are
+;;; shared through a small spatial hash, so a surface split into half-metre
+;;; cells stays one connected mesh.
+;;;
+;;; A SOUP gathers the collision triangles: nine floats each, a surface tag
+;;; and a room index (255 for none).
+;;;
+;;; Both grow in place; nothing here is per-frame.
+;;;
+;;; Pure: no platform.
+
+(define-library (phantom floor mesh)
+  (import (sigil core)
+          (sigil struct)
+          (sigil math))
+
+  (export make-batch batch? batch-material batch-vertices batch-vertex-count
+          batch-indices batch-index-count batch-vertex! batch-tri! batch-quad!
+          vref
+          make-soup soup-count soup-tris soup-surfaces soup-rooms soup-tri! soup-quad!
+          make-growable growable-count growable-ref growable-push! growable-data)
+
+  (begin
+    ;; --- a growable vector: #(count data) ------------------------------------------
+
+    (define (make-growable n) (vector 0 (make-vector (max n 16) 0)))
+    (define (growable-count g) (vector-ref g 0))
+    (define (growable-data g) (vector-ref g 1))
+    (define (growable-ref g i) (vector-ref (vector-ref g 1) i))
+    (define (growable-push! g x)
+      (let ((n (vector-ref g 0)) (v (vector-ref g 1)))
+        (when (>= n (vector-length v))
+          (let ((w (make-vector (* 2 (vector-length v)) 0)))
+            (vector-copy! w 0 v)
+            (vector-set! g 1 w)))
+        (vector-set! (vector-ref g 1) n x)
+        (vector-set! g 0 (+ n 1))
+        n))
+
+    ;; --- batches ------------------------------------------------------------------
+
+    (define BUCKETS 4096)
+
+    (define-struct batch
+      (material default: #f)
+      (verts default: #f)          ; growable of vertex vectors
+      (idx default: #f)            ; growable of integers
+      (hash default: #f))          ; vector of bucket lists of vertex indices
+
+    (define (make-batch* material)
+      (batch material: material verts: (make-growable 256) idx: (make-growable 512)
+             hash: (make-vector BUCKETS '())))
+
+    (define (make-batch material) (make-batch* material))
+
+    (define (batch-vertices b) (growable-data (batch-verts b)))
+    (define (batch-vertex-count b) (growable-count (batch-verts b)))
+    (define (batch-indices b) (growable-data (batch-idx b)))
+    (define (batch-index-count b) (growable-count (batch-idx b)))
+
+    (define (vref v i) (vector-ref v i))
+
+    (define (q x) (exact (round (* x 1000.0))))
+
+    (define (bucket-of x y z)
+      (modulo (+ (* 73856093 (q x)) (* 19349663 (q y)) (* 83492791 (q z))) BUCKETS))
+
+    (define (same? v x y z u w nx ny nz)
+      (and (< (abs (- (vector-ref v 0) x)) 1e-6)
+           (< (abs (- (vector-ref v 1) y)) 1e-6)
+           (< (abs (- (vector-ref v 2) z)) 1e-6)
+           (< (abs (- (vector-ref v 3) u)) 1e-6)
+           (< (abs (- (vector-ref v 4) w)) 1e-6)
+           (< (abs (- (vector-ref v 5) nx)) 1e-6)
+           (< (abs (- (vector-ref v 6) ny)) 1e-6)
+           (< (abs (- (vector-ref v 7) nz)) 1e-6)))
+
+    ;; colour, emission: vectors #(r g b a) of 0..255. Returns the vertex index.
+    (define (batch-vertex! b x y z u w nx ny nz colour emission room)
+      (let* ((k (bucket-of x y z))
+             (hash (batch-hash b))
+             (verts (batch-verts b))
+             (found (let loop ((l (vector-ref hash k)))
+                      (cond ((null? l) #f)
+                            ;; one vertex only where everything matches: the room too,
+                            ;; which the bake's sight culling reads
+                            ((let ((v (growable-ref verts (car l))))
+                               (and (same? v x y z u w nx ny nz)
+                                    (eqv? (vector-ref v 16) room)
+                                    (= (vector-ref v 8) (vector-ref colour 0)) (= (vector-ref v 9) (vector-ref colour 1))
+                                    (= (vector-ref v 10) (vector-ref colour 2)) (= (vector-ref v 11) (vector-ref colour 3))
+                                    (= (vector-ref v 12) (vector-ref emission 0)) (= (vector-ref v 13) (vector-ref emission 1))
+                                    (= (vector-ref v 14) (vector-ref emission 2)) (= (vector-ref v 15) (vector-ref emission 3))))
+                             (car l))
+                            (else (loop (cdr l)))))))
+        (or found
+            (let ((i (growable-push! verts
+                                     (vector x y z u w nx ny nz
+                                             (vector-ref colour 0) (vector-ref colour 1)
+                                             (vector-ref colour 2) (vector-ref colour 3)
+                                             (vector-ref emission 0) (vector-ref emission 1)
+                                             (vector-ref emission 2) (vector-ref emission 3)
+                                             room))))
+              (vector-set! hash k (cons i (vector-ref hash k)))
+              i))))
+
+    (define (batch-tri! b i j k)
+      (unless (or (= i j) (= j k) (= i k))
+        (growable-push! (batch-idx b) i)
+        (growable-push! (batch-idx b) j)
+        (growable-push! (batch-idx b) k)))
+
+    ;; a b c d counter-clockwise from the front
+    (define (batch-quad! b i j k l)
+      (batch-tri! b i j k)
+      (batch-tri! b i k l))
+
+    ;; --- the collision soup ---------------------------------------------------------
+
+    (define-struct soup
+      (tris default: #f)       ; growable of flonums, 9 per triangle
+      (surfaces default: #f)   ; growable of small integers
+      (rooms default: #f))     ; growable of small integers
+
+    (define (make-soup) (soup tris: (make-growable 4096) surfaces: (make-growable 512) rooms: (make-growable 512)))
+    (define (soup-count s) (growable-count (soup-surfaces s)))
+
+    ;; a b c: vectors #(x y z), counter-clockwise seen from the open side.
+    (define (soup-tri! s a b c tag room)
+      (let ((t (soup-tris s)))
+        (growable-push! t (vector-ref a 0)) (growable-push! t (vector-ref a 1)) (growable-push! t (vector-ref a 2))
+        (growable-push! t (vector-ref b 0)) (growable-push! t (vector-ref b 1)) (growable-push! t (vector-ref b 2))
+        (growable-push! t (vector-ref c 0)) (growable-push! t (vector-ref c 1)) (growable-push! t (vector-ref c 2))
+        (growable-push! (soup-surfaces s) tag)
+        (growable-push! (soup-rooms s) (if (and room (>= room 0) (< room 255)) room 255))))
+
+    (define (soup-quad! s a b c d tag room)
+      (soup-tri! s a b c tag room)
+      (soup-tri! s a c d tag room))))

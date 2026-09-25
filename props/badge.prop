@@ -1,0 +1,3 @@
+;; props/badge.prop - a credential lying on a desk (things: (badge on-desk: ...)).
+(prop badge
+  parts: ((box  size: (0.2 0.12 0.01)   at: (0 0 0.005)       material: badge)))

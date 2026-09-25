@@ -1,0 +1,920 @@
+;;; (phantom floor format) - The four text formats the floor compiler reads,
+;;; read into records, with every problem named by FILE:LINE (gate 1's first
+;;; half: the files read, and every field is one the format has, of the right
+;;; shape).
+;;;
+;;;   floors/NAME.floor        (floor level: ... rooms: ... openings: ... )
+;;;   props/NAME.prop          (prop NAME parts: ... )
+;;;   props/materials.legend   (legend palette: ... surfaces: ... materials: ...)
+;;;   props/textures/NAME.cells (texture NAME legend: ... cells: ...)
+;;;
+;;; The formats are written up in src/phantom/floor/README.md. Reading never
+;;; raises: each reader returns (RECORD . PROBLEMS), and RECORD is #f only
+;;; when the file cannot be read at all.
+;;;
+;;; (check-references ...) is gate 1's second half: the names a floor uses
+;;; (surfaces, circuits, rooms, prop kinds, materials, textures, colours) are
+;;; all declared somewhere.
+;;;
+;;; Coordinates come back as flonums: a 2D point as (x . y), a 3D point as a
+;;; list (x y z).
+;;;
+;;; Pure: no platform.
+
+(define-library (phantom floor format)
+  (import (sigil core)
+          (sigil struct)
+          (sigil list)
+          (sigil math)
+          (sigil string)
+          (phantom floor sexp)
+          (phantom floor problem))
+
+  (export read-floor read-legend read-prop read-texture check-references
+          floor? floor-path floor-level floor-intent floor-tier-in floor-tier-out
+          floor-ambient floor-rooms floor-openings floor-stairs floor-circuits floor-things
+          floor-views floor-routes floor-start floor-facing floor-line
+          room room? room-name room-index room-corners room-floor room-ceiling room-over
+          room-surface room-light room-edge room-crouch-only room-line
+          opening opening? opening-kind opening-a opening-b opening-at opening-along
+          opening-width opening-height opening-sill opening-head opening-reader opening-size
+          opening-line
+          stair stair? stair-from stair-to stair-start stair-end stair-width stair-surface stair-line
+          circuit circuit? circuit-name circuit-level circuit-panel circuit-needs circuit-line
+          thing thing? thing-kind thing-fields thing-line thing-field
+          view view? view-name view-at view-look view-lens view-line
+          route route? route-name route-from route-avoid route-line
+          legend legend? legend-path legend-palette legend-surfaces legend-materials
+          legend-defaults legend-default
+          surface surface? surface-name surface-material surface-noise surface-walls surface-ceiling surface-line
+          material material? material-name material-texture material-colour material-glass
+          material-emits material-line
+          prop prop? prop-name prop-path prop-mount prop-opening prop-parts prop-hides
+          prop-lamps prop-line
+          part part? part-shape part-size part-at part-material part-radius part-height
+          part-sides part-outline part-line
+          lamp lamp? lamp-at lamp-colour lamp-radius lamp-strength lamp-circuit lamp-line
+          texture texture? texture-name texture-path texture-legend texture-cells texture-line
+          OPENING-KINDS THING-KINDS RESERVED-CIRCUITS hex->rgb)
+
+  (begin
+    ;; --- records ------------------------------------------------------------
+
+    (define-struct floor
+      (path default: "") (level default: 0) (intent default: "")
+      (tier-in default: #f) (tier-out default: #f) (ambient default: '())
+      (rooms default: '()) (openings default: '()) (stairs default: '())
+      (circuits default: '()) (things default: '()) (views default: '()) (routes default: '())
+      (start default: #f) (facing default: 0.0) (line default: 1))
+
+    (define-struct room
+      (name default: #f) (index default: 0) (corners default: '())
+      (floor default: 0.0) (ceiling default: 0.0) (over default: '())
+      (surface default: #f) (light default: 'none) (edge default: #f)
+      (crouch-only default: #f) (line default: #f))
+
+    ;; kind: door arch glass grate hatch window exit. a and b: room names
+    ;; (b is #f for window and exit, which open onto the outside).
+    (define-struct opening
+      (kind default: #f) (a default: #f) (b default: #f)
+      (at default: #f) (along default: #f)
+      (width default: #f) (height default: #f)
+      (sill default: #f) (head default: #f)
+      (reader default: #f) (size default: #f) (line default: #f))
+
+    (define-struct stair
+      (from default: #f) (to default: #f) (start default: #f) (end default: #f)
+      (width default: 1.2) (surface default: #f) (line default: #f))
+
+    (define-struct circuit
+      (name default: #f) (level default: 1.0) (panel default: #f)
+      (needs default: #f) (line default: #f))
+
+    ;; fields: ((name . value) ...), values already coerced.
+    (define-struct thing
+      (kind default: #f) (fields default: '()) (line default: #f))
+
+    (define (thing-field t name . default)
+      (let ((p (assq name (thing-fields t))))
+        (cond (p (cdr p)) ((pair? default) (car default)) (else #f))))
+
+    (define-struct view
+      (name default: #f) (at default: #f) (look default: #f)
+      (lens default: #f) (line default: #f))
+
+    ;; A route gate 3 must find to the exit, beyond the one from start:.
+    ;; from: start, badge (the badge's desk) or a point (x y); avoid: rooms
+    ;; the route may not enter.
+    (define-struct route
+      (name default: #f) (from default: #f) (avoid default: '()) (line default: #f))
+
+    (define-struct legend
+      (path default: "") (palette default: '()) (surfaces default: '())
+      (materials default: '()) (defaults default: '()))
+
+    (define (legend-default lg name)
+      (let ((p (assq name (legend-defaults lg)))) (and p (cdr p))))
+
+    (define-struct surface
+      (name default: #f) (material default: #f) (noise default: #f)
+      (walls default: #f) (ceiling default: #f) (line default: #f))
+
+    (define-struct material
+      (name default: #f) (texture default: #f) (colour default: #f)
+      (glass default: #f) (emits default: #f) (line default: #f))
+
+    (define-struct prop
+      (name default: #f) (path default: "") (mount default: 'floor)
+      (opening default: #f) (parts default: '()) (hides default: 'none)
+      (lamps default: '()) (line default: 1))
+
+    ;; shape: box cylinder wedge extrude. size: (sx sy sz) for box and wedge.
+    (define-struct part
+      (shape default: 'box) (size default: #f) (at default: (list 0.0 0.0 0.0))
+      (material default: #f) (radius default: #f) (height default: #f)
+      (sides default: 12) (outline default: #f) (line default: #f))
+
+    (define-struct lamp
+      (at default: #f) (colour default: "#FFFFFF") (radius default: 4.0)
+      (strength default: 1.0) (circuit default: #f) (line default: #f))
+
+    ;; legend: ((char . "#rrggbb") ...). cells: list of strings.
+    (define-struct texture
+      (name default: #f) (path default: "") (legend default: '())
+      (cells default: '()) (line default: 1))
+
+    (define OPENING-KINDS '(door arch glass grate hatch window exit))
+    (define THING-KINDS '(lifts guard desk cabinet badge rail prop))
+    ;; Circuits no floor declares: lamps in props and the compiler's rules use
+    ;; them, and nothing switches them (the exit sign, screens left on, the
+    ;; city through the windows).
+    (define RESERVED-CIRCUITS '(emergency screens city))
+
+    ;; --- value shapes -------------------------------------------------------
+    ;;
+    ;; (coerce type value) -> (ok . value) or (bad . "what it should be").
+
+    (define (num? x) (and (number? x) (let ((f (inexact x))) (and (not (nan? f)) (< (abs f) 1e15)))))   ; finite, and a sane size
+    (define (fl x) (inexact x))
+    (define (items-of v) (if (node? v) (node-items v) #f))
+
+    (define (point2 v)
+      (let ((xs (items-of v)))
+        (and xs (= (length xs) 2) (num? (car xs)) (num? (cadr xs))
+             (cons (fl (car xs)) (fl (cadr xs))))))
+
+    (define (point3 v)
+      (let ((xs (items-of v)))
+        (and xs (= (length xs) 3) (every num? xs)
+             (map fl xs))))
+
+    (define (coerce type v)
+      (define (ok x) (cons 'ok x))
+      (define (bad what) (cons 'bad what))
+      (case type
+        ((number) (if (num? v) (ok (fl v)) (bad "a number")))
+        ((count) (if (and (integer? v) (> v 0)) (ok v) (bad "a whole number above 0")))
+        ((symbol) (if (symbol? v) (ok v) (bad "a name")))
+        ((string) (if (string? v) (ok v) (bad "a string")))
+        ((bool) (if (boolean? v) (ok v) (bad "#t or #f")))
+        ((point2) (let ((p (point2 v))) (if p (ok p) (bad "a point (x y)"))))
+        ((place) (cond ((memq v '(start badge)) (ok v))
+                       ((point2 v) (ok (point2 v)))
+                       (else (bad "start, badge or a point (x y)"))))
+        ((point3) (let ((p (point3 v))) (if p (ok p) (bad "a point (x y z)"))))
+        ((size2) (let ((p (point2 v))) (if p (ok p) (bad "a size (w h)"))))
+        ((points)
+         (let ((xs (items-of v)))
+           (if (and xs (pair? xs) (every point2 xs))
+               (ok (map point2 xs))
+               (bad "a list of points ((x y) ...)"))))
+        ((segment)
+         (let ((xs (items-of v)))
+           (if (and xs (= (length xs) 2) (every point2 xs))
+               (ok (map point2 xs))
+               (bad "two points ((x y) (x y))"))))
+        ((numbers)
+         (let ((xs (items-of v)))
+           (if (and xs (every num? xs)) (ok (map fl xs)) (bad "a list of numbers"))))
+        ((symbols)
+         (cond ((symbol? v) (ok (list v)))
+               ((and (items-of v) (every symbol? (items-of v))) (ok (items-of v)))
+               (else (bad "a name or a list of names"))))
+        ((pair-of-names)
+         (let ((xs (items-of v)))
+           (if (and xs (= (length xs) 2) (every symbol? xs))
+               (ok xs)
+               (bad "two room names (a b)"))))
+        ((ambient)
+         ;; (name level name level ...)
+         (let ((xs (items-of v)))
+           (if (and xs (even? (length xs)) (plist-ok? xs))
+               (ok (plist->alist xs))
+               (bad "(name level name level ...)"))))
+        ((nodes)
+         (let ((xs (items-of v)))
+           (if xs (ok v) (bad "a list"))))
+        ((anchor)
+         ;; (END M) with END a compass side; (corner N (dx dy)); (centre (dx dy))
+         (let ((xs (items-of v)))
+           (cond ((and xs (= (length xs) 2) (memq (car xs) (quote (north south east west))) (num? (cadr xs)))
+                  (ok (list (car xs) (fl (cadr xs)))))
+                 ((and xs (= (length xs) 3) (eq? (car xs) (quote corner)) (integer? (cadr xs)) (point2 (caddr xs)))
+                  (ok (list (quote corner) (cadr xs) (point2 (caddr xs)))))
+                 ((and xs (= (length xs) 2) (eq? (car xs) (quote centre)) (point2 (cadr xs)))
+                  (ok (list (quote centre) (point2 (cadr xs)))))
+                 (else (bad "(SIDE M), (corner N (dx dy)) or (centre (dx dy))")))))
+        ((any) (ok v))
+        (else (bad "(unknown shape)"))))
+
+    (define (plist-ok? xs)
+      (or (null? xs)
+          (and (symbol? (car xs)) (num? (cadr xs)) (plist-ok? (cddr xs)))))
+
+    (define (plist->alist xs)
+      (if (null? xs) '() (cons (cons (car xs) (fl (cadr xs))) (plist->alist (cddr xs)))))
+
+    ;; --- keyword fields -----------------------------------------------------
+    ;;
+    ;; (fields items lines path specs) reads (name: value ...) from ITEMS (with
+    ;; the line each item starts on in LINES) against SPECS, a list of
+    ;; (name type required?). Returns (alist . problems): alist
+    ;; ((name . coerced-value) ...), problems in the order found. what: how a
+    ;; problem names the entry ("room lobby").
+
+    (define (fields items lines path specs what)
+      (let loop ((items items) (lines lines) (acc '()) (ps '()))
+        (define (bad line msg)
+          (problem path: path line: line message: (string-append what ": " msg) gate: 1))
+        (cond ((null? items)
+               (let ((missing (filter (lambda (s) (and (caddr s) (not (assq (car s) acc)))) specs)))
+                 (cons (reverse acc)
+                       (append (reverse ps)
+                               (map (lambda (s)
+                                      (bad #f (string-append "has no " (symbol->string (car s)) ":")))
+                                    missing)))))
+              ((not (keyword? (car items)))
+               (loop (cdr items) (cdr lines) acc
+                     (cons (bad (car lines) (string-append "expected a field (name:), found "
+                                                           (datum->string (car items))))
+                           ps)))
+              ((null? (cdr items))
+               (loop '() '() acc
+                     (cons (bad (car lines) (string-append (keyword->string (car items)) ": has no value"))
+                           ps)))
+              (else
+               (let* ((name (keyword->symbol (car items)))
+                      (spec (assq name specs))
+                      (vline (cadr lines)))
+                 (cond ((not spec)
+                        (loop (cddr items) (cddr lines) acc
+                              (cons (bad (car lines)
+                                         (string-append "has no field " (symbol->string name) ":"
+                                                        " (it has " (spec-names specs) ")"))
+                                    ps)))
+                       ((assq name acc)
+                        (loop (cddr items) (cddr lines) acc
+                              (cons (bad (car lines) (string-append (symbol->string name) ": is given twice"))
+                                    ps)))
+                       (else
+                        (let ((c (coerce (cadr spec) (cadr items))))
+                          (if (eq? (car c) 'ok)
+                              (loop (cddr items) (cddr lines) (cons (cons name (cdr c)) acc) ps)
+                              (loop (cddr items) (cddr lines) acc
+                                    (cons (bad vline (string-append (symbol->string name) ": should be "
+                                                                    (cdr c) ", not "
+                                                                    (datum->string (cadr items))))
+                                          ps)))))))))))
+
+    (define (spec-names specs)
+      (string-join (map (lambda (s) (string-append (symbol->string (car s)) ":")) specs) " "))
+
+    (define (get al name . default)
+      (let ((p (assq name al)))
+        (cond (p (cdr p)) ((pair? default) (car default)) (else #f))))
+
+    ;; A file's one form, checked to start with HEAD. Returns (node . problems);
+    ;; node is #f when it cannot be used.
+    (define (one-form text path head)
+      (let ((ds (read-nodes text)))
+        (define (bad line msg) (problem path: path line: line message: msg gate: 1))
+        (cond ((read-error? ds)
+               (cons #f (list (bad (read-error-line ds) (string-append "does not read: " (read-error-message ds))))))
+              ((null? ds) (cons #f (list (bad #f "is empty"))))
+              ((not (and (node? (car ds)) (pair? (node-items (car ds)))
+                         (eq? (car (node-items (car ds))) head)))
+               (cons #f (list (bad 1 (string-append "does not start with (" (symbol->string head))))))
+              ((pair? (cdr ds))
+               (cons (car ds) (list (bad #f "holds more than one form"))))
+              (else (cons (car ds) '())))))
+
+    ;; Each entry of a list-valued field: a node whose first item is a name
+    ;; (named? #t) or whose items are all fields (named? #f). Calls
+    ;; (f name items lines line) for each, collecting (record . problems).
+    (define (entries v path what named? f)
+      (if (not (node? v))
+          (cons '() '())
+          (let loop ((es (node-items v)) (ls (node-lines v)) (acc '()) (ps '()))
+            (cond ((null? es) (cons (reverse acc) ps))
+                  ((not (node? (car es)))
+                   (loop (cdr es) (cdr ls) acc
+                         (append ps (list (problem path: path line: (car ls)
+                                                   message: (string-append what ": expected an entry (...), found "
+                                                                           (datum->string (car es)))
+                                                   gate: 1)))))
+                  (else
+                   (let* ((e (car es))
+                          (items (node-items e))
+                          (lines (node-lines e)))
+                     (if (and named? (or (null? items) (not (symbol? (car items)))))
+                         (loop (cdr es) (cdr ls) acc
+                               (append ps (list (problem path: path line: (node-line e)
+                                                         message: (string-append what ": an entry must start with its name")
+                                                         gate: 1))))
+                         (let ((r (if named?
+                                      (f (car items) (cdr items) (cdr lines) (node-line e))
+                                      (f #f items lines (node-line e)))))
+                           (loop (cdr es) (cdr ls)
+                                 (if (car r) (cons (car r) acc) acc)
+                                 (append ps (cdr r)))))))))))
+
+    ;; --- the floor file -----------------------------------------------------
+
+    (define FLOOR-SPECS
+      '((level number #t) (intent string #f) (tier-in symbol #f) (tier-out symbol #f)
+        (ambient ambient #f) (rooms nodes #t) (openings nodes #f) (stairs nodes #f)
+        (lights nodes #f) (things nodes #f) (views nodes #f) (routes nodes #f) (start point2 #t)
+        (facing number #f)))
+
+    (define ROOM-SPECS
+      '((corners points #t) (floor number #t) (ceiling number #t) (over symbols #f)
+        (surface symbol #t) (light symbol #f) (edge symbol #f) (crouch-only bool #f)))
+
+    (define OPENING-SPECS
+      '((between pair-of-names #f) (in symbol #f) (at point2 #f) (along segment #f)
+        (width number #f) (height number #f) (sill number #f) (head number #f)
+        (reader symbol #f) (size number #f)))
+
+    (define STAIR-SPECS
+      '((from symbol #t) (to symbol #t) (start point2 #t) (end point2 #t)
+        (width number #f) (surface symbol #f)))
+
+    (define CIRCUIT-SPECS
+      '((level number #t) (panel point2 #f) (needs symbol #f)))
+
+    (define VIEW-SPECS
+      '((at point3 #t) (look point3 #t) (lens number #f)))
+
+    (define ROUTE-SPECS
+      '((from place #t) (avoid symbols #f)))
+
+    ;; Every thing kind's fields.
+    (define THING-SPECS
+      '((lifts (in symbol #t) (along segment #t) (count count #t) (kind symbol #f))
+        (guard (kind symbol #t) (route points #t) (waits numbers #f))
+        (desk (at point2 #f) (in symbol #f) (against symbol #f) (from anchor #f) (kind symbol #t) (facing number #f))
+        (cabinet (at point2 #f) (in symbol #f) (against symbol #f) (from anchor #f) (kind symbol #t) (facing number #f))
+        (prop (at point2 #f) (in symbol #f) (against symbol #f) (from anchor #f) (kind symbol #t) (facing number #f) (z number #f))
+        (badge (on-desk point2 #t) (tier symbol #t))
+        (rail (along segment #t) (in symbol #f))))
+
+    (define (read-floor text path)
+      (let* ((r (one-form text path 'floor))
+             (form (car r)))
+        (if (not form)
+            (cons #f (cdr r))
+            (let* ((f (fields (cdr (node-items form)) (cdr (node-lines form)) path FLOOR-SPECS "the floor"))
+                   (al (car f))
+                   (rooms (entries (get al 'rooms) path "rooms:" #t
+                                   (lambda (name items lines line)
+                                     (let ((r (fields items lines path ROOM-SPECS
+                                                      (string-append "room " (symbol->string name)))))
+                                       (cons (room name: name
+                                                   corners: (get (car r) 'corners '())
+                                                   floor: (get (car r) 'floor 0.0)
+                                                   ceiling: (get (car r) 'ceiling 0.0)
+                                                   over: (get (car r) 'over '())
+                                                   surface: (get (car r) 'surface)
+                                                   light: (get (car r) 'light 'none)
+                                                   edge: (get (car r) 'edge)
+                                                   crouch-only: (get (car r) 'crouch-only #f)
+                                                   line: line)
+                                             (cdr r))))))
+                   (openings (entries (get al 'openings) path "openings:" #t (lambda (kind items lines line) (read-opening kind items lines line path))))
+                   (stairs (entries (get al 'stairs) path "stairs:" #f
+                                    (lambda (_ items lines line)
+                                      (let ((r (fields items lines path STAIR-SPECS "a stair")))
+                                        (cons (stair from: (get (car r) 'from) to: (get (car r) 'to)
+                                                     start: (get (car r) 'start) end: (get (car r) 'end)
+                                                     width: (get (car r) 'width 1.2)
+                                                     surface: (get (car r) 'surface)
+                                                     line: line)
+                                              (cdr r))))))
+                   (circuits (entries (get al 'lights) path "lights:" #t
+                                      (lambda (name items lines line)
+                                        (let ((r (fields items lines path CIRCUIT-SPECS
+                                                         (string-append "circuit " (symbol->string name)))))
+                                          (cons (circuit name: name level: (get (car r) 'level 1.0)
+                                                         panel: (get (car r) 'panel) needs: (get (car r) 'needs)
+                                                         line: line)
+                                                (cdr r))))))
+                   (things (entries (get al 'things) path "things:" #t (lambda (kind items lines line) (read-thing kind items lines line path))))
+                   (views (entries (get al 'views) path "views:" #t
+                                   (lambda (name items lines line)
+                                     (let ((r (fields items lines path VIEW-SPECS
+                                                      (string-append "view " (symbol->string name)))))
+                                       (cons (view name: name at: (get (car r) 'at) look: (get (car r) 'look)
+                                                   lens: (get (car r) 'lens) line: line)
+                                             (cdr r))))))
+                   (routes (entries (get al 'routes) path "routes:" #t
+                                    (lambda (name items lines line)
+                                      (let ((r (fields items lines path ROUTE-SPECS
+                                                       (string-append "route " (symbol->string name)))))
+                                        (cons (route name: name from: (get (car r) 'from) avoid: (get (car r) 'avoid '())
+                                                     line: line)
+                                              (cdr r)))))))
+              (cons (floor path: path
+                           level: (get al 'level 0)
+                           intent: (get al 'intent "")
+                           tier-in: (get al 'tier-in) tier-out: (get al 'tier-out)
+                           ambient: (get al 'ambient '())
+                           rooms: (number-rooms (car rooms))
+                           openings: (car openings) stairs: (car stairs)
+                           circuits: (car circuits) things: (car things) views: (car views)
+                           routes: (car routes)
+                           start: (get al 'start) facing: (get al 'facing 0.0)
+                           line: (node-line form))
+                    (append (cdr r) (cdr f) (cdr rooms) (cdr openings) (cdr stairs)
+                            (cdr circuits) (cdr things) (cdr views) (cdr routes)))))))
+
+    (define (number-rooms rs)
+      (let loop ((rs rs) (i 0) (acc '()))
+        (if (null? rs) (reverse acc)
+            (loop (cdr rs) (+ i 1) (cons (room (car rs) index: i) acc)))))
+
+    ;; An opening: its kind, then between: (a b) or in: room, then at: or along:.
+    (define (read-opening kind items lines line path)
+      (let* ((what (string-append "the " (symbol->string kind)))
+             (r (fields items lines path OPENING-SPECS what))
+             (al (car r))
+             (bad (lambda (msg) (problem path: path line: line message: (string-append what ": " msg) gate: 1)))
+             (ps (append
+                   (if (memq kind OPENING-KINDS) '()
+                       (list (bad (string-append "is not an opening (they are "
+                                                 (string-join (map symbol->string OPENING-KINDS) ", ") ")"))))
+                   (cond ((memq kind '(window exit))
+                          (if (get al 'in) '() (list (bad "needs in: ROOM (it opens to the outside)"))))
+                         ((memq kind OPENING-KINDS)
+                          (if (get al 'between) '() (list (bad "needs between: (ROOM ROOM)"))))
+                         (else '()))
+                   (if (or (get al 'at) (get al 'along)) '() (list (bad "needs at: (x y) or along: ((x y) (x y))")))
+                   (if (and (get al 'at) (get al 'along)) (list (bad "has both at: and along:")) '())
+                   (if (and (eq? kind 'exit) (get al 'along))
+                       (list (bad "takes at: (x y), not along: (its door is placed at a point)"))
+                       '())))
+             (pair (get al 'between)))
+        (cons (opening kind: kind
+                       a: (if pair (car pair) (get al 'in))
+                       b: (if pair (cadr pair) #f)
+                       at: (get al 'at) along: (get al 'along)
+                       width: (get al 'width) height: (get al 'height)
+                       sill: (get al 'sill) head: (get al 'head)
+                       reader: (get al 'reader) size: (get al 'size)
+                       line: line)
+              (append (cdr r) ps))))
+
+    (define (read-thing kind items lines line path)
+      (let ((specs (assq kind THING-SPECS)))
+        (if (not specs)
+            (cons #f (list (problem path: path line: line
+                                    message: (string-append "things: " (symbol->string kind)
+                                                            " is not a thing (they are "
+                                                            (string-join (map symbol->string (map car THING-SPECS)) ", ")
+                                                            ")")
+                                    gate: 1)))
+            (let ((r (fields items lines path (cdr specs) (string-append "the " (symbol->string kind)))))
+              (cons (thing kind: kind fields: (car r) line: line) (cdr r))))))
+
+    ;; --- the legend ---------------------------------------------------------
+
+    (define LEGEND-SPECS
+      '((palette any #t) (surfaces nodes #t) (materials nodes #t)
+        (walls symbol #t) (ceilings symbol #t) (trim symbol #t) (skirting symbol #t)
+        (frames symbol #t) (rails symbol #t) (panels symbol #t)))
+
+    (define SURFACE-SPECS (quote ((material symbol #t) (noise symbol #t) (walls symbol #f) (ceiling symbol #f))))
+    (define MATERIAL-SPECS '((texture symbol #f) (colour string #f) (glass number #f) (emits bool #f)))
+
+    (define (read-legend text path)
+      (let* ((r (one-form text path 'legend))
+             (form (car r)))
+        (if (not form)
+            (cons #f (cdr r))
+            (let* ((f (fields (cdr (node-items form)) (cdr (node-lines form)) path LEGEND-SPECS "the legend"))
+                   (al (car f))
+                   (pal (get al 'palette))
+                   (pal-items (if (node? pal) (node-items pal) '()))
+                   (pal-ps (if (and (node? pal) (every hex-colour? pal-items))
+                               '()
+                               (list (problem path: path line: (node-line form)
+                                              message: "the legend: palette: should be a list of \"#RRGGBB\" colours"
+                                              gate: 1))))
+                   (surfaces (entries (get al 'surfaces) path "surfaces:" #t
+                                      (lambda (name items lines line)
+                                        (let ((r (fields items lines path SURFACE-SPECS
+                                                         (string-append "surface " (symbol->string name)))))
+                                          (cons (surface name: name material: (get (car r) 'material)
+                                                         noise: (get (car r) (quote noise))
+                                                         walls: (get (car r) (quote walls))
+                                                         ceiling: (get (car r) (quote ceiling)) line: line)
+                                                (cdr r))))))
+                   (materials (entries (get al 'materials) path "materials:" #t
+                                       (lambda (name items lines line)
+                                         (let* ((what (string-append "material " (symbol->string name)))
+                                                (r (fields items lines path MATERIAL-SPECS what))
+                                                (m (material name: name texture: (get (car r) 'texture)
+                                                             colour: (get (car r) 'colour)
+                                                             glass: (get (car r) 'glass)
+                                                             emits: (get (car r) 'emits #f)
+                                                             line: line)))
+                                           (cons m
+                                                 (append (cdr r)
+                                                         (if (eq? (not (material-texture m)) (not (material-colour m)))
+                                                             (list (problem path: path line: line
+                                                                            message: (string-append what ": needs texture: or colour:, one of them")
+                                                                            gate: 1))
+                                                             '())
+                                                         (if (and (material-colour m) (not (hex-colour? (material-colour m))))
+                                                             (list (problem path: path line: line
+                                                                            message: (string-append what ": colour: should be \"#RRGGBB\"")
+                                                                            gate: 1))
+                                                             '()))))))))
+              (cons (legend path: path
+                            palette: (map string-upcase* (filter string? pal-items))
+                            surfaces: (car surfaces) materials: (car materials)
+                            defaults: (filter-map (lambda (k) (let ((v (get al k))) (and v (cons k v))))
+                                                  '(walls ceilings trim skirting frames rails panels)))
+                    (append (cdr r) (cdr f) pal-ps (cdr surfaces) (cdr materials)))))))
+
+    (define (hex-colour? s)
+      (and (string? s) (= (string-length s) 7) (char=? (string-ref s 0) #\#)
+           (every hex-digit? (string->list (substring s 1 7)))))
+
+    (define (hex-digit? c)
+      (or (and (char>=? c #\0) (char<=? c #\9))
+          (and (char>=? c #\a) (char<=? c #\f))
+          (and (char>=? c #\A) (char<=? c #\F))))
+
+    (define (string-upcase* s) (list->string (map char-up (string->list s))))
+    (define (char-up c) (if (and (char>=? c #\a) (char<=? c #\z)) (integer->char (- (char->integer c) 32)) c))
+
+    (define (hex-val c)
+      (let ((c (char-up c)))
+        (if (char>=? c #\A) (+ 10 (- (char->integer c) 65)) (- (char->integer c) 48))))
+
+    ;; "#RRGGBB" -> (r g b), each 0..255.
+    (define (hex->rgb s)
+      (list (+ (* 16 (hex-val (string-ref s 1))) (hex-val (string-ref s 2)))
+            (+ (* 16 (hex-val (string-ref s 3))) (hex-val (string-ref s 4)))
+            (+ (* 16 (hex-val (string-ref s 5))) (hex-val (string-ref s 6)))))
+
+    ;; --- props --------------------------------------------------------------
+
+    (define PROP-SPECS
+      '((parts nodes #t) (hides symbol #f) (mount symbol #f) (opening size2 #f) (lamps nodes #f)))
+
+    (define PART-SPECS
+      '((box (size point3 #t) (at point3 #t) (material symbol #t))
+        (wedge (size point3 #t) (at point3 #t) (material symbol #t))
+        (cylinder (radius number #t) (height number #t) (at point3 #t) (material symbol #t) (sides count #f))
+        (extrude (outline points #t) (height number #t) (at point3 #t) (material symbol #t))))
+
+    (define LAMP-SPECS
+      '((at point3 #t) (colour string #t) (radius number #f) (strength number #f) (circuit symbol #t)))
+
+    (define (read-prop text path)
+      (let* ((r (one-form text path 'prop))
+             (form (car r)))
+        (if (not form)
+            (cons #f (cdr r))
+            (let* ((items (cdr (node-items form)))
+                   (lines (cdr (node-lines form)))
+                   (named? (and (pair? items) (symbol? (car items))))
+                   (name (if named? (car items) #f))
+                   (what (string-append "prop " (if name (symbol->string name) "?")))
+                   (f (fields (if named? (cdr items) items) (if named? (cdr lines) lines) path PROP-SPECS what))
+                   (al (car f))
+                   (parts (entries (get al 'parts) path (string-append what " parts:") #t
+                                   (lambda (shape items lines line)
+                                     (let ((specs (assq shape PART-SPECS)))
+                                       (if (not specs)
+                                           (cons #f (list (problem path: path line: line
+                                                                   message: (string-append what ": " (symbol->string shape)
+                                                                                           " is not a part (box, cylinder, wedge, extrude)")
+                                                                   gate: 1)))
+                                           (let ((r (fields items lines path (cdr specs)
+                                                            (string-append what " " (symbol->string shape)))))
+                                             (cons (part shape: shape
+                                                         size: (get (car r) 'size)
+                                                         at: (get (car r) 'at (list 0.0 0.0 0.0))
+                                                         material: (get (car r) 'material)
+                                                         radius: (get (car r) 'radius)
+                                                         height: (get (car r) 'height)
+                                                         sides: (get (car r) 'sides 12)
+                                                         outline: (get (car r) 'outline)
+                                                         line: line)
+                                                   (cdr r))))))))
+                   (lamps (entries (get al 'lamps) path (string-append what " lamps:") #f
+                                   (lambda (_ items lines line)
+                                     (let ((r (fields items lines path LAMP-SPECS (string-append what " lamp"))))
+                                       (cons (lamp at: (get (car r) 'at) colour: (get (car r) 'colour "#FFFFFF")
+                                                   radius: (get (car r) 'radius 4.0)
+                                                   strength: (get (car r) 'strength 1.0)
+                                                   circuit: (get (car r) 'circuit) line: line)
+                                             (cdr r)))))))
+              (cons (prop name: name path: path
+                          mount: (get al 'mount 'floor)
+                          opening: (get al 'opening)
+                          parts: (car parts)
+                          hides: (get al 'hides 'none)
+                          lamps: (car lamps)
+                          line: (node-line form))
+                    (append (cdr r)
+                            (if named? '() (list (problem path: path line: (node-line form)
+                                                          message: "a prop must be named: (prop NAME ...)" gate: 1)))
+                            (cdr f) (cdr parts) (cdr lamps)
+                            (if (memq (get al 'mount 'floor) '(floor wall)) '()
+                                (list (problem path: path line: (node-line form)
+                                               message: (string-append what ": mount: is floor or wall") gate: 1)))
+                            (if (memq (get al 'hides 'none) '(none crouched standing)) '()
+                                (list (problem path: path line: (node-line form)
+                                               message: (string-append what ": hides: is none, crouched or standing") gate: 1)))))))))
+
+    ;; --- text-cell textures -------------------------------------------------
+
+    (define TEXTURE-SPECS '((legend nodes #t) (cells any #t)))
+    (define CELLS 16)
+
+    (define (read-texture text path)
+      (let* ((r (one-form text path 'texture))
+             (form (car r)))
+        (if (not form)
+            (cons #f (cdr r))
+            (let* ((items (cdr (node-items form)))
+                   (lines (cdr (node-lines form)))
+                   (named? (and (pair? items) (symbol? (car items))))
+                   (name (if named? (car items) #f))
+                   (what (string-append "texture " (if name (symbol->string name) "?")))
+                   (f (fields (if named? (cdr items) items) (if named? (cdr lines) lines) path TEXTURE-SPECS what))
+                   (al (car f))
+                   (lg (get al 'legend))
+                   (entries* (if (node? lg) (node-items lg) '()))
+                   (legend-al (filter-map (lambda (e)
+                                            (let ((xs (and (node? e) (node-items e))))
+                                              (and xs (= (length xs) 2) (string? (car xs)) (= (string-length (car xs)) 1)
+                                                   (hex-colour? (cadr xs))
+                                                   (cons (string-ref (car xs) 0) (string-upcase* (cadr xs))))))
+                                          entries*))
+                   (cells (get al 'cells))
+                   (rows (if (node? cells) (node-items cells) '()))
+                   (row-lines (if (node? cells) (node-lines cells) '()))
+                   (bad (lambda (line msg) (problem path: path line: line message: (string-append what ": " msg) gate: 1))))
+              (cons (texture name: name path: path legend: legend-al
+                             cells: (filter string? rows) line: (node-line form))
+                    (append (cdr r) (cdr f)
+                            (if (= (length legend-al) (length entries*)) '()
+                                (list (bad (node-line form) "legend: should be ((\"c\" \"#RRGGBB\") ...), one character each")))
+                            (if (and (node? cells) (= (length rows) CELLS) (every string? rows)) '()
+                                (list (bad (node-line form) (string-append "cells: should be " (number->string CELLS)
+                                                                           " strings of " (number->string CELLS) " characters"))))
+                            (apply append
+                                   (map (lambda (row line i)
+                                          (if (not (string? row)) '()
+                                              (append
+                                                (if (= (string-length row) CELLS) '()
+                                                    (list (bad line (string-append "row " (number->string i) " is "
+                                                                                   (number->string (string-length row))
+                                                                                   " characters, not " (number->string CELLS)))))
+                                                (filter-map (lambda (k)
+                                                              (let ((c (string-ref row k)))
+                                                                (and (not (assv c legend-al))
+                                                                     (bad line (string-append "row " (number->string i)
+                                                                                              " column " (number->string k)
+                                                                                              ": '" (string c) "' is not in the legend")))))
+                                                            (iota (string-length row))))))
+                                        rows row-lines (iota (length rows))))))))))
+
+    ;; --- references (gate 1, the legend half) --------------------------------
+    ;;
+    ;; floor: a floor record. lg: the legend. props: ((kind . prop) ...), the
+    ;; props that exist. textures: ((name . texture) ...).
+
+    ;; Everything a floor names, in one table: ((name kind line) ...), kind
+    ;; room or circuit (the reserved circuits included, line #f). Named
+    ;; points, openings and things will join it (the format's growth plan).
+    ;; Views are camera names for the tools and the shell, a namespace of
+    ;; their own (the slice's view office looks into the room office).
+    (define (name-table fl)
+      (append (map (lambda (n) (list n 'circuit #f)) RESERVED-CIRCUITS)
+              (map (lambda (r) (list (room-name r) 'room (room-line r))) (floor-rooms fl))
+              (map (lambda (c) (list (circuit-name c) 'circuit (circuit-line c))) (floor-circuits fl))))
+
+    ;; A problem for each entry whose name an earlier entry already has.
+    (define (unique-names xs name-of line-of what bad)
+      (let loop ((xs xs) (seen '()) (acc '()))
+        (if (null? xs) (reverse acc)
+            (let ((n (name-of (car xs))))
+              (loop (cdr xs) (cons n seen)
+                    (if (memq n seen)
+                        (cons (bad (line-of (car xs)) (string-append what " " (symbol->string n) ": the name is used twice"))
+                              acc)
+                        acc))))))
+
+    (define (check-references fl lg props textures)
+      (let* ((path (floor-path fl))
+             (rooms (floor-rooms fl))
+             (room-names (map room-name rooms))
+             (circuits (floor-circuits fl))
+             (circuit-names (map circuit-name circuits))
+             (surface-names (map surface-name (legend-surfaces lg)))
+             (material-names (map material-name (legend-materials lg)))
+             (palette (legend-palette lg)))
+        (define (bad line msg) (problem path: path line: line message: msg gate: 1))
+        (define (need-room line what name)
+          (if (memq name room-names) '()
+              (list (bad line (string-append what ": " (symbol->string name) " is not a room")))))
+        (append
+          ;; views and routes: unique within their own list (they are looked
+          ;; up by name, the shell's views among them)
+          (unique-names (floor-views fl) view-name view-line "view" bad)
+          (unique-names (floor-routes fl) route-name route-line "route" bad)
+          ;; routes: avoid: names rooms, from: badge needs a badge
+          (apply append
+                 (map (lambda (rt)
+                        (let ((what (string-append "route " (symbol->string (route-name rt)))))
+                          (append (apply append (map (lambda (n) (need-room (route-line rt) (string-append what " avoid:") n))
+                                                     (route-avoid rt)))
+                                  (if (and (eq? (route-from rt) 'badge)
+                                           (not (find (lambda (t) (eq? (thing-kind t) 'badge)) (floor-things fl))))
+                                      (list (bad (route-line rt) (string-append what ": from: badge, but the floor has no badge")))
+                                      '()))))
+                      (floor-routes fl)))
+          ;; one name table for rooms, circuits and the reserved circuits: a
+          ;; name means one thing (views and routes have their own lists)
+          (let loop ((ns (name-table fl)) (seen '()) (acc '()))
+            (if (null? ns) (reverse acc)
+                (let* ((n (car ns)) (prev (assq (car n) seen)))
+                  (loop (cdr ns) (cons n seen)
+                        (if (and prev (not (eq? (cadr prev) (cadr n))))
+                            (cons (bad (caddr n) (string-append (symbol->string (car n)) " names a " (symbol->string (cadr n))
+                                                                " and a " (symbol->string (cadr prev))))
+                                  acc)
+                            acc)))))
+          ;; rooms: unique names, declared surfaces and circuits, known edges
+          (let loop ((rs rooms) (seen '()) (acc '()))
+            (if (null? rs) (reverse acc)
+                (let* ((r (car rs))
+                       (what (string-append "room " (symbol->string (room-name r))))
+                       (acc (if (memq (room-name r) seen)
+                                (cons (bad (room-line r) (string-append what ": the name is used twice")) acc)
+                                acc))
+                       (acc (if (memq (room-surface r) surface-names) acc
+                                (cons (bad (room-line r)
+                                           (string-append what ": surface " (symbol->string (room-surface r))
+                                                          " is not declared (the legend has "
+                                                          (string-join (map symbol->string surface-names) ", ") ")"))
+                                      acc)))
+                       (acc (if (or (eq? (room-light r) 'none) (memq (room-light r) circuit-names)) acc
+                                (cons (bad (room-line r) (string-append what ": light " (symbol->string (room-light r))
+                                                                       " is not a circuit in lights:"))
+                                      acc)))
+                       (acc (if (or (not (room-edge r)) (eq? (room-edge r) 'glass-rail)) acc
+                                (cons (bad (room-line r) (string-append what ": edge: is glass-rail (the only edge so far)"))
+                                      acc)))
+                       (acc (append (reverse (apply append (map (lambda (o) (need-room (room-line r) (string-append what " over:") o))
+                                                                (room-over r))))
+                                    acc))
+                       (acc (if (< (room-floor r) (room-ceiling r)) acc
+                                (cons (bad (room-line r) (string-append what ": its floor is not below its ceiling")) acc)))
+                       (acc (if (>= (length (room-corners r)) 3) acc
+                                (cons (bad (room-line r) (string-append what ": needs at least three corners")) acc))))
+                  (loop (cdr rs) (cons (room-name r) seen) acc))))
+          ;; openings name rooms that exist
+          (apply append
+                 (map (lambda (o)
+                        (let ((what (string-append "the " (symbol->string (opening-kind o)))))
+                          (append (if (opening-a o) (need-room (opening-line o) what (opening-a o)) '())
+                                  (if (opening-b o) (need-room (opening-line o) what (opening-b o)) '())
+                                  (if (and (opening-a o) (eq? (opening-a o) (opening-b o)))
+                                      (list (bad (opening-line o) (string-append what ": is between a room and itself")))
+                                      '()))))
+                      (floor-openings fl)))
+          ;; stairs
+          (apply append
+                 (map (lambda (s)
+                        (append (need-room (stair-line s) "the stair from:" (stair-from s))
+                                (need-room (stair-line s) "the stair to:" (stair-to s))
+                                (if (or (not (stair-surface s)) (memq (stair-surface s) surface-names)) '()
+                                    (list (bad (stair-line s) (string-append "the stair: surface "
+                                                                             (symbol->string (stair-surface s))
+                                                                             " is not declared"))))))
+                      (floor-stairs fl)))
+          ;; circuits: unique
+          (let loop ((cs circuits) (seen '()) (acc '()))
+            (if (null? cs) (reverse acc)
+                (loop (cdr cs) (cons (circuit-name (car cs)) seen)
+                      (if (memq (circuit-name (car cs)) (cons 'none (append RESERVED-CIRCUITS seen)))
+                          (cons (bad (circuit-line (car cs))
+                                     (string-append "circuit " (symbol->string (circuit-name (car cs)))
+                                                    ": the name is used twice, or reserved (none, emergency, screens, city)"))
+                                acc)
+                          acc))))
+          ;; things: rooms and prop kinds
+          (apply append
+                 (map (lambda (t)
+                        (let ((what (string-append "the " (symbol->string (thing-kind t))))
+                              (kind (thing-field t 'kind)))
+                          (append
+                            (if (thing-field t 'in) (need-room (thing-line t) what (thing-field t 'in)) '())
+                            (if (and (memq (thing-kind t) '(desk cabinet prop lifts)) kind (not (assq kind props)))
+                                (list (bad (thing-line t) (string-append what ": kind " (symbol->string kind)
+                                                                         " has no prop file (props/"
+                                                                         (symbol->string kind) ".prop)")))
+                                '())
+                            (if (and (eq? (thing-kind t) 'guard) (not (memq kind '(patrol post))))
+                                (list (bad (thing-line t) "the guard: kind is patrol or post"))
+                                '())
+                            (if (and (eq? (thing-kind t) 'guard) (thing-field t 'waits)
+                                     (not (= (length (thing-field t 'waits)) (length (thing-field t 'route)))))
+                                (list (bad (thing-line t) "the guard: waits: needs one wait per route point"))
+                                '()))))
+                      (floor-things fl)))
+          ;; the legend's own references: surfaces name materials, materials name
+          ;; textures and palette colours, defaults name materials
+          (apply append
+                 (map (lambda (s)
+                        (if (memq (surface-material s) material-names) '()
+                            (list (problem path: (legend-path lg) line: (surface-line s)
+                                           message: (string-append "surface " (symbol->string (surface-name s))
+                                                                   ": material " (symbol->string (surface-material s))
+                                                                   " is not declared")
+                                           gate: 1))))
+                      (legend-surfaces lg)))
+          (apply append
+                 (map (lambda (m)
+                        (append
+                          (if (or (not (material-texture m)) (assq (material-texture m) textures)) '()
+                              (list (problem path: (legend-path lg) line: (material-line m)
+                                             message: (string-append "material " (symbol->string (material-name m))
+                                                                     ": texture " (symbol->string (material-texture m))
+                                                                     " has no file (props/textures/"
+                                                                     (symbol->string (material-texture m)) ".cells)")
+                                             gate: 1)))
+                          (if (or (not (material-colour m)) (member (string-upcase* (material-colour m)) palette)) '()
+                              (list (problem path: (legend-path lg) line: (material-line m)
+                                             message: (string-append "material " (symbol->string (material-name m))
+                                                                     ": " (material-colour m) " is not a palette colour")
+                                             gate: 1)))))
+                      (legend-materials lg)))
+          (filter-map (lambda (d)
+                        (and (not (memq (cdr d) material-names))
+                             (problem path: (legend-path lg) line: #f
+                                      message: (string-append "the legend: " (symbol->string (car d)) ": "
+                                                              (symbol->string (cdr d)) " is not a material")
+                                      gate: 1)))
+                      (legend-defaults lg))
+          ;; props: materials declared, lamps on circuits
+          (apply append
+                 (map (lambda (kp)
+                        (let ((p (cdr kp)))
+                          (append
+                            (filter-map (lambda (pt)
+                                          (and (not (memq (part-material pt) material-names))
+                                               (problem path: (prop-path p) line: (part-line pt)
+                                                        message: (string-append "prop " (symbol->string (prop-name p))
+                                                                                ": material "
+                                                                                (symbol->string (part-material pt))
+                                                                                " is not declared in the legend")
+                                                        gate: 1)))
+                                        (prop-parts p))
+                            (filter-map (lambda (l)
+                                          (and (not (member (string-upcase* (lamp-colour l)) palette))
+                                               (problem path: (prop-path p) line: (lamp-line l)
+                                                        message: (string-append "prop " (symbol->string (prop-name p))
+                                                                                ": lamp colour " (lamp-colour l)
+                                                                                " is not a palette colour")
+                                                        gate: 1)))
+                                        (prop-lamps p)))))
+                      props))
+          ;; textures: colours from the palette
+          (apply append
+                 (map (lambda (nt)
+                        (let ((t (cdr nt)))
+                          (filter-map (lambda (e)
+                                        (and (not (member (cdr e) palette))
+                                             (problem path: (texture-path t) line: (texture-line t)
+                                                      message: (string-append "texture " (symbol->string (texture-name t))
+                                                                              ": " (cdr e) " is not a palette colour")
+                                                      gate: 1)))
+                                      (texture-legend t))))
+                      textures)))))))

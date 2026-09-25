@@ -1,0 +1,102 @@
+;;; Room-relative placement (the format's growth plan, item 1) and the one
+;;; name table: where the root room's things land, what a bad anchor says,
+;;; and a name used for two things.
+(import (sigil test)
+        (sigil fs)
+        (sigil list)
+        (sigil math)
+        (sigil string)
+        (phantom floor problem)
+        (phantom floor format)
+        (phantom floor mesh)
+        (phantom floor shapes)
+        (phantom floor build)
+        (phantom floor dress)
+        (phantom floor compile))
+
+(define (reader path) (and (file-exists? path) (read-file-string path)))
+
+;; A reader serving TEXT in place of the file at PATH.
+(define (with-text path text)
+  (lambda (p) (if (string=? p path) text (reader p))))
+
+(define (replace s old new)
+  (let ((n (string-length old)))
+    (let loop ((i 0))
+      (cond ((> (+ i n) (string-length s)) s)
+            ((string=? (substring s i (+ i n)) old)
+             (string-append (substring s 0 i) new (substring s (+ i n) (string-length s))))
+            (else (loop (+ i 1)))))))
+
+(define (string-contains? s sub)
+  (let ((n (string-length sub)))
+    (let loop ((i 0))
+      (cond ((> (+ i n) (string-length s)) #f)
+            ((string=? (substring s i (+ i n)) sub) #t)
+            (else (loop (+ i 1)))))))
+
+(define (messages cf) (map problem-message (compiled-floor-problems cf)))
+(define (says? cf words) (any (lambda (m) (string-contains? m words)) (messages cf)))
+
+(define root (compile-floor "floors/root-room.floor" reader))
+(define placed (let ((g (ctx-placed (compiled-floor-ctx root)))) (vector->list (growable-data g) 0 (growable-count g))))
+(define (origin p) (xform-origin (placed-xform p)))
+(define (near? a b) (< (abs (- a b)) 1e-9))
+
+(test-group "the root room"
+  (test "compiles with no problems"
+    (for-each (lambda (p) (display (problem->string p)) (newline)) (compiled-floor-problems root))
+    (assert-equal 0 (length (compiled-floor-problems root))))
+  (test "a rack against the west wall: back to the wall, 1.6 m from its south end, facing east"
+    (let ((rack (find (lambda (p) (and (eq? (prop-name (placed-prop p)) 'server-rack) (near? (vector-ref (origin p) 1) 1.6)))
+                      placed)))
+      (assert-true rack)
+      ;; the rack is 1 m deep, centred on its origin: its back (0.5) plus 1 cm off the wall
+      (assert-true (near? (vector-ref (origin rack) 0) 0.51))
+      ;; its local +y (the back) points west, out of the room
+      (assert-equal (cons -1.0 0.0) (xform-ay (placed-xform rack)))))
+  (test "a rack against the east wall, 1.6 m from its north end"
+    (let ((rack (find (lambda (p) (and (eq? (prop-name (placed-prop p)) 'server-rack) (near? (vector-ref (origin p) 1) 5.4)))
+                      placed)))
+      (assert-true rack)
+      (assert-true (near? (vector-ref (origin rack) 0) 8.49))
+      (assert-equal (cons 1.0 0.0) (xform-ay (placed-xform rack)))))
+  (test "the console from the centre, (0 0.3) off it"
+    (let ((con (find (lambda (p) (eq? (prop-name (placed-prop p)) 'root-console)) placed)))
+      (assert-true (near? (vector-ref (origin con) 0) 4.5))
+      (assert-true (near? (vector-ref (origin con) 1) 3.8))))
+  (test "the tray hangs at z: 3.15"
+    (let ((tray (find (lambda (p) (eq? (prop-name (placed-prop p)) 'cable-tray)) placed)))
+      (assert-true (near? (vector-ref (origin tray) 2) 3.15)))))
+
+(define root-text (reader "floors/root-room.floor"))
+(define (variant old new)
+  (compile-floor "floors/root-room.floor" (with-text "floors/root-room.floor" (replace root-text old new))))
+
+(test-group "bad anchors say what is wrong"
+  (test "a corner the room does not have"
+    (assert-true (says? (variant "from: (centre (0 0.3))" "from: (corner 9 (0 0))") "is not one of the room's 4 corners")))
+  (test "off the end of the wall"
+    (assert-true (says? (variant "from: (south 1.6)" "from: (south 11)") "m is off the")))
+  (test "at: and from: together"
+    (assert-true (says? (variant "(prop  kind: root-console  in: key-room"
+                                 "(prop  kind: root-console  at: (4 4)  in: key-room")
+                        "has at: and from:")))
+  (test "at: outside the room in: names"
+    (assert-true (says? (variant "from: (centre (0 -1.6))" "at: (20 20)") "is not in key-room")))
+  (test "against: with a corner"
+    (assert-true (says? (variant "against: west  from: (south 1.6)" "against: west  from: (corner 0 (1 1))")
+                        "needs from: (END M)"))))
+
+(test-group "one name table"
+  (test "a circuit named like a room is reported"
+    (let* ((text (reader "floors/14-slice.floor"))
+           (cf (compile-floor "floors/14-slice.floor"
+                              (with-text "floors/14-slice.floor" (replace text "(c3 level: 0.3)" "(lobby level: 0.3)"))))
+           (ms (messages cf)))
+      (assert-true (any (lambda (m) (string-contains? m "lobby names a circuit and a room")) ms))))
+  (test "a circuit named like a reserved one is reported"
+    (let* ((text (reader "floors/14-slice.floor"))
+           (cf (compile-floor "floors/14-slice.floor"
+                              (with-text "floors/14-slice.floor" (replace text "(c3 level: 0.3)" "(city level: 0.3)")))))
+      (assert-true (says? cf "reserved")))))

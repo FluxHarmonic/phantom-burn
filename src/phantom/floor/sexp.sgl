@@ -1,0 +1,155 @@
+;;; (phantom floor sexp) - A small reader for the floor, prop and legend
+;;; files that remembers where every list starts, so a problem can name the
+;;; file and the line of the entry it is about (a door, a room, a guard's
+;;; waypoint), not only the line of the field that holds it.
+;;;
+;;; What it reads is a subset of Sigil's own syntax, enough for data:
+;;;   lists ( ... ) and [ ... ], strings "...", numbers, symbols, keywords
+;;;   (name:), #t #f #true #false, and ; comments to the end of the line.
+;;;
+;;; A list comes back as a NODE: its line (1-based) and its items. Atoms come
+;;; back as themselves (a number, a string, a symbol, a keyword, a boolean).
+;;; Reading never raises: (read-nodes text) returns either a list of datums
+;;; or (error LINE MESSAGE).
+;;;
+;;; (node->datum d) strips the lines back off, for printing or comparing.
+;;;
+;;; Pure: no platform.
+
+(define-library (phantom floor sexp)
+  (import (sigil core)
+          (sigil struct)
+          (sigil string)
+          (sigil io))
+
+  (export node node? node-line node-items node-lines
+          read-nodes read-error? read-error-line read-error-message
+          node->datum datum->string)
+
+  (begin
+    (define-struct node
+      (line default: 0)
+      (items default: (quote ()))
+      (lines default: (quote ())))          ; the line each item starts on
+
+    (define (read-error? r) (and (pair? r) (eq? (car r) 'error)))
+    (define (read-error-line r) (cadr r))
+    (define (read-error-message r) (caddr r))
+
+    (define (node->datum d)
+      (if (node? d)
+          (map node->datum (node-items d))
+          d))
+
+    (define (datum->string d)
+      (let ((p (open-output-string)))
+        (write (node->datum d) p)
+        (get-output-string p)))
+
+    (define (delimiter? c)
+      (or (char-whitespace? c)
+          (memv c '(#\( #\) #\[ #\] #\" #\;))))
+
+    (define (char-whitespace? c)
+      (memv c '(#\space #\tab #\newline #\return)))
+
+    ;; Read every datum in TEXT. State is threaded through a small vector:
+    ;; #(index line), so the helpers stay plain procedures (no macros: see
+    ;; the native-codegen allocation trap on syntax-rules globals).
+    (define (read-nodes text)
+      (let ((n (string-length text))
+            (st (vector 0 1)))
+        (define (pos) (vector-ref st 0))
+        (define (line) (vector-ref st 1))
+        (define (advance!)
+          (when (char=? (string-ref text (pos)) #\newline)
+            (vector-set! st 1 (+ (line) 1)))
+          (vector-set! st 0 (+ (pos) 1)))
+        (define (skip-blank!)
+          (let loop ()
+            (when (< (pos) n)
+              (let ((c (string-ref text (pos))))
+                (cond ((char-whitespace? c) (advance!) (loop))
+                      ((char=? c #\;)
+                       (let skip ()
+                         (when (and (< (pos) n) (not (char=? (string-ref text (pos)) #\newline)))
+                           (advance!)
+                           (skip)))
+                       (loop))
+                      (else #f))))))
+        ;; Returns a datum, or (error line message), or 'close for a closer,
+        ;; or 'eof.
+        (define (read-one)
+          (skip-blank!)
+          (if (>= (pos) n)
+              'eof
+              (let ((c (string-ref text (pos))))
+                (cond ((or (char=? c #\() (char=? c #\[))
+                       (let ((start (line))
+                             (closer (if (char=? c #\() #\) #\])))
+                         (advance!)
+                         (let loop ((acc '()) (lines '()))
+                           (skip-blank!)
+                           (cond ((>= (pos) n)
+                                  (list 'error start "a list is never closed"))
+                                 ((memv (string-ref text (pos)) '(#\) #\]))
+                                  (if (char=? (string-ref text (pos)) closer)
+                                      (begin (advance!)
+                                             (node line: start items: (reverse acc) lines: (reverse lines)))
+                                      (list 'error (line) "a list is closed with the wrong bracket")))
+                                 (else
+                                  (let* ((at (line))
+                                         (d (read-one)))
+                                    (if (read-error? d)
+                                        d
+                                        (loop (cons d acc) (cons at lines)))))))))
+                      ((or (char=? c #\)) (char=? c #\]))
+                       (list 'error (line) "a closing bracket with no list open"))
+                      ((char=? c #\") (read-string-literal))
+                      ((char=? c #\')
+                       (list 'error (line) "a quote (') is not data here; write the list plainly"))
+                      (else (read-atom))))))
+        (define (read-string-literal)
+          (let ((start (line)))
+            (advance!)
+            (let loop ((acc '()))
+              (cond ((>= (pos) n) (list 'error start "a string is never closed"))
+                    ((char=? (string-ref text (pos)) #\")
+                     (advance!)
+                     (list->string (reverse acc)))
+                    ((char=? (string-ref text (pos)) #\\)
+                     (advance!)
+                     (if (>= (pos) n)
+                         (list 'error start "a string is never closed")
+                         (let ((e (string-ref text (pos))))
+                           (advance!)
+                           (loop (cons (cond ((char=? e #\n) #\newline)
+                                             ((char=? e #\t) #\tab)
+                                             (else e))
+                                       acc)))))
+                    (else
+                     (let ((ch (string-ref text (pos))))
+                       (advance!)
+                       (loop (cons ch acc))))))))
+        (define (read-atom)
+          (let ((start (pos))
+                (at (line)))
+            (let loop ()
+              (when (and (< (pos) n) (not (delimiter? (string-ref text (pos)))))
+                (advance!)
+                (loop)))
+            (let* ((tok (substring text start (pos)))
+                   (len (string-length tok)))
+              (cond ((or (string=? tok "#t") (string=? tok "#true")) #t)
+                    ((or (string=? tok "#f") (string=? tok "#false")) #f)
+                    ((string->number tok) => (lambda (x) x))
+                    ((char=? (string-ref tok 0) #\#)
+                     (list 'error at (string-append "cannot read " tok)))
+                    ((and (> len 1) (char=? (string-ref tok (- len 1)) #\:))
+                     (string->keyword (substring tok 0 (- len 1))))
+                    (else (string->symbol tok))))))
+        (let loop ((acc '()))
+          (let ((d (read-one)))
+            (cond ((eq? d 'eof) (reverse acc))
+                  ((read-error? d) d)
+                  (else (loop (cons d acc))))))))))

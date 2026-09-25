@@ -1,0 +1,129 @@
+;;; (phantom floor sources) - Everything one floor needs, read: the floor
+;;; file, the legend, the props its things name (and the ones the compiler
+;;; places itself), and the textures the legend's materials name.
+;;;
+;;; Files are found relative to the repository root, which is the directory
+;;; above the floor file's own directory (floors/NAME.floor):
+;;;   ROOT/props/materials.legend
+;;;   ROOT/props/KIND.prop
+;;;   ROOT/props/textures/NAME.cells
+;;;
+;;; read-text is (lambda (path) text-or-#f): natively a file reader, on the
+;;; web a lookup in the text baked into the page. A missing file is a
+;;; problem, not an error.
+;;;
+;;; Pure: no platform (read-text is the only way out).
+
+(define-library (phantom floor sources)
+  (import (sigil core)
+          (sigil struct)
+          (sigil list)
+          (sigil string)
+          (phantom floor problem)
+          (phantom floor format))
+
+  (export load-sources sources? sources-floor sources-legend sources-props sources-textures
+          sources-problems sources-paths sources-root
+          BUILTIN-PROPS path-dir path-join)
+
+  (begin
+    ;; The props the compiler places without a thing naming them.
+    (define BUILTIN-PROPS '(lift exit-door light-switch badge))
+
+    (define-struct sources
+      (root default: "") (floor default: #f) (legend default: #f)
+      (props default: '())        ; ((kind . prop) ...)
+      (textures default: '())     ; ((name . texture) ...)
+      (paths default: '())        ; every path read, for live reload and the page
+      (problems default: '()))
+
+    (define (path-dir p)
+      (let loop ((i (- (string-length p) 1)))
+        (cond ((< i 0) "")
+              ((char=? (string-ref p i) #\/) (substring p 0 i))
+              (else (loop (- i 1))))))
+
+    (define (path-join d name)
+      (if (string=? d "") name (string-append d "/" name)))
+
+    (define (missing path what)
+      (problem path: path line: #f message: (string-append "cannot be read (" what ")") gate: 0))
+
+    (define (load-sources floor-path read-text)
+      (let* ((root (path-dir (path-dir floor-path)))
+             (ftext (read-text floor-path)))
+        (if (not ftext)
+            (sources root: root paths: (list floor-path) problems: (list (missing floor-path "the floor file")))
+            (let* ((fr (read-floor ftext floor-path))
+                   (fl (car fr))
+                   (lpath (path-join root "props/materials.legend"))
+                   (ltext (read-text lpath))
+                   (lr (if ltext (read-legend ltext lpath) (cons #f (list (missing lpath "the legend")))))
+                   (lg (car lr))
+                   (builtins (if fl (builtins-needed fl) '()))
+                   (kinds (if fl
+                              (append (map car builtins)
+                                      (filter-map (lambda (t)
+                                                    (and (memq (thing-kind t) '(desk cabinet prop lifts))
+                                                         (thing-field t 'kind)))
+                                                  (floor-things fl)))
+                              '()))
+                   (kinds (dedupe kinds))
+                   ;; a built-in's missing file is reported here; a thing's
+                   ;; missing kind by check-references, at the thing's line
+                   (prs (map (lambda (k)
+                               (let* ((p (path-join root (string-append "props/" (symbol->string k) ".prop")))
+                                      (tx (read-text p))
+                                      (why (assq k builtins)))
+                                 (list k p (cond (tx (read-prop tx p))
+                                                 (why (cons #f (list (problem path: p line: #f
+                                                                              message: (string-append "cannot be read (the floor needs it for "
+                                                                                                      (cdr why) ")")
+                                                                              gate: 1))))
+                                                 (else (cons #f '()))))))
+                             kinds))
+                   (props (filter-map (lambda (x) (and (car (caddr x)) (cons (car x) (car (caddr x))))) prs))
+                   (prop-ps (apply append
+                                   (map (lambda (x)
+                                          (let ((pr (car (caddr x))))
+                                            (append (cdr (caddr x))
+                                                    (if (and pr (not (eq? (prop-name pr) (car x))))
+                                                        (list (problem path: (cadr x) line: (prop-line pr)
+                                                                       message: (string-append "the prop is named "
+                                                                                               (symbol->string (prop-name pr))
+                                                                                               ", not " (symbol->string (car x))
+                                                                                               " like its file")
+                                                                       gate: 1))
+                                                        '()))))
+                                        prs)))
+                   (tnames (if lg (dedupe (filter-map material-texture (legend-materials lg))) '()))
+                   (trs (map (lambda (n)
+                               (let* ((p (path-join root (string-append "props/textures/" (symbol->string n) ".cells")))
+                                      (tx (read-text p)))
+                                 (list n p (if tx (read-texture tx p) (cons #f '())))))
+                             tnames))
+                   (textures (filter-map (lambda (x) (and (car (caddr x)) (cons (car x) (car (caddr x))))) trs))
+                   (tex-ps (apply append (map (lambda (x) (cdr (caddr x))) trs)))
+                   (refs (if (and fl lg) (check-references fl lg props textures) '())))
+              (sources root: root floor: fl legend: lg props: props textures: textures
+                       paths: (append (list floor-path lpath) (map cadr prs) (map cadr trs))
+                       problems: (append (cdr fr) (cdr lr) prop-ps tex-ps refs))))))
+
+    ;; The built-in props floor fl uses, each with what it is for:
+    ;; ((kind . why) ...).
+    (define (builtins-needed fl)
+      (filter-map (lambda (x) (and (caddr x) (cons (car x) (cadr x))))
+                  (list (list 'lift "its lifts"
+                              (any (lambda (t) (and (eq? (thing-kind t) 'lifts) (not (thing-field t 'kind)))) (floor-things fl)))
+                        (list 'exit-door "its exit"
+                              (any (lambda (o) (eq? (opening-kind o) 'exit)) (floor-openings fl)))
+                        (list 'light-switch "its circuits' panels"
+                              (any circuit-panel (floor-circuits fl)))
+                        (list 'badge "its badge"
+                              (any (lambda (t) (eq? (thing-kind t) 'badge)) (floor-things fl))))))
+
+    (define (dedupe xs)
+      (let loop ((xs xs) (acc '()))
+        (cond ((null? xs) (reverse acc))
+              ((memq (car xs) acc) (loop (cdr xs) acc))
+              (else (loop (cdr xs) (cons (car xs) acc))))))))

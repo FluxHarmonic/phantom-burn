@@ -1,0 +1,468 @@
+;;; (phantom floor gates) - The design's gates 1, 2 and 6 (section 8), the
+;;; parts that need the built floor. (Gate 1's reading and naming checks are
+;;; in (phantom floor format); openings that sit on no shared wall, and holes
+;;; that open onto the void, are found where the openings are cut, in
+;;; (phantom floor build).)
+;;;
+;;; Gate 1, parse and legend (geometry):
+;;;   - every guard waypoint lies in a room, at least CLEARANCE from any wall,
+;;;     prop, stair or rail (measured against the collision soup, so a
+;;;     waypoint inside a wall or brushing the stairs is red);
+;;;   - every view's eye is in some room's air; the start is in a room.
+;;; Gate 2, sealed:
+;;;   - every room's outline is a simple shape;
+;;;   - no two rooms on the same level overlap (same footprint, overlapping
+;;;     heights, neither over: the other);
+;;;   - SEALED: rays cast from inside every room in 26 directions all meet the
+;;;     built collision surfaces before they leave the floor. This checks the
+;;;     walls the compiler built, not the rules it built them from.
+;;; Gate 6, stacking and stairs:
+;;;   - a CLOSED room over: another (no edge:) has its floor at or above the
+;;;     lower room's ceiling; an OPEN one (edge:) sits inside it, with 2 m of
+;;;     headroom under its slab, below its ceiling, within its footprint;
+;;;   - a room over: another overlaps it; rooms stacked without over: are
+;;;     named;
+;;;   - stairs start inside the lower room and land on an open edge of the
+;;;     upper one, and no rail crosses where they land.
+;;;
+;;; Pure: no platform.
+
+(define-library (phantom floor gates)
+  (import (sigil core)
+          (sigil list)
+          (sigil math)
+          (sigil string)
+          (phantom floor problem)
+          (phantom floor format)
+          (phantom floor poly)
+          (phantom floor plan)
+          (phantom floor stack)
+          (phantom floor mesh)
+          (phantom floor light)
+          (phantom floor build))
+
+  (export check-gates! HEADROOM sealed-rays)
+
+  (begin
+    (define HEADROOM 2.0)
+
+    (define (growable->list g) (vector->list (growable-data g) 0 (growable-count g)))
+
+    (define (rname r) (symbol->string (room-name r)))
+
+    ;; --- gate 2: outlines and overlaps ------------------------------------------------------
+
+    (define (check-outlines! c)
+      (for-each (lambda (r)
+                  (let ((why (poly-simple-problem (room-corners r))))
+                    (when why
+                      (add-problem! c 2 (room-line r) (string-append "room " (rname r) ": its outline " why)))))
+                (floor-rooms (ctx-floor c))))
+
+    (define (over? u l) (and (memq (room-name l) (room-over u)) #t))
+
+    (define (check-overlaps! c)
+      (let* ((faces (vector->list (plan-faces (ctx-plan c))))
+             (seen '()))
+        (for-each
+          (lambda (f)
+            (let ((rs (filter-map (lambda (id) (owner-room-of c id)) (face-cover f))))
+              (for-each
+                (lambda (r)
+                  (for-each
+                    (lambda (q)
+                      (when (and (< (room-index r) (room-index q))
+                                 (not (over? r q)) (not (over? q r))
+                                 (not (member (cons (room-index r) (room-index q)) seen)))
+                        (set! seen (cons (cons (room-index r) (room-index q)) seen))
+                        (let ((lo (max (room-floor r) (room-floor q))) (hi (min (room-ceiling r) (room-ceiling q))))
+                          (if (> hi (+ lo 1e-6))
+                              (add-problem! c 2 (room-line q)
+                                            (string-append "rooms " (rname r) " and " (rname q) " overlap near "
+                                                           (fmt-pt (face-sample f)) ", both at heights "
+                                                           (num->str lo) " to " (num->str hi)))
+                              (let ((upper (if (>= (room-floor q) (room-ceiling r)) q r))
+                                    (lower (if (>= (room-floor q) (room-ceiling r)) r q)))
+                                (add-problem! c 6 (room-line upper)
+                                              (string-append "room " (rname upper) " is above " (rname lower)
+                                                             " near " (fmt-pt (face-sample f)) " but does not say over: "
+                                                             (rname lower))))))))
+                    rs))
+                rs)))
+          faces)))
+
+    ;; --- gate 2: sealed --------------------------------------------------------------------------
+
+    (define DIRS
+      (filter-map (lambda (d) (and (not (equal? d '(0 0 0)))
+                                   (let ((l (sqrt (+ (* (car d) (car d)) (* (cadr d) (cadr d)) (* (caddr d) (caddr d))))))
+                                     (list (/ (car d) l) (/ (cadr d) l) (/ (caddr d) l)))))
+                  (apply append (map (lambda (x) (apply append (map (lambda (y) (map (lambda (z) (list x y z)) '(-1 0 1))) '(-1 0 1))))
+                                     '(-1 0 1)))))
+
+    ;; Rays from points in every room and in every opening. Returns
+    ;; (rays leaks unsampled): leaks as ((room point dir) ...), unsampled the
+    ;; rooms no point was found in (the check must never pass a room vacuously).
+    (define (sealed-rays c)
+      (let* ((occ (make-occluders (ctx-soup c) (lambda (tag) #t)))
+             ;; past every surface, but no further: occluded? ignores hits
+             ;; within 1e-4 of the segment's length of its ends, and the
+             ;; opening samples sit 3 cm off a floor
+             (reach (floor-reach c))
+             (room-pts (map (lambda (r) (cons r (room-samples c r))) (floor-rooms (ctx-floor c))))
+             (leaks '())
+             (rays 0)
+             (shoot! (lambda (r p dirs)
+                       (let ((x (car p)) (y (cadr p)) (z (caddr p)))
+                         (for-each (lambda (d)
+                                     (set! rays (+ rays 1))
+                                     (unless (occluded? occ x y z (+ x (* reach (car d))) (+ y (* reach (cadr d)))
+                                                        (+ z (* reach (caddr d))))
+                                       (set! leaks (cons (list r p d) leaks))))
+                                   dirs)))))
+        (for-each (lambda (rp) (for-each (lambda (p) (shoot! (car rp) p DIRS)) (cdr rp))) room-pts)
+        (for-each (lambda (s) (shoot! (car s) (cadr s) (caddr s))) (opening-samples c))
+        (list rays (reverse leaks) (map car (filter (lambda (rp) (null? (cdr rp))) room-pts)))))
+
+    ;; The diagonal of the box round every room, plus 2 m.
+    (define (floor-reach c)
+      (let* ((rs (floor-rooms (ctx-floor c)))
+             (bbs (map (lambda (r) (poly-bbox (room-corners r))) rs))
+             (dx (- (fold-left max -1e30 (map caddr bbs)) (fold-left min 1e30 (map car bbs))))
+             (dy (- (fold-left max -1e30 (map cadddr bbs)) (fold-left min 1e30 (map cadr bbs))))
+             (dz (- (fold-left max -1e30 (map room-ceiling rs)) (fold-left min 1e30 (map room-floor rs)))))
+        (+ 2.0 (sqrt (+ (* dx dx) (* dy dy) (* dz dz))))))
+
+    ;; A room's sample points (x y z): a 1 m grid, and the centroid of each
+    ;; triangle of its outline, so a strip narrower than the grid (the duct)
+    ;; still gets points.
+    (define (room-samples c r)
+      (let* ((bb (poly-bbox (room-corners r)))
+             (zs (list (+ (room-floor r) 0.4) (* 0.5 (+ (room-floor r) (room-ceiling r)))))
+             (grid (let xl ((x (+ (car bb) 0.5)) (acc '()))
+                     (if (> x (caddr bb)) acc
+                         (xl (+ x 1.0)
+                             (let yl ((y (+ (cadr bb) 0.5)) (acc acc))
+                               (if (> y (cadddr bb)) acc
+                                   (yl (+ y 1.0) (cons (cons x y) acc))))))))
+             (cents (map poly-centroid (ear-clip (room-corners r)))))
+        (apply append
+               (map (lambda (p)
+                      (if (air-at? c r p zs)
+                          (map (lambda (z) (list (car p) (cdr p) z)) (air-heights c r p zs))
+                          '()))
+                    (append cents (reverse grid))))))
+
+    ;; Points in and beside every hole cut in a wall, each with a fan of rays
+    ;; through the hole: ((room (x y z) dirs) ...). A slit a few cm wide (under
+    ;; a door leaf set back from the wall) slips between the room grid's
+    ;; points and its 26 directions; these catch it.
+    (define OPENING-ANGLES '(-60 -40 -25 -15 -8 0 8 15 25 40 60))
+
+    (define (opening-samples c)
+      (let ((es (plan-edges (ctx-plan c))))
+        (let loop ((ei 0) (acc '()))
+          (if (= ei (vector-length es))
+              (reverse acc)
+              (loop (+ ei 1) (fold-left (lambda (acc h) (hole-samples c (vector-ref es ei) h acc))
+                                        acc (vector-ref (ctx-holes c) ei)))))))
+
+    (define (hole-samples c e h acc)
+      (let ((t0 (vector-ref h 0)) (t1 (vector-ref h 1)) (z0 (vector-ref h 2)) (z1 (vector-ref h 3))
+            (n (side-normal e 'left)) (d (edge-dir e)))
+        (fold-left
+          (lambda (acc s)
+            (let ((dirs (opening-fan n d (- s))))
+              (fold-left
+                (lambda (acc off)
+                  (fold-left
+                    (lambda (acc t)
+                      (fold-left
+                        (lambda (acc z)
+                          (let* ((q (pt+ (edge-point e t) (pt* n (* s off))))
+                                 (r (room-with-air c q z)))
+                            (if r (cons (list r (list (px q) (py q) z) dirs) acc) acc)))
+                        acc (list (+ z0 0.03) (* 0.5 (+ z0 z1)) (- z1 0.03))))
+                    acc (map (lambda (f) (+ t0 (* f (- t1 t0)))) '(0.2 0.5 0.8))))
+                acc '(0.05 0.3))))
+          acc '(1 -1))))
+
+    ;; Unit directions roughly along s n (s is 1 or -1, n a wall's normal):
+    ;; tilted up and down by OPENING-ANGLES and swung a little along the wall
+    ;; (d) either way. A point on side s of the wall shoots along -s n.
+    (define (opening-fan n d s)
+      (apply append
+             (map (lambda (deg)
+                    (let* ((a (* deg (/ 3.141592653589793 180.0))) (h (cos a)) (v (sin a)))
+                      (map (lambda (lat)
+                             (let* ((x (* h (+ (* s (px n)) (* lat (px d)))))
+                                    (y (* h (+ (* s (py n)) (* lat (py d)))))
+                                    (l (sqrt (+ (* x x) (* y y) (* v v)))))
+                               (list (/ x l) (/ y l) (/ v l))))
+                           '(-0.6 0.0 0.6))))
+                  OPENING-ANGLES)))
+
+    ;; The room with air at (q, z), if any (not inside a stair's steps).
+    (define (room-with-air c q z)
+      (let ((f (plan-face-at (ctx-plan c) q)))
+        (and (>= f 0) (not (inside-stair? c q z))
+             (let ((iv (find (lambda (iv) (and (owner-room-of c (iv-owner iv))
+                                               (> z (+ (iv-lo iv) 0.01)) (< z (- (iv-hi iv) 0.01))))
+                             (face-ivs c f))))
+               (and iv (owner-room-of c (iv-owner iv)))))))
+
+    ;; Is p inside room r, clear of its outline (a sample on a wall line would
+    ;; see through the wall's own edge), with r's own air there?
+    (define (air-at? c r p zs)
+      (let ((cs (room-corners r)))
+        (and (point-in-poly? p cs)
+             (> (let loop ((a cs) (best 1e30))
+                  (if (null? a) best
+                      (loop (cdr a) (min best (point-seg-dist p (car a) (if (null? (cdr a)) (car cs) (cadr a)))))))
+                0.15)
+             (pair? (air-heights c r p zs)))))
+
+    ;; Of the heights zs, those where p has r's air (not inside a slab, a
+    ;; stair or the solid under a stacked room).
+    (define (air-heights c r p zs)
+      (let ((f (plan-face-at (ctx-plan c) p)))
+        (if (< f 0) '()
+            (let ((iv (iv-of c f (room-index r))))
+              (if (not iv) '()
+                  (filter (lambda (z) (and (> z (+ (iv-lo iv) 0.05)) (< z (- (iv-hi iv) 0.05))
+                                           (not (inside-stair? c p z))))
+                          zs))))))
+
+    (define (inside-stair? c p z)
+      (any (lambda (sb) (and (point-in-poly? p (car sb)) (< z (cadr sb))))
+           (growable->list (ctx-stair-boxes c))))
+
+    (define (check-sealed! c)
+      (let* ((r (sealed-rays c)) (leaks (cadr r)))
+        (for-each (lambda (room)
+                    (add-problem! c 2 (room-line room)
+                                  (string-append "room " (rname room)
+                                                 " has no point clear of its walls to test the seal from")))
+                  (caddr r))
+        (for-each (lambda (l)
+                    (let ((room (car l)) (p (cadr l)) (d (caddr l)))
+                      (add-problem! c 2 (room-line room)
+                                    (string-append "room " (rname room) " is not sealed: from ("
+                                                   (num->str (car p)) " " (num->str (cadr p)) " " (num->str (caddr p))
+                                                   ") a ray toward (" (num->str (car d)) " " (num->str (cadr d)) " " (num->str (caddr d))
+                                                   ") leaves the floor without meeting a surface"))))
+                  (if (> (length leaks) 5) (take leaks 5) leaks))
+        (when (> (length leaks) 5)
+          (add-problem! c 2 #f (string-append (number->string (- (length leaks) 5)) " more leaking rays")))))
+
+    ;; --- gate 6: stacking ------------------------------------------------------------------------
+
+    (define (check-stacking! c)
+      (let ((faces (vector->list (plan-faces (ctx-plan c)))))
+        (for-each
+          (lambda (u)
+            (for-each
+              (lambda (lname)
+                (let ((l (room-by-name c lname)))
+                  (when l
+                    (let* ((ui (room-index u)) (li (room-index l))
+                           (u-faces (filter (lambda (f) (memv ui (face-cover f))) faces))
+                           (shared (filter (lambda (f) (memv li (face-cover f))) u-faces))
+                           (what (string-append "room " (rname u) " over " (rname l))))
+                      (when (null? shared)
+                        (add-problem! c 6 (room-line u) (string-append what ": it is not above it anywhere")))
+                      (if (room-edge u)
+                          ;; open: a mezzanine inside the lower room's height
+                          (begin
+                            (when (< (- (room-floor u) SLAB) (+ (room-floor l) HEADROOM (- 1e-6)))
+                              (add-problem! c 6 (room-line u)
+                                            (string-append what ": under its slab (" (num->str (- (room-floor u) SLAB))
+                                                           ") there is less than " (num->str HEADROOM) " m above "
+                                                           (rname l) "'s floor")))
+                            (when (> (room-ceiling u) (+ (room-ceiling l) 1e-6))
+                              (add-problem! c 6 (room-line u)
+                                            (string-append what ": its ceiling (" (num->str (room-ceiling u))
+                                                           ") is above " (rname l) "'s (" (num->str (room-ceiling l)) ")")))
+                            (let ((outside (find (lambda (f) (not (any (lambda (lname2)
+                                                                         (let ((l2 (room-by-name c lname2)))
+                                                                           (and l2 (memv (room-index l2) (face-cover f)))))
+                                                                       (room-over u))))
+                                                 u-faces)))
+                              (when outside
+                                (add-problem! c 6 (room-line u)
+                                              (string-append what ": it reaches outside the rooms it is over, near "
+                                                             (fmt-pt (face-sample outside)))))))
+                          ;; closed: wholly above
+                          (when (< (room-floor u) (- (room-ceiling l) 1e-6))
+                            (add-problem! c 6 (room-line u)
+                                          (string-append what ": its floor (" (num->str (room-floor u))
+                                                         ") is below " (rname l) "'s ceiling (" (num->str (room-ceiling l)) ")"))))))))
+              (room-over u)))
+          (floor-rooms (ctx-floor c)))))
+
+    ;; The built heights: in every face, no two owners (linked or not: a
+    ;; mezzanine shares the lobby's volume but not its air under the slab)
+    ;; may have air at the same height. This checks what the build made of over:
+    ;; (the lower room's ceiling dropped under a mezzanine, a duct above its
+    ;; corridor's ceiling), not what the floor file says.
+    (define (check-built-stacking! c)
+      (let ((faces (vector->list (plan-faces (ctx-plan c))))
+            (seen '()))
+        (for-each
+          (lambda (f)
+            (let ((ivs (face-ivs c (face-index f))))
+              (for-each
+                (lambda (a)
+                  (for-each
+                    (lambda (b)
+                      (when (and (< (iv-owner a) (iv-owner b))
+                                 (> (min (iv-hi a) (iv-hi b)) (+ (max (iv-lo a) (iv-lo b)) 1e-6))
+                                 (not (member (cons (iv-owner a) (iv-owner b)) seen)))
+                        (set! seen (cons (cons (iv-owner a) (iv-owner b)) seen))
+                        (let ((ra (owner-room-of c (iv-owner a))) (rb (owner-room-of c (iv-owner b))))
+                          (add-problem! c 6 (if rb (room-line rb) #f)
+                                        (string-append "the built floor gives "
+                                                       (if ra (rname ra) "a hatch") " and " (if rb (rname rb) "a hatch")
+                                                       " air at the same height near " (fmt-pt (face-sample f)) ", "
+                                                       (num->str (max (iv-lo a) (iv-lo b))) " to "
+                                                       (num->str (min (iv-hi a) (iv-hi b))))))))
+                    ivs))
+                ivs)))
+          faces)))
+
+    ;; --- gate 6: stairs -----------------------------------------------------------------------------
+
+    (define (seg-seg-dist a b p q)
+      (if (seg-cross a b p q)
+          0.0
+          (min (point-seg-dist a p q) (point-seg-dist b p q) (point-seg-dist p a b) (point-seg-dist q a b))))
+
+    (define (check-stairs! c)
+      (let ((rails (growable->list (ctx-rails c))))
+        (for-each
+          (lambda (s)
+            (let ((lower (room-by-name c (stair-from s))) (upper (room-by-name c (stair-to s))) (line (stair-line s)))
+              (when (and lower upper)
+                (let* ((p (stair-start s)) (q (stair-end s))
+                       (d (pt-norm (pt- q p))) (side (cons (- (py d)) (px d)))
+                       (w (stair-width s))
+                       (corners (list (pt+ p (pt* side (* -0.5 w))) (pt+ p (pt* side (* 0.5 w)))
+                                      (pt+ q (pt* side (* 0.5 w))) (pt+ q (pt* side (* -0.5 w)))))
+                       (inside-lower? (lambda (x) (point-in-poly? (pt- x (pt* (pt- x (poly-centroid corners)) 1e-4)) (room-corners lower)))))
+                  (unless (point-in-poly? p (room-corners lower))
+                    (add-problem! c 6 line (string-append "the stair from " (rname lower) " starts at " (fmt-pt p)
+                                                          ", outside " (rname lower))))
+                  (unless (every inside-lower? corners)
+                    (add-problem! c 6 line (string-append "the stair runs outside " (rname lower))))
+                  ;; the landing: every point along it must step from the lower
+                  ;; room's air onto the upper room with no wall between
+                  (let* ((samples (map (lambda (k) (pt+ q (pt* side (* w (- (/ k 4.0) 0.5) 0.98)))) (iota 5)))
+                         (bad (find (lambda (x)
+                                      (let ((beyond (pt+ x (pt* d 0.05)))
+                                            (before (pt- x (pt* d 0.05))))
+                                        (not (and (point-in-poly? beyond (room-corners upper))
+                                                  (not (point-in-poly? before (room-corners upper)))
+                                                  (room-edge upper)
+                                                  (memq (room-name lower) (room-over upper))))))
+                                    samples)))
+                    (when bad
+                      (add-problem! c 6 line
+                                    (string-append "the stair to " (rname upper) " lands at " (fmt-pt bad)
+                                                   ", which is not on an open edge of " (rname upper)
+                                                   (if (room-edge upper) "" " (it has no open edge: it declares no edge:)")))))
+                  ;; rails left open where it lands: no rail within 10 cm of
+                  ;; the head, short of its last 15 cm each side (where the
+                  ;; edge's rails end)
+                  (let* ((a (pt+ q (pt* side (- 0.15 (* 0.5 w))))) (b (pt+ q (pt* side (- (* 0.5 w) 0.15))))
+                         (hit (find (lambda (rl)
+                                      (let ((rp (vector-ref rl 0)) (rq (vector-ref rl 1)))
+                                        (and (< (abs (- (vector-ref rl 2) (room-floor upper))) 0.5)
+                                             (< (seg-seg-dist a b rp rq) 0.1))))
+                                    rails)))
+                    (when hit
+                      (add-problem! c 6 (or (vector-ref hit 3) line)
+                                    (string-append "a rail from " (fmt-pt (vector-ref hit 0)) " to " (fmt-pt (vector-ref hit 1))
+                                                   " crosses the head of the stair to " (rname upper)))))))))
+          (floor-stairs (ctx-floor c)))))
+
+    ;; --- gate 1: guards, views, the start -----------------------------------------------------------
+
+    ;; The distance in plan from p to the vertical collision surfaces that
+    ;; reach into heights z0..z1, and the tag of the nearest.
+    (define (nearest-wall c p z0 z1)
+      (let* ((so (ctx-soup c)) (tr (growable-data (soup-tris so))) (n (soup-count so)))
+        (let loop ((i 0) (best 1e30))
+          (if (>= i n) best
+              (let* ((o (* 9 i))
+                     (ax (vector-ref tr o)) (ay (vector-ref tr (+ o 1))) (az (vector-ref tr (+ o 2)))
+                     (bx (vector-ref tr (+ o 3))) (by (vector-ref tr (+ o 4))) (bz (vector-ref tr (+ o 5)))
+                     (cx (vector-ref tr (+ o 6))) (cy (vector-ref tr (+ o 7))) (cz (vector-ref tr (+ o 8)))
+                     (zlo (min az bz cz)) (zhi (max az bz cz)))
+                (loop (+ i 1)
+                      (if (or (< (- zhi zlo) 1e-3) (> zlo z1) (< zhi z0))
+                          best
+                          (min best
+                               (point-seg-dist p (cons ax ay) (cons bx by))
+                               (point-seg-dist p (cons bx by) (cons cx cy))
+                               (point-seg-dist p (cons cx cy) (cons ax ay))))))))))
+
+    (define (lowest-room-at c p)
+      (let ((rs (filter (lambda (r) (point-in-poly? p (room-corners r))) (floor-rooms (ctx-floor c)))))
+        (and (pair? rs) (fold-left (lambda (a b) (if (< (room-floor b) (room-floor a)) b a)) (car rs) rs))))
+
+    ;; The room whose outline holds p, or, failing that, the lowest room whose
+    ;; outline passes within CLEARANCE of it (a point on or just past a wall
+    ;; line belongs to the room it is brushing, so its distance is reported).
+    (define (room-near c p)
+      (or (lowest-room-at c p)
+          (let ((rs (filter (lambda (r)
+                              (let ((cs (room-corners r)))
+                                (< (let loop ((a cs) (best 1e30))
+                                     (if (null? a) best
+                                         (loop (cdr a) (min best (point-seg-dist p (car a) (if (null? (cdr a)) (car cs) (cadr a)))))))
+                                   CLEARANCE)))
+                            (floor-rooms (ctx-floor c)))))
+            (and (pair? rs) (fold-left (lambda (a b) (if (< (room-floor b) (room-floor a)) b a)) (car rs) rs)))))
+
+    (define (check-guards! c)
+      (for-each
+        (lambda (t)
+          (when (eq? (thing-kind t) 'guard)
+            (for-each
+              (lambda (p k)
+                (let ((r (room-near c p)))
+                  (if (not r)
+                      (add-problem! c 1 (thing-line t) (string-append "the guard's waypoint " (number->string (+ k 1))
+                                                                      " " (fmt-pt p) " is in no room"))
+                      (let ((d (nearest-wall c p (+ (room-floor r) 0.05) (+ (room-floor r) 1.8))))
+                        (when (< d CLEARANCE)
+                          (add-problem! c 1 (thing-line t)
+                                        (string-append "the guard's waypoint " (number->string (+ k 1)) " " (fmt-pt p)
+                                                       " is " (num->str d) " m from a wall, prop or stair (a body needs "
+                                                       (num->str CLEARANCE) " m)")))))))
+              (thing-field t 'route) (iota (length (thing-field t 'route))))))
+        (floor-things (ctx-floor c))))
+
+    (define (check-views! c)
+      (let ((fl (ctx-floor c)))
+        (for-each (lambda (v)
+                    (let* ((at (view-at v)) (p (cons (car at) (cadr at))) (z (caddr at))
+                           (f (plan-face-at (ctx-plan c) p)))
+                      (unless (and (>= f 0) (any (lambda (col) (and (> z (car col)) (< z (cadr col))))
+                                                 (vector-ref (ctx-cols c) f)))
+                        (add-problem! c 1 (view-line v) (string-append "view " (symbol->string (view-name v))
+                                                                       ": its eye is in no room's air")))))
+                  (floor-views fl))
+        (unless (lowest-room-at c (floor-start fl))
+          (add-problem! c 1 (floor-line fl) (string-append "start: " (fmt-pt (floor-start fl)) " is in no room")))))
+
+    (define (check-gates! c)
+      (check-outlines! c)
+      (check-overlaps! c)
+      (check-stacking! c)
+      (check-built-stacking! c)
+      (check-stairs! c)
+      (check-guards! c)
+      (check-views! c)
+      (check-sealed! c)
+      c)))

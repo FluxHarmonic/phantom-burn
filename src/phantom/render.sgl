@@ -1,0 +1,652 @@
+;;; (phantom render) - The render path (design §6, §8): the world drawn
+;;; into a 480x270 target with depth, the palette-and-dither post pass
+;;; into a second 480x270 target, and that target put on the window at the
+;;; largest whole-number scale that fits, black around it. The 2D HUD
+;;; draws over it afterwards, at window resolution.
+;;;
+;;; The world is design coordinates (z up). The stand-in floor is G0's
+;;; Blender export, which is Y-up, so it is drawn through a model matrix
+;;; that turns it (x, y, z) -> (x, -z, y); its 14 lights are already in
+;;; design coordinates. Light is per vertex from those lights, as in G0,
+;;; and fades with distance to C-BG (#0D0A1A).
+;;;
+;;; The compiled floor (the floor compiler's output, contract draft 1) is
+;;; already Z-up and carries its light baked per vertex: up to four
+;;; (circuit, intensity) slots, so its vertex shader only looks up each
+;;; circuit's colour x level x on/off (one uniform array) and adds them.
+;;; Circuits are known by name (c1 c2 c3 emergency screens city); switching
+;;; one changes one uniform, never a buffer (D21).
+;;;
+;;; A frame is: (render-world! cam) (render-post!) (render-composite! w h)
+;;; then the HUD, all between begin-frame and end-frame. With the dither
+;;; off, render-post! does nothing and the composite shows the raw frame.
+
+(define-library (phantom render)
+  (import (sigil core)
+          (sigil math)
+          (sigil time)
+          (sigil graphics)
+          (sigil geometry)
+          (phantom dither))
+
+  (export VIEW-W VIEW-H
+          render-init! render-load-stand-in! render-load-compiled!
+          render-circuits render-circuit-on? render-circuit-set! render-switchable
+          render-world! render-post! render-composite!
+          render-dither? render-dither! render-spread render-spread!
+          render-bayer render-bayer! render-palette render-palette!
+          render-fog render-fog! render-card? render-card!
+          render-snap render-snap! render-affine? render-affine!
+          render-spread-auto? render-spread-auto! render-set-dpr! render-pixel-css auto-spread
+          render-night render-night! render-pools render-pools!
+          render-lift? render-lift!
+          render-world-ms render-post-ms
+          render-scene! render-make-world-mesh render-draw-world-mesh render-title-scene!
+          render-set-extra-draw! render-draw-object!
+          make-camera camera-set!)
+
+  (begin
+
+    (define VIEW-W 480)
+    (define VIEW-H 270)
+    (define NLIGHTS 24)
+    ;; C-BG, the colour the distance fades to and the clear colour
+    (define BG-R (/ 13.0 255.0))
+    (define BG-G (/ 10.0 255.0))
+    (define BG-B (/ 26.0 255.0))
+
+    (define (world-layout)
+      (make-vertex-layout '((position float3) (uv float2) (normal float3) (color ubyte4n) (emission ubyte4n))))
+
+    (define WORLD-VERTEX
+      "uniform mat4 view_proj;
+uniform mat4 model;
+uniform vec4 eye;           // xyz camera, w fog distance
+uniform vec4 lights[24];    // xyz, radius (design coordinates)
+uniform vec4 light_rgb[24]; // rgb, circuit (0 c1, 1 c2, 2 c3, 3 emergency; 4 and up: always lit)
+uniform vec4 levels;        // each circuit's level
+uniform vec4 ambient;       // what reaches everywhere: the night's floor plus bounce from the lit circuits
+uniform vec4 retro;         // x: snap vertices to a grid of this many view pixels (0 off), y: 1 affine textures
+in vec3 position;
+in vec2 uv;
+in vec3 normal;
+in vec4 color;
+in vec4 emission;
+out vec2 v_uv;
+out vec3 v_uvw;             // uv * w and w: dividing in the fragment stage undoes the perspective correction
+out vec3 v_color;
+out float v_fog;
+void main() {
+  vec3 wp = (model * vec4(position, 1.0)).xyz;
+  vec3 wn = mat3(model) * normal;
+  vec3 lit = ambient.rgb;
+  // an emissive vertex within 0.9 m of a light belongs to that light's
+  // fixture (a ceiling panel, the exit sign, the lamp): it dims with its
+  // circuit (the stand-in carries no circuit per vertex; the compiled floor will)
+  float enear = 0.9;
+  float elevel = 1.0;
+  for (int i = 0; i < 24; i++) {
+    vec3 d = lights[i].xyz - wp;
+    float dist = length(d);
+    float att = clamp(1.0 - dist / max(lights[i].w, 0.001), 0.0, 1.0);
+    float ndl = max(dot(wn, d / max(dist, 0.001)), 0.0);
+    int c = int(light_rgb[i].a + 0.5);
+    float level = c > 3 ? 1.0 : levels[c];
+    lit += light_rgb[i].rgb * (att * att * (0.3 + 0.7 * ndl)) * level;
+    if (dist < enear) { enear = dist; elevel = level; }
+  }
+  // an emissive surface shows its hue at full strength while its fixture is on
+  v_color = mix(color.rgb * lit, emission.rgb, emission.a * elevel);
+  v_uv = uv;
+  v_fog = clamp(length(wp - eye.xyz) / eye.w, 0.0, 1.0);
+  vec4 clip = view_proj * vec4(wp, 1.0);
+  if (retro.x > 0.0 && clip.w > 0.0) {
+    vec2 cells = vec2(240.0, 135.0) / retro.x;
+    clip.xy = floor(clip.xy / clip.w * cells + 0.5) / cells * clip.w;
+  }
+  v_uvw = vec3(uv * clip.w, clip.w);
+  gl_Position = clip;
+}
+")
+
+    ;; The compiled floor's vertex stage: baked light, no loop over lights.
+    ;; An emissive vertex says which fixture it belongs to in emission's
+    ;; alpha (the compiler's tagging, 7aed50f): 0 not emissive, 128 + k a
+    ;; fixture on circuit k (it goes dark with k), 255 always lit.
+    ;;
+    ;; `circuit` is declared uvec4: sokol binds a ubyte4 attribute with
+    ;; glVertexAttribIPointer (an integer base type), so a vec4 input reads
+    ;; undefined values (0 here, which silently indexed every slot as c1).
+    (define COMPILED-VERTEX
+      "uniform mat4 view_proj;
+uniform vec4 eye;           // xyz camera, w fog distance
+uniform vec4 cl[8];         // per circuit index: rgb x level x on; a: on
+uniform vec4 ambient;
+uniform vec4 retro;
+in vec3 position;
+in vec2 uv;
+in vec3 normal;
+in vec4 color;
+in vec4 emission;
+in vec4 light;              // intensity per slot
+in uvec4 circuit;           // circuit index per slot
+out vec2 v_uv;
+out vec3 v_uvw;
+out vec3 v_color;
+out float v_fog;
+void main() {
+  vec3 lit = ambient.rgb
+    + light.x * cl[int(circuit.x)].rgb + light.y * cl[int(circuit.y)].rgb
+    + light.z * cl[int(circuit.z)].rgb + light.w * cl[int(circuit.w)].rgb;
+  int tag = int(emission.a * 255.0 + 0.5);
+  float glow = tag == 0 ? 0.0 : (tag >= 255 ? 1.0 : cl[clamp(tag - 128, 0, 7)].a);
+  v_color = mix(color.rgb * lit, emission.rgb, glow);
+  v_uv = uv;
+  v_fog = clamp(length(position - eye.xyz) / eye.w, 0.0, 1.0);
+  vec4 clip = view_proj * vec4(position, 1.0);
+  if (retro.x > 0.0 && clip.w > 0.0) {
+    vec2 cells = vec2(240.0, 135.0) / retro.x;
+    clip.xy = floor(clip.xy / clip.w * cells + 0.5) / cells * clip.w;
+  }
+  v_uvw = vec3(uv * clip.w, clip.w);
+  gl_Position = clip;
+}
+")
+
+    (define (compiled-layout)
+      (make-vertex-layout '((position float3) (uv float2) (normal float3) (color ubyte4n)
+                            (emission ubyte4n) (light float4) (circuit ubyte4))))
+
+    (define WORLD-FRAGMENT
+      "uniform vec4 fog_color;
+uniform vec4 lift;          // rgb the black level (C-BG), a 1 to lift
+uniform float alpha;
+uniform vec4 retro;
+uniform sampler2D tex;
+in vec2 v_uv;
+in vec3 v_uvw;
+in vec3 v_color;
+in float v_fog;
+out vec4 frag_color;
+void main() {
+  vec2 uv = retro.y > 0.5 ? v_uvw.xy / v_uvw.z : v_uv;
+  vec3 c = texture(tex, uv).rgb * v_color;
+  c = mix(c, fog_color.rgb, v_fog * v_fog);
+  // black maps to C-BG and the rest is scaled into what is left, so shading
+  // below the palette's darkest colour still reads (the dark rooms, D26)
+  if (lift.a > 0.5) c = lift.rgb + c * (vec3(1.0) - lift.rgb);
+  frag_color = vec4(c, alpha);
+}
+")
+
+    ;; --- state ---------------------------------------------------------------
+
+    (define *view* #f)        ; the 3D target
+    (define *post* #f)        ; the dithered target
+    (define *view-tex* #f)    ; *view* as a texture for the post pass
+    (define *opaque* #f)
+    (define *glass* #f)
+    (define *c-opaque* #f)    ; the compiled floor's pipelines
+    (define *c-glass* #f)
+    (define *kind* 'stand-in) ; which floor is loaded: stand-in or compiled
+    (define *post-pipe* #f)
+    (define *tri* #f)         ; the full-screen triangle
+    (define *floor* #f)
+    (define *city* #f)
+    (define *draws* '())      ; ((first count texture-or-#f glass?) ...)
+
+    ;; The circuits: (name index level r g b switchable?) per circuit of the
+    ;; loaded floor, and each index's on/off. The ambient they imply: a night
+    ;; floor everywhere, plus bounce light in proportion to how much of the
+    ;; switchable circuits is on. *night* scales the floor (the style lab's
+    ;; dark-room knob: how much of a dark room still reads).
+    (define STAND-IN-CIRCUITS
+      '((c1 0 1.0 1.0 1.0 1.0 #t) (c2 1 1.0 1.0 1.0 1.0 #t) (c3 2 1.0 1.0 1.0 1.0 #t)
+        (emergency 3 1.0 1.0 1.0 1.0 #f)))
+    (define *circuits* STAND-IN-CIRCUITS)
+    (define *on* (make-vector 8 1.0))
+    (define *night* 1.0)
+    ;; the always-lit circuits' gain on the compiled floor (screens, city,
+    ;; emergency): the pools of light a dark room keeps, a style-lab knob
+    (define *pools* 2.0)
+    (define (render-pools) *pools*)
+    (define (render-pools! g) (set! *pools* (max 0.0 (min 8.0 (* 1.0 g)))) (sync-light!))
+    (define NIGHT '(0.045 0.032 0.085))
+    (define BOUNCE '(0.155 0.108 0.255))
+    (define (circuit-index name)
+      (let ((c (assq name *circuits*))) (and c (cadr c))))
+    (define (render-circuits) (map car *circuits*))
+    (define (render-switchable) (map car (filter (lambda (c) (list-ref c 6)) *circuits*)))
+    (define (render-circuit-on? name)
+      (let ((i (circuit-index name))) (and i (> (vector-ref *on* i) 0.5))))
+    (define (render-circuit-set! name on?)
+      (let ((i (circuit-index name)))
+        (when i (vector-set! *on* i (if on? 1.0 0.0)) (sync-light!))))
+    (define (lit-fraction)
+      (let* ((sw (filter (lambda (c) (list-ref c 6)) *circuits*))
+             (n (length sw)))
+        (if (= n 0) 1.0
+            (/ (apply + (map (lambda (c) (vector-ref *on* (cadr c))) sw)) n))))
+    (define (sync-light!)
+      (when *opaque*
+        (let* ((lit (lit-fraction))
+               (amb (append (map (lambda (n b) (+ (* *night* n) (* lit b))) NIGHT BOUNCE) '(1.0))))
+          (set! *ambient-now* amb)
+          (for-each (lambda (p) (set-pipeline-uniform! p 'ambient amb)) (worlds))
+          ;; the stand-in's four circuits by index, as its shader reads them
+          (both (lambda (p)
+                  (set-pipeline-uniform! p 'levels (list (vector-ref *on* 0) (vector-ref *on* 1)
+                                                         (vector-ref *on* 2) (vector-ref *on* 3)))))
+          (when (eq? *kind* 'compiled)
+            (let ((cl (let loop ((i 0) (acc '()))
+                        (if (>= i 8) (reverse acc)
+                            (let ((c (let find ((cs *circuits*)) (cond ((null? cs) #f) ((= (cadr (car cs)) i) (car cs)) (else (find (cdr cs))))))
+                                  (on (vector-ref *on* i)))
+                              (loop (+ i 1)
+                                    (cons (if c
+                                              (let ((k (* on (list-ref c 2) (if (list-ref c 6) 1.0 *pools*))))
+                                                (list (* k (list-ref c 3)) (* k (list-ref c 4)) (* k (list-ref c 5)) on))
+                                              (list 0.0 0.0 0.0 0.0))
+                                          acc)))))))
+              (for-each (lambda (p) (set-pipeline-uniform! p 'cl cl)) (list *c-opaque* *c-glass*)))))))
+    ;; The black-level lift: with it, the world fogs to black and black
+    ;; then maps to C-BG; without it, the world fogs to C-BG and anything
+    ;; darker than C-BG snaps to it in the dither.
+    (define *lift* #t)
+    (define (sync-lift!)
+      (when *opaque*
+        (for-each (lambda (p)
+                    (set-pipeline-uniform! p 'fog_color (if *lift* '(0.0 0.0 0.0 1.0) (list BG-R BG-G BG-B 1.0)))
+                    (set-pipeline-uniform! p 'lift (list BG-R BG-G BG-B (if *lift* 1.0 0.0))))
+                  (worlds))))
+    (define (render-lift?) *lift*)
+    (define (render-lift! on?) (set! *lift* on?) (sync-lift!))
+    (define (render-night) *night*)
+    (define (render-night! n) (set! *night* (max 0.0 (min 4.0 (* 1.0 n)))) (sync-light!))
+
+    (define *dither* #t)
+    ;; The spread follows the size of one game pixel on the screen, in CSS
+    ;; pixels (device pixels per game pixel / devicePixelRatio; natively the
+    ;; ratio is taken as 1, sigil-desktop has no content scale): David found
+    ;; 40 right on his phone and 8 to 16 on a desktop, the same frame.
+    (define *spread-auto* #f)        ; the / key; 8 fixed by default (David)
+    (define *dpr* 1.0)
+    (define *pixel-css* 0.0)
+    (define *spread* dither-spread-default)
+    (define *bayer* dither-size-default)
+    (define *palette* 'embers)
+    (define *fog* 45.0)
+    (define *flip* 1.0)       ; see POST-FRAGMENT's opts.x
+    (define *card* #f)        ; the test card instead of the world
+    (define *snap* 0.0)       ; vertex snapping grid in view pixels, 0 off (§6: off by default)
+    (define *affine* #f)      ; affine texture mapping (§6: off by default)
+    (define *retro* (make-bytevector 16 0))
+    (define *card-tex* #f)
+    (define *opts-copy* (make-bytevector 16 0))
+    (define *world-ms* 0.0)
+    (define *post-ms* 0.0)
+
+    (define *proj* (make-mat4))
+    (define *cam-m* (make-mat4))
+    (define *vp* (make-mat4))
+    (define *model* (make-mat4))
+    (define *eye-at* (vec3 0 0 0))
+    (define *look-at* (vec3 0 1 0))
+    (define *up* (vec3 0 0 1))
+    (define *eye* (make-bytevector 16 0))
+    (define *params* (make-bytevector 16 0))
+    (define *opts* (make-bytevector 16 0))
+
+    (define (f32! bv i x) (bytevector-ieee-single-set! bv (* 4 i) x))
+    (define (both f) (f *opaque*) (f *glass*))
+    ;; every world pipeline (the stand-in's pair and the compiled floor's)
+    (define (worlds) (list *opaque* *glass* *c-opaque* *c-glass*))
+
+    (define (render-dither?) *dither*)
+    (define (render-dither! on?) (set! *dither* on?))
+    (define (render-spread) *spread*)
+    (define (render-spread! s)
+      (set! *spread-auto* #f)
+      ;; a multiple of 4, which keeps the pass bit-exact with bayer.sh
+      (set! *spread* (* 4.0 (round (/ (max 0.0 (min 64.0 (* 1.0 s))) 4.0))))
+      (sync-post!))
+    (define (render-spread-auto?) *spread-auto*)
+    (define (render-spread-auto! on?)
+      (set! *spread-auto* on?)
+      (set! *pixel-css* 0.0)
+      (unless on? (set! *spread* dither-spread-default) (sync-post!)))
+    (define (render-set-dpr! d) (when (and (number? d) (> d 0)) (set! *dpr* (* 1.0 d))))
+    (define (render-pixel-css) *pixel-css*)
+    ;; 40 at 1.5 CSS px per game pixel or less (a phone), 12 at 4 or more (a
+    ;; desktop at 4x), straight between, to the nearest multiple of 4
+    (define (auto-spread css)
+      (let* ((t (max 0.0 (min 1.0 (/ (- css 1.5) 2.5))))
+             (s (+ 40.0 (* t -28.0))))
+        (* 4.0 (round (/ s 4.0)))))
+    (define (render-bayer) *bayer*)
+    (define (render-bayer! n) (set! *bayer* (if (= n 8) 8 4)) (sync-post!))
+    (define (render-palette) *palette*)
+    (define (render-palette! name)
+      (when (palette-colors name)
+        (set! *palette* name)
+        (when *post-pipe*
+          (set-pipeline-uniform! *post-pipe* 'pal (palette-uniform (palette-colors name))))
+        (sync-post!)))
+    (define (render-fog) *fog*)
+    (define (render-fog! d) (set! *fog* (max 1.0 (* 1.0 d))))
+    (define (sync-retro!)
+      (f32! *retro* 0 *snap*)
+      (f32! *retro* 1 (if *affine* 1.0 0.0))
+      (when *opaque* (for-each (lambda (p) (set-pipeline-uniform! p 'retro *retro*)) (worlds))))
+    (define (render-snap) *snap*)
+    (define (render-snap! px) (set! *snap* (max 0.0 (* 1.0 px))) (sync-retro!))
+    (define (render-affine?) *affine*)
+    (define (render-affine! on?) (set! *affine* on?) (sync-retro!))
+    (define (render-card?) *card*)
+    ;; The card is made here, not in a frame, so a shot never waits on it.
+    (define (render-card! on?)
+      (set! *card* on?)
+      (when (and on? (not *card-tex*))
+        (set! *card-tex* (card-texture))))
+    (define (render-world-ms) *world-ms*)
+    (define (render-post-ms) *post-ms*)
+
+    (define (sync-post!)
+      (when *post-pipe*
+        (f32! *params* 0 *spread*)
+        (f32! *params* 1 (* 1.0 *bayer*))
+        (f32! *params* 2 (* 1.0 (length (palette-colors *palette*))))
+        (f32! *params* 3 (* 1.0 VIEW-H))
+        (f32! *opts* 0 *flip*)
+        (f32! *opts* 1 1.0)
+        (f32! *opts-copy* 0 *flip*)
+        (f32! *opts-copy* 1 0.0)
+        (set-pipeline-uniform! *post-pipe* 'params *params*)
+        (set-pipeline-uniform! *post-pipe* 'opts *opts*)))
+
+    ;; --- setup ---------------------------------------------------------------
+
+    (define (render-init!)
+      (let ((layout (world-layout))
+            (vs (string-append (glsl-header) WORLD-VERTEX))
+            (fs (string-append (glsl-header) WORLD-FRAGMENT)))
+        (set! *opaque* (make-pipeline layout vs fs))
+        (set! *glass* (make-pipeline layout vs fs '(blend normal depth-write #f cull none))))
+      (let ((layout (compiled-layout))
+            (vs (string-append (glsl-header) COMPILED-VERTEX))
+            (fs (string-append (glsl-header) WORLD-FRAGMENT)))
+        (set! *c-opaque* (make-pipeline layout vs fs))
+        (set! *c-glass* (make-pipeline layout vs fs '(blend normal depth-write #f cull none))))
+      (let ((pl (make-vertex-layout '((position float2))))
+            (tri (make-bytevector 24 0)))
+        ;; one triangle covering the whole of clip space
+        (f32! tri 0 -1.0) (f32! tri 1 -1.0)
+        (f32! tri 2 3.0) (f32! tri 3 -1.0)
+        (f32! tri 4 -1.0) (f32! tri 5 3.0)
+        (set! *tri* (make-mesh pl tri))
+        (set! *post-pipe* (make-pipeline pl
+                                         (string-append (glsl-header) POST-VERTEX)
+                                         (string-append (glsl-header) POST-FRAGMENT)
+                                         '(depth-test #f depth-write #f cull none))))
+      (set! *view* (make-render-target VIEW-W VIEW-H 'nearest 'depth))
+      (set! *post* (make-render-target VIEW-W VIEW-H 'nearest 'depth))
+      (set! *view-tex* (render-target->texture *view*))
+      (render-palette! *palette*)
+      (sync-post!)
+      ;; the Y-up stand-in turned Z-up: columns x -> x, y -> z, z -> -y
+      (mat4-identity! *model*)
+      (f32! *model* 5 0.0) (f32! *model* 6 1.0)
+      (f32! *model* 9 -1.0) (f32! *model* 10 0.0)
+      (both (lambda (p)
+              (set-pipeline-uniform! p 'model *model*)
+              #t))
+      (sync-lift!)
+      (sync-light!)
+      (sync-retro!)
+      (set-pipeline-uniform! *opaque* 'alpha 1.0)
+      (set-pipeline-uniform! *glass* 'alpha 0.18)
+      (set-pipeline-uniform! *c-opaque* 'alpha 1.0)
+      (set-pipeline-uniform! *c-glass* 'alpha 0.18))
+
+    (define (pad-lights ls n)
+      (cond ((= n 0) '())
+            ((null? ls) (cons '(0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0) (pad-lights '() (- n 1))))
+            (else (cons (car ls) (pad-lights (cdr ls) (- n 1))))))
+
+    ;; The stand-in floor: (load-mesh* layout name) and (load-texture*
+    ;; name) are the shell's loaders; draws and lights are (phantom
+    ;; stand-in)'s data.
+    ;; the Y-up stand-in (and the city) turned Z-up: columns x -> x, y -> z,
+    ;; z -> -y (the title sets the identity; every loader puts this back)
+    (define (model-turn!)
+      (mat4-identity! *model*)
+      (f32! *model* 5 0.0) (f32! *model* 6 1.0)
+      (f32! *model* 9 -1.0) (f32! *model* 10 0.0)
+      (both (lambda (p) (set-pipeline-uniform! p 'model *model*))))
+
+    (define (render-load-stand-in! load-mesh* load-texture* draws lights)
+      (set! *kind* 'stand-in)
+      (model-turn!)
+      (set! *circuits* STAND-IN-CIRCUITS)
+      (when *floor* (mesh-free! *floor*))
+      (when *city* (mesh-free! *city*))
+      (let ((layout (world-layout)))
+        (set! *floor* (load-mesh* layout "floor14.sgm"))
+        (set! *city* (load-mesh* layout "city.sgm")))
+      (set! *draws*
+            (map (lambda (d)
+                   (list (car d) (cadr d)
+                         (and (caddr d)
+                              (let ((tex (load-texture* (caddr d))))
+                                (set-texture-sampling! tex 'nearest 'repeat)
+                                tex))
+                         (cadddr d)))
+                 draws))
+      (let ((ls (pad-lights lights NLIGHTS)))
+        (both (lambda (p)
+                (set-pipeline-uniform! p 'lights (map (lambda (l) (list (list-ref l 0) (list-ref l 1) (list-ref l 2) (list-ref l 3))) ls))
+                (set-pipeline-uniform! p 'light_rgb (map (lambda (l) (list (list-ref l 4) (list-ref l 5) (list-ref l 6) (list-ref l 7))) ls)))))
+      (sync-light!))
+
+    ;; The compiled floor: info is the floor.sexp datum (scripts/floor-import):
+    ;; its parts, circuits and fixtures. The city is still the stand-in's
+    ;; skyline, drawn through the stand-in pipeline (Y-up, model matrix) with
+    ;; no lights of its own.
+    (define (render-load-compiled! load-mesh* load-texture* info)
+      (set! *kind* 'compiled)
+      (model-turn!)
+      (set! *circuits* (cdr (assq 'circuits info)))
+      (when *floor* (mesh-free! *floor*))
+      (when *city* (mesh-free! *city*))
+      (set! *floor* (load-mesh* (compiled-layout) "floor.sgm"))
+      (set! *city* (load-mesh* (world-layout) "city.sgm"))
+      (set! *draws*
+            (map (lambda (p)
+                   (list (list-ref p 1) (list-ref p 2)
+                         (and (list-ref p 3)
+                              (let ((tex (load-texture* (list-ref p 3))))
+                                (set-texture-sampling! tex 'nearest 'repeat)
+                                tex))
+                         (list-ref p 4)))
+                 (cdr (assq 'parts info))))
+      ;; the skyline takes no light but the ambient and its own glow
+      (let ((zero (map (lambda (l) '(0.0 0.0 0.0 0.0)) (pad-lights '() NLIGHTS))))
+        (both (lambda (p)
+                (set-pipeline-uniform! p 'lights zero)
+                (set-pipeline-uniform! p 'light_rgb zero))))
+      (vector-fill! *on* 1.0)
+      (sync-light!))
+
+    ;; --- the camera ------------------------------------------------------------
+
+    ;; A camera: eye x y z, yaw, pitch, roll (radians), vertical field of
+    ;; view (degrees). Yaw 0 looks north (+y), growing counter-clockwise
+    ;; from above; roll is positive to the right.
+    (define (make-camera) (make-vector 7 0.0))
+    (define (camera-set! c x y z yaw pitch roll fov)
+      (vector-set! c 0 x) (vector-set! c 1 y) (vector-set! c 2 z)
+      (vector-set! c 3 yaw) (vector-set! c 4 pitch) (vector-set! c 5 roll) (vector-set! c 6 fov)
+      c)
+
+    (define (ms-since t0)
+      (/ (* 1000.0 (- (current-jiffy) t0)) (jiffies-per-second)))
+
+    ;; The test card: 16 tiles across, blue rising tile by tile; in each
+    ;; tile red rises left to right and green top to bottom, so the frame
+    ;; sweeps the colour cube, its dark warm corner included (the gate's
+    ;; views never reach the palette's warm near-blacks; the card does).
+    (define (card-texture)
+      (let ((px (make-bytevector (* VIEW-W VIEW-H 4) 255)))
+        (let rows ((y 0))
+          (when (< y VIEW-H)
+            (let cols ((x 0))
+              (when (< x VIEW-W)
+                (let ((o (* 4 (+ (* y VIEW-W) x)))
+                      (tile (exact (floor (/ x 30))))
+                      (col (modulo x 30)))
+                  (bytevector-u8-set! px o (exact (round (/ (* col 255) 29))))
+                  (bytevector-u8-set! px (+ o 1) (exact (round (/ (* y 255) (- VIEW-H 1)))))
+                  (bytevector-u8-set! px (+ o 2) (* tile 17)))
+                (cols (+ x 1))))
+            (rows (+ y 1))))
+        (make-texture-from-pixels VIEW-W VIEW-H px 'nearest)))
+
+    (define (render-world! cam)
+      (if *card*
+          (set! *world-ms* 0.0)
+          (render-world*! cam)))
+
+    ;; The camera's matrices, into every world pipeline (view_proj) and *eye*.
+    (define (camera! cam)
+      (let* ((x (vector-ref cam 0)) (y (vector-ref cam 1)) (z (vector-ref cam 2))
+             (yaw (vector-ref cam 3)) (pitch (vector-ref cam 4)) (roll (vector-ref cam 5))
+             (cp (cos pitch)) (sp (sin pitch)) (sy (sin yaw)) (cy (cos yaw))
+             (cr (cos roll)) (sr (sin roll))
+             ;; forward, right, and up tilted by the roll toward the right
+             (fx (* -1.0 sy cp)) (fy (* cy cp)) (fz sp)
+             (rx cy) (ry sy))
+        ;; up0 = right x forward = (ry*fz, -rx*fz, rx*fy - ry*fx)
+        (let ((u0x (* ry fz)) (u0y (- (* rx fz))) (u0z (- (* rx fy) (* ry fx))))
+          (vec3-set! *up* (+ (* cr u0x) (* sr rx)) (+ (* cr u0y) (* sr ry)) (* cr u0z)))
+        (vec3-set! *eye-at* x y z)
+        (vec3-set! *look-at* (+ x fx) (+ y fy) (+ z fz))
+        (mat4-perspective! *proj* (degrees->radians (vector-ref cam 6)) (/ VIEW-W VIEW-H) 0.05 600.0)
+        (mat4-look-at! *cam-m* *eye-at* *look-at* *up*)
+        (mat4-mul! *vp* *proj* *cam-m*)
+        (f32! *eye* 0 x) (f32! *eye* 1 y) (f32! *eye* 2 z)
+        (for-each (lambda (p) (set-pipeline-uniform! p 'view_proj *vp*)) (worlds))))
+
+    ;; --- the title screen's hooks ((phantom title)) ---------------------------
+
+    ;; A mesh in the stand-in's layout, from vertex bytes (non-indexed).
+    (define (render-make-world-mesh bytes) (make-mesh (world-layout) bytes))
+    (define (render-draw-world-mesh mesh first count) (draw-mesh-range *opaque* mesh first count))
+
+    ;; --- P1's hooks ((phantom play mode)): things that move ---------------------
+
+    ;; A thunk drawn inside the world pass, after the city and before the
+    ;; glass (the guard), or #f.
+    (define *extra-draw* #f)
+    (define (render-set-extra-draw! thunk) (set! *extra-draw* thunk))
+    (define *ambient-now* (list 0.0 0.0 0.0 1.0))
+
+    ;; Inside the extra draw: a range of a mesh in the world layout (as
+    ;; render-make-world-mesh makes), through its own model matrix (a
+    ;; 64-byte column-major mat4, design coordinates), lit only by (r g b)
+    ;; (the light where it stands) plus its own emission. The pipeline's
+    ;; model and ambient are put back after it.
+    (define (render-draw-object! mesh first count model r g b)
+      (f32! *eye* 3 *fog*)
+      (set-pipeline-uniform! *opaque* 'eye *eye*)
+      (set-pipeline-uniform! *opaque* 'model model)
+      (set-pipeline-uniform! *opaque* 'ambient (list r g b 1.0))
+      (draw-mesh-range *opaque* mesh first count)
+      (set-pipeline-uniform! *opaque* 'model *model*)
+      (set-pipeline-uniform! *opaque* 'ambient *ambient-now*))
+
+    ;; The title's room: built in design coordinates (no model turn), lit
+    ;; by its own lights, the switchable circuits off (so the ambient is
+    ;; the night's floor).
+    (define (render-title-scene! lights)
+      (set! *kind* 'stand-in)
+      (set! *circuits* STAND-IN-CIRCUITS)
+      (mat4-identity! *model*)
+      (both (lambda (p) (set-pipeline-uniform! p 'model *model*)))
+      (let ((ls (pad-lights lights NLIGHTS)))
+        (both (lambda (p)
+                (set-pipeline-uniform! p 'lights (map (lambda (l) (list (list-ref l 0) (list-ref l 1) (list-ref l 2) (list-ref l 3))) ls))
+                (set-pipeline-uniform! p 'light_rgb (map (lambda (l) (list (list-ref l 4) (list-ref l 5) (list-ref l 6) (list-ref l 7))) ls)))))
+      (vector-fill! *on* 0.0)
+      (sync-light!))
+
+    ;; One 3D pass into the frame's view target from cam, with draw (a
+    ;; thunk) inside it: the title's room and letters.
+    (define (render-scene! cam draw)
+      (let ((t0 (current-jiffy)))
+        (camera! cam)
+        (with-3d-pass *view* (list BG-R BG-G BG-B 1.0)
+          (f32! *eye* 3 *fog*)
+          (set-pipeline-uniform! *opaque* 'eye *eye*)
+          (draw))
+        (set! *world-ms* (ms-since t0))))
+
+    (define (render-world*! cam)
+      (let ((t0 (current-jiffy)))
+        (camera! cam)
+        (with-3d-pass *view* (list BG-R BG-G BG-B 1.0)
+          (f32! *eye* 3 *fog*)
+          (let ((opaque (if (eq? *kind* 'compiled) *c-opaque* *opaque*)))
+            (set-pipeline-uniform! opaque 'eye *eye*)
+            (set-pipeline-uniform! (if (eq? *kind* 'compiled) *c-glass* *glass*) 'eye *eye*)
+            (for-each (lambda (d)
+                        (cond ((cadddr d) #f)
+                              ((caddr d) (draw-mesh-range opaque *floor* (car d) (cadr d) (caddr d)))
+                              (else (draw-mesh-range opaque *floor* (car d) (cadr d)))))
+                      *draws*))
+          ;; the city is far away; it fades much later. On the compiled floor
+          ;; it is the city circuit's: switched off, it is not drawn.
+          (f32! *eye* 3 900.0)
+          (set-pipeline-uniform! *opaque* 'eye *eye*)
+          (unless (and (eq? *kind* 'compiled) (not (render-circuit-on? 'city)))
+            (draw-mesh *opaque* *city*))
+          (when *extra-draw* (*extra-draw*))
+          ;; glass last, blended over what is behind it
+          (let ((glass (if (eq? *kind* 'compiled) *c-glass* *glass*)))
+            (for-each (lambda (d)
+                        (when (cadddr d)
+                          (draw-mesh-range glass *floor* (car d) (cadr d))))
+                      *draws*)))
+        (set! *world-ms* (ms-since t0))))
+
+    (define (render-post!)
+      (let ((t0 (current-jiffy)))
+        (cond (*card*
+               ;; the card goes through the pass either way: dithered, or
+               ;; copied untouched when the dither is off
+               (set-pipeline-uniform! *post-pipe* 'opts (if *dither* *opts* *opts-copy*))
+               (with-3d-pass *post* #f
+                 (draw-mesh *post-pipe* *tri* *card-tex*))
+               (set-pipeline-uniform! *post-pipe* 'opts *opts*))
+              (*dither*
+               (with-3d-pass *post* #f
+                 (draw-mesh *post-pipe* *tri* *view-tex*))))
+        (set! *post-ms* (ms-since t0))))
+
+    ;; Put the frame on a w x h window at the largest whole scale that
+    ;; fits, centred; returns the scale.
+    (define (render-composite! w h)
+      (let* ((k (max 1 (exact (floor (min (/ w VIEW-W) (/ h VIEW-H))))))
+             (css (/ k *dpr*))
+             (_ (when (and *spread-auto* (not (= css *pixel-css*)))
+                  (set! *pixel-css* css)
+                  (set! *spread* (auto-spread css))
+                  (sync-post!)
+                  (display (string-append "phantom-burn: pixel scale " (number->string k)
+                                          " dpr " (number->string *dpr*)
+                                          " css-px " (number->string css)
+                                          " spread " (number->string *spread*) " (auto)"))
+                  (newline)))
+             (ox (exact (floor (/ (- w (* VIEW-W k)) 2))))
+             (oy (exact (floor (/ (- h (* VIEW-H k)) 2)))))
+        (draw-render-target (if (or *dither* *card*) *post* *view*) ox oy (* VIEW-W k) (* VIEW-H k))
+        k))))

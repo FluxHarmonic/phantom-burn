@@ -1,0 +1,231 @@
+;;; (phantom floor sheet) - floor-sheet: a compiled floor's plan from above,
+;;; as SVG (design section 7, "Review surfaces"): rooms shaded by floor
+;;; height, rooms over others drawn over them in outline, the openings by
+;;; kind, stairs and rails, props, the ceiling lights coloured by circuit and
+;;; each circuit's switch, the guard's route, the badge, the exit and its
+;;; reader, the start, the views, and any problems.
+;;;
+;;; North is up. 1 m is SCALE pixels.
+;;;
+;;; Pure: no platform.
+
+(define-library (phantom floor sheet)
+  (import (sigil core)
+          (sigil list)
+          (sigil math)
+          (sigil string)
+          (phantom floor problem)
+          (phantom floor format)
+          (phantom floor poly)
+          (phantom floor plan)
+          (phantom floor mesh)
+          (phantom floor build)
+          (phantom floor dress)
+          (phantom floor compile))
+
+  (export floor-sheet-svg)
+
+  (begin
+    (define SCALE 40.0)
+    (define MARGIN 60.0)
+
+    (define (n x) (let ((r (/ (round (* x 10.0)) 10.0))) (if (= r (round r)) (number->string (exact (round r))) (number->string r))))
+    (define (esc s)
+      (apply string-append (map (lambda (c) (cond ((char=? c #\<) "&lt;") ((char=? c #\>) "&gt;") ((char=? c #\&) "&amp;") (else (string c))))
+                                (string->list s))))
+    (define (growable->list g) (vector->list (growable-data g) 0 (growable-count g)))
+
+    ;; Circuit colours for the sheet (not the game's): distinct at a glance.
+    (define CIRCUIT-COLOURS '("#4DF2D9" "#FF59D9" "#FFCC33" "#FF9F1A" "#B36BFF" "#1A8C4D"))
+
+    (define (floor-sheet-svg cf)
+      (let* ((c (compiled-floor-ctx cf))
+             (fl (and c (ctx-floor c))))
+        (if (not fl)
+            (string-append "<svg xmlns='http://www.w3.org/2000/svg' width='640' height='120'><rect width='640' height='120' fill='#0D0A1A'/>"
+                           "<text x='10' y='30' fill='#FF5959' font-family='monospace' font-size='14'>"
+                           (esc (compiled-floor-path cf)) ": not compiled</text>"
+                           (text-lines 10 60 (map problem->string (compiled-floor-problems cf)) "#FF5959")
+                           "</svg>")
+            (let* ((rooms (floor-rooms fl))
+                   (bbs (map (lambda (r) (poly-bbox (room-corners r))) rooms))
+                   (x0 (fold-left min 1e30 (map car bbs))) (y0 (fold-left min 1e30 (map cadr bbs)))
+                   (x1 (fold-left max -1e30 (map caddr bbs))) (y1 (fold-left max -1e30 (map cadddr bbs)))
+                   (probs (compiled-floor-problems cf))
+                   (w (+ (* 2 MARGIN) (* SCALE (- x1 x0)) 260.0))
+                   (h (+ (* 2 MARGIN) (* SCALE (- y1 y0)) (* 16.0 (length probs)) 110.0))
+                   (X (lambda (x) (+ MARGIN (* SCALE (- x x0)))))
+                   (Y (lambda (y) (+ MARGIN (* SCALE (- y1 y)))))
+                   (P (lambda (p) (string-append (n (X (px p))) "," (n (Y (py p))))))
+                   (pts (lambda (ps) (string-join (map P ps) " ")))
+                   (circuits (compiled-floor-circuits cf))
+                   (ccol (lambda (idx) (list-ref CIRCUIT-COLOURS (modulo idx (length CIRCUIT-COLOURS)))))
+                   (lowest (fold-left min 1e30 (map room-floor rooms)))
+                   (highest (fold-left max -1e30 (map room-floor rooms)))
+                   (shade (lambda (z) (let* ((t (if (> highest lowest) (/ (- z lowest) (- highest lowest)) 0.0))
+                                             (v (exact (round (+ 40 (* 70 t))))))
+                                        (string-append "rgb(" (number->string (+ v 10)) "," (number->string v) "," (number->string (+ v 40)) ")"))))
+                   (upper? (lambda (r) (pair? (room-over r)))))
+              (string-append
+                "<svg xmlns='http://www.w3.org/2000/svg' width='" (n w) "' height='" (n h) "' font-family='monospace'>"
+                "<rect width='100%' height='100%' fill='#0D0A1A'/>"
+                ;; a metre grid
+                (apply string-append
+                       (map (lambda (i) (let ((x (+ (exact (floor x0)) i)))
+                                          (string-append "<line x1='" (n (X x)) "' y1='" (n (Y y0)) "' x2='" (n (X x)) "' y2='" (n (Y y1))
+                                                         "' stroke='#17122E' stroke-width='" (if (= 0 (modulo x 5)) "1.5" "0.5") "'/>")))
+                            (iota (+ 1 (exact (ceiling (- x1 x0)))))))
+                (apply string-append
+                       (map (lambda (i) (let ((y (+ (exact (floor y0)) i)))
+                                          (string-append "<line x1='" (n (X x0)) "' y1='" (n (Y y)) "' x2='" (n (X x1)) "' y2='" (n (Y y))
+                                                         "' stroke='#17122E' stroke-width='" (if (= 0 (modulo y 5)) "1.5" "0.5") "'/>")))
+                            (iota (+ 1 (exact (ceiling (- y1 y0)))))))
+                ;; rooms on the ground first, then rooms over others in outline
+                (apply string-append
+                       (map (lambda (r)
+                              (string-append "<polygon points='" (pts (room-corners r)) "' fill='" (shade (room-floor r))
+                                             "' stroke='#6B7085' stroke-width='1.5'/>"))
+                            (filter (lambda (r) (not (upper? r))) rooms)))
+                (apply string-append
+                       (map (lambda (r)
+                              (string-append "<polygon points='" (pts (room-corners r)) "' fill='" (shade (room-floor r))
+                                             "' fill-opacity='0.55' stroke='#B36BFF' stroke-width='1.5' stroke-dasharray='6,3'/>"))
+                            (filter upper? rooms)))
+                ;; props and stairs (footprints)
+                (apply string-append
+                       (map (lambda (fp)
+                              (string-append "<polygon points='" (pts (cadr fp)) "' fill='#3D4052' stroke='#8A8FA0' stroke-width='0.8'/>"))
+                            (growable->list (ctx-footprints c))))
+                (apply string-append
+                       (map (lambda (sb)
+                              (string-append "<polygon points='" (pts (car sb)) "' fill='none' stroke='#DBE0E6' stroke-width='0.6'/>"))
+                            (growable->list (ctx-stair-boxes c))))
+                ;; rails
+                (apply string-append
+                       (map (lambda (rl)
+                              (string-append "<line x1='" (n (X (px (vector-ref rl 0)))) "' y1='" (n (Y (py (vector-ref rl 0))))
+                                             "' x2='" (n (X (px (vector-ref rl 1)))) "' y2='" (n (Y (py (vector-ref rl 1))))
+                                             "' stroke='#DBE0E6' stroke-width='3' stroke-dasharray='2,2'/>"))
+                            (growable->list (ctx-rails c))))
+                ;; openings (the sector graph's edges), by kind
+                (apply string-append
+                       (map (lambda (e)
+                              (let* ((kind (vector-ref e 0)) (at (vector-ref e 3))
+                                     (col (case kind ((door) "#4DF2D9") ((arch) "#1A8C4D") ((glass window) "#93A4BA")
+                                            ((grate) "#FF9F1A") ((hatch) "#F2731A") ((exit) "#FFCC33") ((stairs) "#DBE0E6")
+                                            ((open) "#B36BFF") (else "#FFFFFF"))))
+                                (string-append "<circle cx='" (n (X (px at))) "' cy='" (n (Y (py at))) "' r='5' fill='" col "'/>"
+                                               "<text x='" (n (+ 7 (X (px at)))) "' y='" (n (- (Y (py at)) 6)) "' fill='" col "' font-size='10'>"
+                                               (symbol->string kind)
+                                               (if (vector-ref e 10) (string-append " [" (symbol->string (vector-ref e 10)) "]") "")
+                                               "</text>")))
+                            (compiled-floor-edges cf)))
+                ;; ceiling lights by circuit
+                (apply string-append
+                       (map (lambda (em)
+                              (let ((col (ccol (vector-ref em 5))))
+                                (string-append "<rect x='" (n (- (X (vector-ref em 0)) 5)) "' y='" (n (- (Y (vector-ref em 1)) 3))
+                                               "' width='10' height='6' fill='" col "' fill-opacity='0.8'/>")))
+                            (compiled-floor-emitters cf)))
+                ;; the circuits' switches
+                (apply string-append
+                       (map (lambda (ci)
+                              (if (list-ref ci 6)
+                                  (let ((p (list-ref ci 6)) (col (ccol (list-ref ci 1))))
+                                    (string-append "<rect x='" (n (- (X (px p)) 6)) "' y='" (n (- (Y (py p)) 6))
+                                                   "' width='12' height='12' fill='none' stroke='" col "' stroke-width='2'/>"
+                                                   "<text x='" (n (+ 9 (X (px p)))) "' y='" (n (+ 4 (Y (py p)))) "' fill='" col "' font-size='10'>"
+                                                   (symbol->string (list-ref ci 0)) " switch"
+                                                   (if (list-ref ci 7) (string-append " [" (symbol->string (list-ref ci 7)) "]") "")
+                                                   "</text>"))
+                                  ""))
+                            circuits))
+                ;; guards
+                (apply string-append
+                       (map (lambda (t)
+                              (let ((route (thing-field t 'route)) (waits (or (thing-field t 'waits) '())))
+                                (string-append
+                                  "<polygon points='" (pts route) "' fill='none' stroke='#FF5959' stroke-width='1.5' stroke-dasharray='8,4'/>"
+                                  (apply string-append
+                                         (map (lambda (p i)
+                                                (string-append "<circle cx='" (n (X (px p))) "' cy='" (n (Y (py p))) "' r='" (n (* SCALE CLEARANCE))
+                                                               "' fill='#FF5959' fill-opacity='0.25' stroke='#FF5959'/>"
+                                                               "<text x='" (n (+ 8 (X (px p)))) "' y='" (n (+ 14 (Y (py p)))) "' fill='#FF5959' font-size='11'>"
+                                                               (number->string (+ i 1))
+                                                               (if (and (< i (length waits)) (> (list-ref waits i) 0))
+                                                                   (string-append " wait " (n (list-ref waits i)) "s") "")
+                                                               "</text>"))
+                                              route (iota (length route)))))))
+                            (filter (lambda (t) (eq? (thing-kind t) 'guard)) (floor-things fl))))
+                ;; badges
+                (apply string-append
+                       (map (lambda (t)
+                              (let ((p (thing-field t 'on-desk)))
+                                (string-append "<text x='" (n (- (X (px p)) 6)) "' y='" (n (+ 5 (Y (py p)))) "' fill='#4DF2D9' font-size='16'>*</text>"
+                                               "<text x='" (n (+ 8 (X (px p)))) "' y='" (n (+ 18 (Y (py p)))) "' fill='#4DF2D9' font-size='10'>badge "
+                                               (symbol->string (thing-field t 'tier)) "</text>")))
+                            (filter (lambda (t) (eq? (thing-kind t) 'badge)) (floor-things fl))))
+                ;; the start
+                (let ((p (floor-start fl)) (a (* (floor-facing fl) 0.017453292519943295)))
+                  (string-append "<circle cx='" (n (X (px p))) "' cy='" (n (Y (py p))) "' r='7' fill='none' stroke='#FAFCFF' stroke-width='2'/>"
+                                 "<line x1='" (n (X (px p))) "' y1='" (n (Y (py p))) "' x2='" (n (+ (X (px p)) (* 18 (cos a))))
+                                 "' y2='" (n (- (Y (py p)) (* 18 (sin a)))) "' stroke='#FAFCFF' stroke-width='2'/>"
+                                 "<text x='" (n (+ 10 (X (px p)))) "' y='" (n (- (Y (py p)) 10)) "' fill='#FAFCFF' font-size='11'>start</text>"))
+                ;; views
+                (apply string-append
+                       (map (lambda (v)
+                              (let* ((e (view-at v)) (l (view-look v))
+                                     (d (pt-norm (cons (- (car l) (car e)) (- (cadr l) (cadr e)))))
+                                     (ex (X (car e))) (ey (Y (cadr e))))
+                                (string-append "<line x1='" (n ex) "' y1='" (n ey) "' x2='" (n (+ ex (* 30 (px d)))) "' y2='" (n (- ey (* 30 (py d))))
+                                               "' stroke='#8C40B3' stroke-width='1.5'/>"
+                                               "<circle cx='" (n ex) "' cy='" (n ey) "' r='3' fill='#8C40B3'/>"
+                                               "<text x='" (n (+ ex 4)) "' y='" (n (+ ey 12)) "' fill='#8C40B3' font-size='9'>"
+                                               (symbol->string (view-name v)) "</text>")))
+                            (floor-views fl)))
+                ;; room labels
+                (apply string-append
+                       (map (lambda (r)
+                              (let ((cen (poly-centroid (room-corners r))))
+                                (string-append "<text x='" (n (X (px cen))) "' y='" (n (Y (py cen))) "' fill='#FAFCFF' font-size='12' text-anchor='middle'>"
+                                               (symbol->string (room-name r)) "</text>"
+                                               "<text x='" (n (X (px cen))) "' y='" (n (+ 13 (Y (py cen)))) "' fill='#93A4BA' font-size='10' text-anchor='middle'>"
+                                               (n (room-floor r)) "-" (n (room-ceiling r)) " m " (symbol->string (room-surface r))
+                                               (if (eq? (room-light r) 'none) "" (string-append " " (symbol->string (room-light r))))
+                                               (if (room-crouch-only r) " crouch" "")
+                                               "</text>")))
+                            rooms))
+                ;; the key
+                (let ((kx (+ (X x1) 30)))
+                  (string-append
+                    "<text x='" (n kx) "' y='" (n MARGIN) "' fill='#FAFCFF' font-size='14'>floor " (n (floor-level fl)) ": "
+                    (esc (compiled-floor-name cf)) "</text>"
+                    (text-lines kx (+ MARGIN 20)
+                                (append (list (string-append "tier " (if (floor-tier-in fl) (symbol->string (floor-tier-in fl)) "-")
+                                                             " -> " (if (floor-tier-out fl) (symbol->string (floor-tier-out fl)) "-"))
+                                              ""
+                                              "shade: floor height"
+                                              "violet dashes: a room over another"
+                                              "red: guard route, 0.3 m clearance"
+                                              "dots: openings by kind"
+                                              "small rects: ceiling lights"
+                                              "")
+                                        (map (lambda (ci) (string-append (symbol->string (car ci)) " level " (n (list-ref ci 2))))
+                                             circuits)
+                                        (list ""
+                                              (string-append (number->string (compiled-floor-vertex-count cf)) " vertices")
+                                              (string-append (number->string (quotient (compiled-floor-index-count cf) 3)) " triangles")
+                                              (string-append (number->string (collision-count (compiled-floor-collision cf))) " collision triangles")
+                                              (string-append (number->string (length (compiled-floor-parts cf))) " parts (draws)")))
+                                "#93A4BA")))
+                ;; problems
+                (if (null? probs)
+                    (string-append "<text x='" (n MARGIN) "' y='" (n (+ (Y y0) 100)) "' fill='#1A8C4D' font-size='12'>no problems</text>")
+                    (text-lines MARGIN (+ (Y y0) 100) (map problem->string probs) "#FF5959"))
+                "</svg>")))))
+
+    (define (text-lines x y lines col)
+      (apply string-append
+             (map (lambda (l i)
+                    (string-append "<text x='" (n x) "' y='" (n (+ y (* 16 i))) "' fill='" col "' font-size='11'>" (esc l) "</text>"))
+                  lines (iota (length lines)))))))

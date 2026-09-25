@@ -1,0 +1,47 @@
+;;; (phantom floor poly): area, orientation, simple outlines, ear clipping
+;;; with and without holes, rectangle clipping.
+(import (sigil test)
+        (sigil math)
+        (phantom floor poly))
+
+(define (P . xs) (let loop ((xs xs) (acc '())) (if (null? xs) (reverse acc) (loop (cddr xs) (cons (pt (car xs) (cadr xs)) acc)))))
+(define (sum-area tris) (fold-left + 0.0 (map (lambda (t) (poly-area t)) tris)))
+(define lobby (P 0 0 12 0 14 2 14 10 0 10))
+(define office (P 16 13 26 13 26 17 22 17 22 21 16 21))
+
+(test-group "areas"
+  (test "lobby area" (assert-equal 138.0 (poly-area lobby)))
+  (test "clockwise is negative" (assert-equal -138.0 (poly-area (reverse lobby))))
+  (test "point in polygon" (assert-true (point-in-poly? (pt 5 5) lobby)))
+  (test "point outside" (assert-false (point-in-poly? (pt 13.9 0.5) lobby))))
+
+(test-group "simple outlines"
+  (test "lobby is simple" (assert-false (poly-simple-problem lobby)))
+  (test "a bow tie crosses itself" (assert-true (string? (poly-simple-problem (P 0 0 4 4 4 0 0 4)))))
+  (test "a repeated corner" (assert-true (string? (poly-simple-problem (P 0 0 4 0 4 4 4 0 0 4))))))
+
+(test-group "ear clipping"
+  (test "concave office: area kept, every triangle ccw"
+    (let ((ts (ear-clip office)))
+      (assert-equal 4 (length ts))
+      (assert-true (< (abs (- (sum-area ts) (poly-area office))) 1e-9))
+      (assert-true (every (lambda (t) (> (poly-area t) 0.0)) ts))))
+  (test "clockwise input comes out ccw"
+    (assert-true (every (lambda (t) (> (poly-area t) 0.0)) (ear-clip (reverse office)))))
+  (test "collinear corners are dropped, area kept"
+    (let ((ts (ear-clip (P 0 0 2 0 4 0 4 4 0 4))))
+      (assert-equal 2 (length ts))
+      (assert-true (< (abs (- (sum-area ts) 16.0)) 1e-9))))
+  (test "a square with a square hole"
+    (let ((ts (ear-clip-holes (P 0 0 10 0 10 10 0 10) (list (P 4 4 6 4 6 6 4 6)))))
+      (assert-true (< (abs (- (sum-area ts) 96.0)) 1e-9))
+      (assert-true (every (lambda (t) (>= (poly-area t) -1e-12)) ts))
+      ;; no triangle covers the hole's middle
+      (assert-false (any (lambda (t) (and (> (poly-area t) 1e-9) (point-in-poly? (pt 5 5) t))) ts)))))
+
+(test-group "clipping"
+  (test "a triangle clipped to a cell"
+    (let ((c (clip-convex-rect (P 0 0 2 0 0 2) 0.5 0.5 1.0 1.0)))
+      (assert-true (< (abs (- (poly-area c) 0.25)) 1e-9))))
+  (test "outside is empty"
+    (assert-equal '() (clip-convex-rect (P 0 0 1 0 0 1) 5 5 6 6))))
