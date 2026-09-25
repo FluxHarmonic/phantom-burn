@@ -65,7 +65,7 @@ function shutdown(code) {
   if (opt("--console")) fs.writeFileSync(opt("--console"), lines.join("\n") + "\n");
   try { server.close(); } catch { /* not listening */ }
   killChromeGroup("SIGTERM");
-  setTimeout(() => { killChromeGroup("SIGKILL"); try { fs.rmSync(udd, { recursive: true, force: true }); } catch { /* scratch */ } process.exit(code); }, 800).unref();
+  setTimeout(() => { killChromeGroup("SIGKILL"); try { fs.rmSync(udd, { recursive: true, force: true }); } catch { /* scratch */ } process.exit(code); }, 800);
 }
 process.on("exit", () => { killChromeGroup("SIGKILL"); try { fs.rmSync(udd, { recursive: true, force: true }); } catch { /* scratch */ } });
 for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) process.on(sig, () => shutdown(130));

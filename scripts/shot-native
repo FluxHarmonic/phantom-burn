@@ -6,7 +6,8 @@
 # display $SHOT_DISPLAY (a worker's own Xvfb; never David's display), waits
 # for "phantom-burn: ready" and $SHOT_WAIT seconds (default 2), grabs the
 # window's 480x270 with ImageMagick's import, and lets the game quit by
-# itself (--frames $SHOT_FRAMES, default 300: it runs under guix shell, so a
+# itself after $SHOT_WAIT + 3 seconds (--seconds, wall time: a frame count
+# ends early when nothing holds the frame rate; it runs under guix shell, so a
 # signal to the PID here would reach the wrapper, not the game). The
 # game's own args follow (e.g. --shot 0 --hud 0 --dither off).
 #
@@ -21,7 +22,7 @@ WAIT="${SHOT_WAIT:-2}"
 LOG="$(mktemp /tmp/phantom-shot-native.XXXXXX)"
 trap 'rm -f "$LOG"' EXIT
 
-DISPLAY="$SHOT_DISPLAY" scripts/dev "$BIN" --size 480x270 --frames "${SHOT_FRAMES:-300}" "$@" > "$LOG" 2>&1 &
+DISPLAY="$SHOT_DISPLAY" scripts/dev "$BIN" --size 480x270 --seconds "$((WAIT + 3))" "$@" > "$LOG" 2>&1 &
 PID=$!
 i=0
 until grep -q 'phantom-burn: ready' "$LOG"; do

@@ -1,6 +1,6 @@
 ;;; (phantom shell native) - The desktop window.
 ;;;
-;;;   phantom-burn [--floor DIR] [--size WxH] [--frames N] [--view K]
+;;;   phantom-burn [--floor DIR] [--size WxH] [--frames N] [--seconds S] [--view K]
 ;;;                [--shot K] [--hud 0|1|2] [--dither on|off] [--spread S]
 ;;;                [--bayer 4|8] [--palette NAME] [--fog M]
 ;;;
@@ -8,6 +8,7 @@
 ;;; export: floor14.sgm, city.sgm, the textures, floor14.collide). The
 ;;; floor reloads by itself when floor14.sgm or floor14.collide changes
 ;;; (checked twice a second), with the walker where it stands.
+;;; --frames and --seconds quit after that many frames or seconds of play.
 ;;; --view starts at one of the floor's views (0 arrival, 1 overlook,
 ;;; 2 office); --shot holds the camera exactly there, for floor shots.
 ;;;
@@ -88,14 +89,15 @@
         (when v (game-set-view! v))
         (when shot (game-set-shot! shot))))
 
-    (define (game-loop args frames)
+    (define (game-loop args frames seconds)
       (lambda ()
         (gfx-setup)
         (game-init! load-mesh* load-texture* (load-collision))
         (apply-settings! args)
         (display "phantom-burn: ready") (newline)
-        (let loop ((n 0) (seen (stamps)))
+        (let loop ((n 0) (seen (stamps)) (elapsed 0.0))
           (let* ((dt (wait-frame))
+                 (elapsed (+ elapsed dt))
                  (captured? (cursor-captured?)))
             (when (and (not captured?) (mouse-pressed? 'left))
               (set-cursor-captured! #t #f))
@@ -110,18 +112,20 @@
                                 (game-reload! load-mesh* load-texture* (load-collision)))
                               now)
                             seen)))
-              (cond ((and (key-pressed? 'escape) captured?) (set-cursor-captured! #f) (loop (+ n 1) seen))
+              (cond ((and (key-pressed? 'escape) captured?) (set-cursor-captured! #f) (loop (+ n 1) seen elapsed))
                     ((key-pressed? 'escape) (request-quit))
                     ((quit-requested?) #t)
                     ((and frames (>= n frames)) (request-quit))
-                    (else (loop (+ n 1) seen))))))
+                    ((and seconds (>= elapsed seconds)) (request-quit))
+                    (else (loop (+ n 1) seen elapsed))))))
         (display "phantom-burn: status ") (write (game-status)) (newline)
         (gfx-shutdown)))
 
     (define (native-main . _args)
       (let* ((args (cdr (command-line)))
              (frames (string->number (arg-value args "--frames" "none")))
+             (seconds (string->number (arg-value args "--seconds" "none")))
              (size (size-of (arg-value args "--size" "1440x810"))))
         (set! *dir* (arg-value args "--floor" *dir*))
-        (run-game "Phantom Burn" (car size) (cdr size) (game-loop args frames))
+        (run-game "Phantom Burn" (car size) (cdr size) (game-loop args frames seconds))
         0))))

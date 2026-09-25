@@ -17,6 +17,7 @@
 
 (define-library (phantom shell web)
   (import (sigil core)
+          (sigil math)
           (sigil graphics)
           (sigil graphics image)
           (sigil browser gles3)
