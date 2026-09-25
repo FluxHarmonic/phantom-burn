@@ -9,6 +9,21 @@
 #                                                     (dev config) on the runner
 #   scripts/build-remote --no-web --test test/test-walker.sgl --test test/test-stand-in.sgl
 #                                                     tests only, no web build
+#   scripts/build-remote --no-web --release --command "--floor-reach floors/14-slice.floor" \
+#                        --output build/floors
+#                                                     build the release config, run the
+#                                                     release binary with those arguments
+#                                                     (DISPLAY unset), and fetch named
+#                                                     outputs (paths in the checkout) to
+#                                                     build/remote-out-<sha>/
+#
+#   --release         build the native release config (after the web build, if any)
+#   --command "ARGS"  run build/release/bin/phantom-burn ARGS after the builds and
+#                     tests (implies --release); repeatable, in order. Each one's
+#                     output streams back, and its rc is on its
+#                     "=== COMMAND-RESULT rc=" line. ARGS is split on spaces.
+#   --output PATH     after everything, fetch the checkout's PATH (a file or a
+#                     directory) to build/remote-out-<sha>/PATH; repeatable
 #
 # WHAT IS BUILT IS EXACTLY HEAD, OR IT IS REFUSED.
 #   - a tree with tracked changes is refused before anything is leased;
@@ -34,13 +49,21 @@ cd "$(dirname "$0")/.."
 say() { printf 'build-remote: %s\n' "$*" >&2; }
 
 TESTS=()
+COMMANDS=()
+OUTPUTS=()
 WEB=1
+RELEASE=0
 FETCH=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --test)     [ $# -ge 2 ] || { say "--test needs a file"; exit 125; }; TESTS+=("$2"); shift 2 ;;
     --no-web)   WEB=0; FETCH=0; shift ;;
     --no-fetch) FETCH=0; shift ;;
+    --release)  RELEASE=1; shift ;;
+    --command)  [ $# -ge 2 ] || { say "--command needs its arguments"; exit 125; }; COMMANDS+=("$2"); RELEASE=1; shift 2 ;;
+    --output)   [ $# -ge 2 ] || { say "--output needs a path"; exit 125; }
+                case "$2" in /*|*..*) say "--output $2: a path inside the checkout, please"; exit 125 ;; esac
+                OUTPUTS+=("$2"); shift 2 ;;
     *) say "unknown argument '$1'"; exit 125 ;;
   esac
 done
@@ -48,7 +71,7 @@ for f in "${TESTS[@]+"${TESTS[@]}"}"; do
   [ -f "$f" ] || { say "--test $f: no such file"; exit 125; }
   git ls-files --error-unmatch "$f" >/dev/null 2>&1 || { say "--test $f is not tracked, so it is not in the bundle"; exit 125; }
 done
-[ "$WEB" = 1 ] || [ ${#TESTS[@]} -gt 0 ] || { say "nothing to do (--no-web and no --test)"; exit 125; }
+[ "$WEB" = 1 ] || [ "$RELEASE" = 1 ] || [ ${#TESTS[@]} -gt 0 ] || { say "nothing to do (--no-web, no --release, no --test)"; exit 125; }
 
 REMOTE=${AZOTH_REMOTE:-$HOME/Projects/Sites/azoth.works/bin/azoth-remote}
 [ -x "$REMOTE" ] || { say "azoth-remote not found at $REMOTE (set AZOTH_REMOTE)"; exit 125; }
@@ -62,6 +85,11 @@ fi
 SHA=$(git rev-parse --short=12 HEAD)
 FULL=$(git rev-parse HEAD)
 DEST="build/remote-web-$SHA"
+OUTDEST="build/remote-out-$SHA"
+if [ ${#OUTPUTS[@]} -gt 0 ] && [ -e "$OUTDEST" ]; then
+  say "REFUSED: $OUTDEST already exists; remove it to fetch this sha's outputs again"
+  exit 125
+fi
 if [ "$FETCH" = 1 ] && [ -e "$DEST" ]; then
   say "REFUSED: $DEST already exists; remove it to rebuild this sha"
   exit 125
@@ -75,13 +103,17 @@ trap 'rm -rf "$STAGE"' EXIT
 git bundle create "$STAGE/src.bundle" HEAD 2>/dev/null
 : > "$STAGE/tests"
 for f in "${TESTS[@]+"${TESTS[@]}"}"; do printf '%s\n' "$f" >> "$STAGE/tests"; done
+: > "$STAGE/commands"
+for c in "${COMMANDS[@]+"${COMMANDS[@]}"}"; do printf '%s\n' "$c" >> "$STAGE/commands"; done
+: > "$STAGE/outputs"
+for o in "${OUTPUTS[@]+"${OUTPUTS[@]}"}"; do printf '%s\n' "$o" >> "$STAGE/outputs"; done
 
 cat > "$STAGE/remote.sh" <<'EOF'
 #!/usr/bin/env bash
 # Runs ON THE RUNNER, in ~/work. Args: <full sha> <sigil version> <web 0|1>
 set -uo pipefail
 cd "$HOME/work"
-FULL=$1; SIGIL_V=$2; WEB=$3
+FULL=$1; SIGIL_V=$2; WEB=$3; RELEASE=${4:-0}
 mkdir -p out
 t() { date +%s; }
 T0=$(t)
@@ -124,6 +156,27 @@ while IFS= read -r f; do
   [ $r -eq 0 ] || RC=1
 done < ../tests
 clean "after the tests"
+if [ "$RELEASE" = 1 ]; then
+  Tr=$(t); env -u DISPLAY scripts/dev sigil build --config release > ../out/release.log 2>&1; brc=$?
+  echo "remote: release build rc=$brc $(( $(t) - Tr ))s"
+  [ $brc -eq 0 ] || { echo "BUILD-FAILED rc=$brc (out/release.log)"; tail -30 ../out/release.log; exit 2; }
+  clean "after the release build"
+  echo "remote: release binary sha256 $(sha256sum build/release/bin/phantom-burn | cut -c1-16)"
+fi
+while IFS= read -r c; do
+  [ -n "$c" ] || continue
+  Tc=$(t)
+  echo "=== COMMAND phantom-burn $c"
+  # the arguments split on spaces, as documented
+  env -u DISPLAY scripts/dev ./build/release/bin/phantom-burn $c < /dev/null 2>&1; r=$?
+  echo "=== COMMAND-RESULT rc=$r $(( $(t) - Tc ))s $c"
+  [ $r -eq 0 ] || RC=1
+done < ../commands
+clean "after the commands"
+while IFS= read -r o; do
+  [ -n "$o" ] || continue
+  if [ -e "$o" ]; then mkdir -p "../out/outputs/$(dirname "$o")" && cp -r "$o" "../out/outputs/$o" && echo "remote: output $o"; else echo "remote: output $o: not there"; fi
+done < ../outputs
 if [ "$WEB" = 1 ]; then
   mkdir -p ../out/web
   if tar -C build/web --exclude=./native --exclude=./bin --exclude=./.sigil-package-cache -cf - . | tar -C ../out/web -xf -; then
@@ -140,7 +193,8 @@ T0=$(date +%s)
 set +e
 "$REMOTE" --label "phantom-burn $SHA" --timeout "${BUILD_TIMEOUT:-5400}" --detach \
   --put "$STAGE/src.bundle:src.bundle" --put "$STAGE/remote.sh:remote.sh" --put "$STAGE/tests:tests" \
-  --get "out:$STAGE/fetched" -- bash remote.sh "$FULL" "$SIGIL_V" "$WEB"
+  --put "$STAGE/commands:commands" --put "$STAGE/outputs:outputs" \
+  --get "out:$STAGE/fetched" -- bash remote.sh "$FULL" "$SIGIL_V" "$WEB" "$RELEASE"
 rc=$?
 set -e
 say "remote cycle rc=$rc in $(( $(date +%s) - T0 ))s"
@@ -156,10 +210,16 @@ if [ "$FETCH" = 1 ] && [ -f "$STAGE/fetched/web/index.html" ]; then
     say "NOT filing the fetched tree as a build of $SHA: cycle rc=$rc, completion marker '$(cat "$STAGE/fetched/web.complete" 2>/dev/null)'"
   fi
 fi
+if [ ${#OUTPUTS[@]} -gt 0 ] && [ -d "$STAGE/fetched/outputs" ]; then
+  mkdir -p build
+  mv "$STAGE/fetched/outputs" "$OUTDEST"
+  printf '%s\n' "$FULL" > "$OUTDEST/BUILD-SHA"
+  say "fetched the outputs of $SHA to $OUTDEST"
+fi
 if [ -d "$STAGE/fetched" ]; then
   LOGS="build/remote-web-$SHA.logs"
   rm -rf "$LOGS"; mkdir -p "$LOGS"
-  for l in build.log deps.log guix.log; do
+  for l in build.log release.log deps.log guix.log; do
     [ -f "$STAGE/fetched/$l" ] && cp "$STAGE/fetched/$l" "$LOGS/$l"
   done
   say "runner logs in $LOGS"
