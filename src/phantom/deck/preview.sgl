@@ -3,14 +3,15 @@
 ;;; logic exists, for shots of the shell's half of the device API (v4). A
 ;;; play hook vector with nothing but a HUD: the runner walks freely.
 ;;;
-;;; The map is floor 14's rooms and openings from floors/14-slice.floor, and
-;;; the devices at the places the API note proposes; the compiler's outlines
-;;; replace it once floor.sexp carries them.
+;;; The map is the floor's own (floor.sexp's outlines, openings and devices)
+;;; when the compiler wrote them; otherwise floor 14's rooms and openings from
+;;; floors/14-slice.floor, with the devices where the API note first put them.
 
 (define-library (phantom deck preview)
   (import (sigil core)
           (sigil math)
           (sigil time)
+          (phantom render)
           (phantom deck hud))
 
   (export deck-preview-hooks)
@@ -88,7 +89,8 @@
 
     ;; (hold? after-tick! frame! hud! key hold!): a HUD and nothing else
     (define (deck-preview-hooks terminal?)
-      (when terminal? (deck-hud-use-map! FLOOR-14))
+      ;; the floor's own map once the compiler writes outlines; else floor 14's, made up
+      (when (and terminal? (null? (map-outlines (render-floor-info)))) (deck-hud-use-map! FLOOR-14))
       (vector (lambda () #f)
               (lambda (w) #f)
               (lambda (alpha cam) #f)
