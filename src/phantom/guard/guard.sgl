@@ -39,7 +39,7 @@
           (phantom guard nav)
           (phantom guard sense))
 
-  (export make-guard-world guard-world-nav make-guard guard-reset!
+  (export make-guard-world guard-world-nav guard-world-route make-guard guard-reset!
           guard-step! guard-caught? guard-hold! guard-place! guard-alarm! guard-hear! guard-heard? guard-notice!
           guard-x guard-y guard-z guard-fx guard-fy
           guard-prev-x guard-prev-y guard-prev-fx guard-prev-fy
@@ -93,11 +93,20 @@
 
     ;; A guard world: a vector
     ;;  0 tag  1 collision  2 play data  3 nav  4 route fields (one per point)
-    ;;  5 the dynamic field (searching, hunting)
-    (define (make-guard-world coll data)
-      (let* ((route (play-route data))
+    ;;  5 the dynamic field (searching, hunting)  6 its route (flat x y)
+    ;;  7 its waits
+    ;; (make-guard-world coll data [unit [nav]]): the world of the floor's
+    ;; unit (default 0, the first), on nav when given (the units of one
+    ;; floor share one; it is the costly part), else a nav over the floor's
+    ;; bounds (play.sexp's nav).
+    (define (make-guard-world coll data . opt)
+      (let* ((u (vector-ref (play-units data) (if (pair? opt) (car opt) 0)))
+             (route (unit-route u))
              (np (quotient (vector-length route) 2))
-             (nav (make-nav coll -0.5 -0.5 27.0 22.0))
+             (b (play-nav-bounds data))
+             (nav (if (and (pair? opt) (pair? (cdr opt)))
+                      (cadr opt)
+                      (make-nav coll (vector-ref b 0) (vector-ref b 1) (vector-ref b 2) (vector-ref b 3))))
              (fields (make-vector np #f)))
         (let loop ((i 0))
           (when (< i np)
@@ -105,8 +114,9 @@
               (nav-field! nav f (vector-ref route (* 2 i)) (vector-ref route (+ 1 (* 2 i))) 0.0 #f #f #f)
               (vector-set! fields i f))
             (loop (+ i 1))))
-        (vector 'guard-world coll data nav fields (make-field nav))))
+        (vector 'guard-world coll data nav fields (make-field nav) route (unit-waits u))))
     (define (guard-world-nav gw) (vector-ref gw 3))
+    (define (guard-world-route gw) (vector-ref gw 6))
 
     ;; The runner, as the guard needs it: a vector, filled by the game once
     ;; a tick (target-set!), so the guard's step reads it without allocating.
@@ -141,7 +151,7 @@
     ;; Back to the start of an attempt: at route point leg, calm, facing
     ;; the next point.
     (define (guard-reset! g gw leg)
-      (let* ((route (play-route (vector-ref gw 2)))
+      (let* ((route (vector-ref gw 6))
              (np (quotient (vector-length route) 2))
              (leg (modulo leg np))
              (next (modulo (+ leg 1) np))
@@ -310,8 +320,8 @@
 
     ;; The route: walk to the leg's point, wait there looking around, next.
     (define (patrol! g gw dt)
-      (let* ((route (play-route (vector-ref gw 2)))
-             (waits (play-waits (vector-ref gw 2)))
+      (let* ((route (vector-ref gw 6))
+             (waits (vector-ref gw 7))
              (np (vector-length waits))
              (leg (exact (vector-ref g S-LEG))))
         (if (>= (vector-ref g S-WAIT) 0.0)

@@ -47,6 +47,7 @@
  (panels (c2 16.0 10.0 facilities))
  (reader facilities)
  (noise-ambient hvac 0.3 buzz 0.2 city 0.4)
+ (nav -0.5 -0.5 27.0 22.0)
  (devices
   (office-printer printer 25.3 13.55 0.0 180.0 staff 3)
   (office-phone phone 17.45 17.85 0.75 0.0 staff 3)
