@@ -264,6 +264,7 @@
       (set! *timer* (+ *timer* TICK))
       (set! *fade-in* (max 0.0 (- *fade-in* TICK)))
       (set! *badge-flash* (max 0.0 (- *badge-flash* TICK)))
+      (set! *eye-flash* (max 0.0 (- *eye-flash* TICK)))
       (cond
         ((eq? *phase* 'caught)
          (guard-hold! (play-guard *core*))
@@ -390,7 +391,14 @@
 
     ;; The eye (design §3): one glyph that opens in five steps with how
     ;; visible you are (light x stance x motion).
+    ;; A camera's alarm flashes the eye's box amber for EYE-FLASH seconds.
+    (define EYE-FLASH 1.5)
+    (define *eye-flash* 0.0)
+    (define *alarms-seen* 0)
     (define (draw-eye! w h ts)
+      (let ((n (play-camera-alarms *core*)))
+        (when (> n *alarms-seen*) (set! *eye-flash* EYE-FLASH))
+        (set! *alarms-seen* n))
       (let* ((v (play-visibility *core*))
              (step (min 4 (exact (floor (* 5.0 v)))))
              (open (/ step 4.0))
@@ -400,6 +408,20 @@
              (hh (* 7 ts open)))
         (set-color 0.0 0.0 0.0 0.5)
         (with-blend-mode 'normal (draw-filled-rect (- cx (* 20 ts)) (- cy (* 11 ts)) (* 40 ts) (* 22 ts)))
+        ;; a camera noticing you: an amber bar along the box's foot, filling
+        ;; as it becomes sure (P3: "I can't tell when it sees me")
+        (let ((watch (play-camera-watch *core*)))
+          (when (> watch 0.0)
+            (set-color 1.0 0.62 0.1)
+            (draw-filled-rect (- cx (* 20 ts)) (+ cy (* 10 ts)) (* 40 ts watch) ts)))
+        ;; and its alarm: the box's edge flashes amber
+        (when (> *eye-flash* 0.0)
+          (when (> (sin (* *eye-flash* 18.0)) -0.3)
+            (set-color 1.0 0.62 0.1)
+            (draw-filled-rect (- cx (* 20 ts)) (- cy (* 11 ts)) (* 40 ts) ts)
+            (draw-filled-rect (- cx (* 20 ts)) (+ cy (* 10 ts)) (* 40 ts) ts)
+            (draw-filled-rect (- cx (* 20 ts)) (- cy (* 11 ts)) ts (* 22 ts))
+            (draw-filled-rect (+ cx (* 19 ts)) (- cy (* 11 ts)) ts (* 22 ts))))
         (if (= step 0)
             (begin
               (set-color 0.55 0.6 0.75)

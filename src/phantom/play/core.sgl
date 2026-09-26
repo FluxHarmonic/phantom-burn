@@ -37,7 +37,7 @@
           play-use! play-incidents play-patches play-take-events! play-event! USE-REACH
           play-devices-state play-deck play-tier play-deck! play-device-level play-device-approach
           play-mask VENT-NOISE MASK-GAIN
-          play-camera-awareness CAMERA-GAIN CAMERA-DECAY CAMERA-DARK
+          play-camera-awareness play-camera-watch play-camera-alarms CAMERA-GAIN CAMERA-DECAY CAMERA-DARK
           play-terminal-open? play-terminal play-terminal-key! play-terminal-step!
           TERMINAL-TIME TERMINAL-LIGHT
           PHONE-NOISE PRINTER-NOISE ANSWER-REACH DEVICE-NOTICE)
@@ -80,6 +80,18 @@
     (define (play? p) (and (vector? p) (= (vector-length p) 36) (eq? (vector-ref p 0) 'play)))
     (define (play-terminal-open? p) (vector-ref (vector-ref p 35) 0))
     (define (play-camera-awareness p i) (vector-ref (vector-ref p 33) i))
+    ;; for the HUD's eye: the most any camera that has you in view now is
+    ;; sure of you (0 when none does), and how many cameras have alarmed
+    (define (play-camera-watch p)
+      (let ((dv (vector-ref p 29)) (aw (vector-ref p 33)))
+        (let loop ((i 0) (m 0.0))
+          (if (< i (vector-length aw))
+              (loop (+ i 1) (if (eq? (devices-state dv i) 'seeing) (max m (vector-ref aw i)) m))
+              m))))
+    (define (play-camera-alarms p)
+      (let ((dv (vector-ref p 29)) (n (vector-length (vector-ref p 33))))
+        (let loop ((i 0) (c 0))
+          (if (< i n) (loop (+ i 1) (if (eq? (devices-state dv i) 'alarmed) (+ c 1) c)) c))))
     (define (play-mask p) (vector-ref p 32))
     (define (play-device-approach p i) (vector-ref (vector-ref p 31) i))
     (define (play-devices-state p) (vector-ref p 29))
@@ -359,7 +371,10 @@
     ;; alarms (its alarm part, the camera-alert sound), the incident is
     ;; logged, and Gibson sends his unit to where it saw you. The alarm
     ;; stays for the attempt.
-    (define CAMERA-GAIN 1.5)
+    ;; P3 retune (David: "I can't tell when it sees me"): 1.5 -> 0.7, so fully
+    ;; lit it takes about 1.4 s to be sure, a moment to see it coming (the
+    ;; shell's pool warms, the eye's bar fills)
+    (define CAMERA-GAIN 0.7)
     (define CAMERA-DECAY 0.3)
     (define CAMERA-DARK 0.12)       ; the guard's DARK-01
     ;; a lens is poor in dim light: its gain rises from nothing at
@@ -418,7 +433,8 @@
                        (event! p 'camera-alert cx cy)
                        (incident! p 'camera-saw (vector-ref p 22))
                        (guard-notice! (vector-ref p 3) CAMERA-CALL px py pz))
-                      (else (devices-state-set! dv i (if seen 'seeing 'idle) 0.0))))))
+                      ;; its awareness rides in its timer: (seeing A) for the shell
+                      (else (devices-state-set! dv i (if seen 'seeing 'idle) a))))))
               (loop (+ i 1)))))))
 
     ;; Rooms a and b are one space: the same room, or one air volume (the

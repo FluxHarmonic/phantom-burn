@@ -68,7 +68,7 @@
   (corridor-vent vent 17.6 9.4 2.75 0.0 facilities 2)
   (lobby-blinds blinds 6.0 0.0 3.0 0.0 facilities 0 1.0 0.0 11.0 0.0)
   (fm-terminal terminal 24.5 18.8 0.75 0.0 staff 4)
-  (lift-camera camera 0.655 3.5 2.61 4.5057 security 0 70.0 12.0 -22.2974))
+  (lift-camera camera 0.655 3.5 2.61 -20.0321 security 0 55.0 10.0 -21.9891))
  (outlines
   (lobby 0.0 (0.0 0.0) (12.0 0.0) (14.0 2.0) (14.0 10.0) (0.0 10.0))
   (mezzanine 3.0 (0.0 7.0) (12.0 7.0) (12.0 4.0) (14.0 4.0) (14.0 10.0) (0.0 10.0))

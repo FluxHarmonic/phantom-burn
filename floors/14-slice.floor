@@ -43,7 +43,11 @@
            (vent     id: corridor-vent    in: corridor  at: (17.6 9.4))            ; FACILITIES: masks your steps
            (blinds   id: lobby-blinds     in: lobby  along: ((1 0) (11 0)))        ; FACILITIES: the city light
            (terminal id: fm-terminal      on-desk: (24.5 18.8))                    ; the floor map, every allowed command
-           (camera   id: lift-camera      in: lobby  at: (0 3.5)  look: (7 4 0)  fov: 70  range: 12))   ; observes the lifts
+           (camera   id: lift-camera      in: lobby  at: (0 3.5)  look: (8.17 0.76 -0.62)  fov: 55  range: 10))
+           ;; ^ by the lifts, looking south-east over the window half of the lobby
+           ;; (heading -20, pitch -22): the dark strip under the mezzanine is the
+           ;; way round it (P3 retune: David found the old view, east across the
+           ;; whole lobby at fov 70, too hard to avoid)
   views: ((establishing  at: (1 1 1.6)      look: (14 10 3))
           (from-the-duct at: (19 10.5 3.4)  look: (22.2 13.7 2.7))
           ;; the Blender export's three views (floor-14-export/README.txt), for floor-shot

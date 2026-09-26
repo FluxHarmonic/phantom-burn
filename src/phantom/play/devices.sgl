@@ -139,7 +139,8 @@
       (let ((n (vector-length (vector-ref dv 2))))
         (let loop ((i 0))
           (when (< i n)
-            (let ((t (devices-timer dv i)))
+            ;; a camera's timer is its awareness (core's cameras!), not a countdown
+            (let ((t (if (eq? (device-kind (device-of dv i)) 'camera) 0.0 (devices-timer dv i))))
               (when (> t 0.0)
                 (let ((left (- t dt)))
                   (if (> left 0.0)
@@ -150,7 +151,8 @@
             (loop (+ i 1))))))
 
     ;; For the shell (the API, §2): ((ID KIND X Y Z STATE) ...), STATE a
-    ;; symbol, or (STATE SECONDS-LEFT) for a phone ringing and a vent on;
+    ;; symbol, or (STATE SECONDS-LEFT) for a phone ringing and a vent on,
+    ;; or (seeing AWARENESS) for a camera noticing you (0..1, alarmed at 1);
     ;; then a lights row per lighting zone, (lights-C lights X Y Z on|off)
     ;; by on?, the circuits' state.
     (define (devices-list dv on?)
@@ -164,7 +166,7 @@
               (let* ((d (vector-ref ds i)) (s (devices-state dv i)))
                 (loop (- i 1)
                       (cons (list (device-id d) (device-kind d) (device-x d) (device-y d) (device-z d)
-                                  (if (memq s '(ringing on)) (list s (devices-timer dv i)) s))
+                                  (if (memq s '(ringing on seeing)) (list s (devices-timer dv i)) s))
                             acc)))))))
 
     ;; --- the deck -------------------------------------------------------------------
