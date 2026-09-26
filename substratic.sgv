@@ -1,0 +1,36 @@
+;;; Phantom Burn's configuration for substratic's shared site tools
+;;; (substratic tasks/: stage-web, check-site, publish-web, verify-live,
+;;; pages-dev-check, cloudflare-setup, build-remote, host-site). Read as
+;;; data, never evaluated; an unknown key or section is refused.
+(substratic schema: 1)
+
+(publish
+  ;; the token: CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID from the
+  ;; environment when set, else this pass entry (token on line 1, an
+  ;; "account: <id>" line after it)
+  credentials: (pass "cloudflare/phantomburn-site")
+  pages: (project: "phantomburn"
+          production-branch: "master"
+          preview-branch: "preview"
+          domains: ("phantomburn.net" "www.phantomburn.net")
+          zone: "phantomburn.net"
+          ;; the newest date this box's wrangler 4.112 workerd supports
+          compatibility-date: "2026-07-14")
+  ;; the wasm in R2, served by the generated Function at /w/<sha16>/phantom-burn.wasm
+  wasm: (bucket: "phantomburn-wasm" binding: "WASM" route: "w")
+  apps: ((name: "phantom-burn"
+          ;; a runner build: PHANTOM_WEB_DIR=build/remote-web-<sha>
+          web: (dir: "build/web" env: "PHANTOM_WEB_DIR")
+          ;; the game's path: /beta/ (David, 2026-09-26), overridable
+          mount: (env: "PHANTOM_SITE_SLUG" file: "~/.config/phantomburn/slug"
+                  default: "beta" pattern: "[a-z][a-z0-9-]{1,31}")
+          requires: ("assets/floors/14-slice/floor.sexp")))
+  ;; a private preview: robots.txt disallows everything, every response
+  ;; and the wasm Function say X-Robots-Tag: noindex
+  indexing: noindex
+  site: (source: "site"
+         files: ("index.html" "404.html" "robots.txt" "_headers" "_redirects"))
+  ;; the game's own legs of check-site: the root page and the boots
+  check: (arm: "scripts/check-boots.mjs" gate-files: ("scripts/shot-web.mjs"))
+  host: (https: 8811 http: 8812 dir: "~/Projects/Code/sigil/phantom-burn-hosted")
+  remote: (web-config: web))
