@@ -110,7 +110,7 @@
       (set! *use* #f)
       (set! *feed-gx* #f)
       (render-hide-part! 'badge #f)
-      (play-start-walker *core* *coll*))
+      (if *practice* (practice-start-walker *practice* *core*) (play-start-walker *core* *coll*)))
 
     ;; a fade, the win card, or the terminal (you stand at it; the floor goes on)
     ;; PRACTICE: after a capture's fade, only the lesson's room starts over
@@ -314,7 +314,7 @@
          ;; the first tick of the first attempt: put the runner at the
          ;; arrival spot; the rules start on the next tick, from there
          (set! *place* #f)
-         (play-start-walker *core* *coll*))
+         (if *practice* (practice-start-walker *practice* *core*) (play-start-walker *core* *coll*)))
         (else
          (when *use*
            (set! *use* #f)

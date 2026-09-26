@@ -39,7 +39,7 @@
   (set! *off* '())
   (set! P (play-reset! (make-play C DATA CIRCUITS)))
   (set! PR (make-practice DATA))
-  (set! W (play-start-walker P C)))
+  (set! W (practice-start-walker PR P)))
 
 (define PI2 (* 2.0 3.141592653589793))
 (define (wrap a) (let loop ((a a)) (cond ((> a 3.141592653589793) (loop (- a PI2))) ((< a -3.141592653589793) (loop (+ a PI2))) (else a))))
@@ -79,7 +79,7 @@
     (if (< i n)
         (let ((r (play-deck! P W #t on?)))
           (switch! r)
-          (when r (practice-note-command! PR P (if (pair? r) (caddr r) #f) 'deck))
+          (when (and (pair? r) (memq (car r) '(run lights))) (practice-note-command! PR P (caddr r) 'deck))
           (tick! NO-INPUT)
           (loop (+ i 1) (or r last)))
         (begin (play-deck! P W #f on?) last))))
@@ -90,8 +90,13 @@
                                     'unit (play-active-unit P) (guard-state (play-guard P)) 'vis (play-visibility P)))
                      (newline))
 
-(test-group "the sim's first lessons (diagnostic)"
-  (test "light, sound, patrol"
+(define EXPECTED
+  '((light . enter) (light . success) (sound . enter) (sound . success) (patrol . enter) (patrol . success)
+    (deck . enter) (deck . success) (facilities . enter) (facilities . success) (camera . enter) (camera . success)
+    (terminal . enter) (terminal . success) (exit . enter) (exit . success)))
+
+(test-group "the practice gate"
+  (test "THE RUN: all eight rooms, each lesson's goal met, every Crash line once at its trigger, the sim done"
     (fresh!)
     (wait! 2)
     (show 'start)
@@ -106,30 +111,43 @@
     (go! 9.0 4.0 'sneak) (show 'sound-in)
     (go! 15.5 4.0 'sneak) (show 'sound-end)
     (go! 16.8 4.0 'sneak) (show 'patrol-in)
-    ;; 3, patrol: wait for the unit to pass north, back turned, then run for the door
+    ;; 3, patrol: wait in the south-west corner for the unit to walk west along
+    ;; the north wall, its back to the door; then walk for the door
+    (go! 17.5 1.5 'walk)
     (let loop ((i 0))
       (let ((g (play-guard P)))
-        (unless (or (>= i 900) (and (> (guard-y g) 5.0) (> (guard-fy g) 0.5)))
+        (unless (or (>= i 1800) (and (> (guard-y g) 7.0) (< (guard-fx g) -0.5) (> (guard-x g) 21.5)))
           (tick! NO-INPUT) (loop (+ i 1)))))
     (show 'patrol-go)
-    (go! 23.4 4.0 'run) (go! 24.8 4.0 'run) (show 'deck-in)
-    ;; 4, the deck: ring the phone, wait for the unit to go to it, then along the south wall
-    (look-at! 25.45 6.85 0.85)
+    (go! 23.2 4.0 'walk) (go! 24.8 4.0 'walk) (show 'deck-in)
+    ;; 4, the deck: ring the phone from the south-west, wait in the corner for
+    ;; the unit to go to it, then along the south wall to the door
+    (go! 26.0 2.5 'sneak)
+    (look-at! 27.45 6.85 0.85)
     (let ((r (hold! 55))) (display (list 'deck r)) (newline))
+    (go! 25.0 1.0 'sneak)
     (let loop ((i 0))
-      (let* ((g (play-guard P)) (dx (- (guard-x g) 25.45)) (dy (- (guard-y g) 6.85)))
+      (let* ((g (play-guard P)) (dx (- (guard-x g) 27.45)) (dy (- (guard-y g) 6.85)))
         (unless (or (>= i 900) (< (+ (* dx dx) (* dy dy)) 4.0))
           (tick! NO-INPUT) (loop (+ i 1)))))
     (show 'deck-unit-at-phone)
-    (go! 27.0 1.2 'sneak) (go! 31.0 1.2 'sneak) (go! 32.8 4.0 'sneak) (show 'facilities-in)
+    (go! 31.0 1.0 'walk) (go! 31.2 4.0 'walk) (go! 32.8 4.0 'walk) (show 'facilities-in)
     ;; 5, FACILITIES: the badge, a ceiling light (the zone off), across in the dark
-    (go! 32.4 1.3 'walk) (wait! 2) (show 'badge)
-    (go! 34.2 3.4 'walk)
-    (look-at! 35.75 3.75 2.9)
+    (go! 33.25 7.4 'sneak) (go! 33.25 8.4 'sneak) (wait! 2) (show 'badge)
+    (go! 33.25 7.7 'sneak)
+    (look-at! 33.25 6.25 2.9)
     (let ((r (hold! 55))) (display (list 'lights r 'off *off*)) (newline))
-    (go! 39.0 3.0 'sneak) (go! 40.8 4.0 'sneak) (show 'camera-in)
+    (look-at! 37.2 4.4 2.9)
+    (let ((r (hold! 55))) (display (list 'vent r)) (newline))
+    ;; round the south of the room, and to the door while it is at its north end
+    (go! 36.0 2.5 'sneak) (go! 39.3 2.5 'sneak)
+    (let loop ((i 0))
+      (let ((g (play-guard P)))
+        (unless (or (>= i 900) (> (guard-y g) 7.0))
+          (tick! NO-INPUT) (loop (+ i 1)))))
+    (go! 39.3 4.0 'sneak) (go! 40.8 4.0 'sneak) (show 'camera-in)
     ;; 6, the camera: along the north wall, under its view
-    (go! 41.0 7.4 'walk) (go! 47.0 7.4 'walk) (go! 48.8 4.0 'walk) (show 'terminal-in)
+    (go! 41.0 7.4 'walk) (go! 47.0 7.4 'walk) (go! 47.2 4.0 'walk) (go! 48.8 4.0 'walk) (show 'terminal-in)
     ;; 7, the terminal: sit, run a command, stand
     (go! 52.0 6.2 'walk)
     (let ((u (play-use! P W on?))) (display (list 'terminal-use u)) (newline))
@@ -144,11 +162,36 @@
           (begin (display (list 'terminal-ran r (play-terminal P on?))) (newline))))
     (play-terminal-key! P 'close on?)
     (show 'terminal-done)
-    (go! 56.8 4.0 'walk) (show 'exit-in)
+    (go! 55.2 4.0 'walk) (go! 56.8 4.0 'walk) (show 'exit-in)
     ;; 8, the exit: the reader
     (go! 63.2 4.0 'walk)
     (let ((u (play-use! P W on?))) (display (list 'reader u)) (newline))
     (tick! NO-INPUT)
     (show 'end)
     (display (list 'said (said) 'done (practice-done? PR))) (newline)
-    (assert-true #t)))
+    (assert-true (equal? (said) EXPECTED))
+    (assert-true (practice-done? PR))
+    (assert-equal 'won (play-outcome P)))
+  (test "A CAPTURE RESETS ONLY ITS ROOM: caught in the patrol room, you and its unit start it again; the rooms before are as you left them"
+    (fresh!)
+    (go! 4.0 7.0 'walk) (go! 7.5 4.0 'walk) (go! 9.0 4.0 'sneak) (go! 15.5 4.0 'sneak) (go! 16.8 4.0 'sneak)
+    (let ((booth-x (guard-x (play-unit-guard P 0))) (booth-y (guard-y (play-unit-guard P 0))))
+      ;; stand in the patrol unit's path, lit, facing it: it hunts and catches
+      (go! 22.5 3.0 'walk)
+      (let loop ((i 0)) (when (and (< i 1800) (eq? (play-outcome P) 'playing)) (tick! NO-INPUT) (loop (+ i 1))))
+      (display (list 'caught (play-outcome P) (said))) (newline)
+      (assert-equal 'caught (play-outcome P))
+      (set! W (practice-reset-room! PR P))
+      (tick! NO-INPUT)
+      (display (list 'reset 'at (walker-x W) (walker-y W) 'lesson (lesson-now) 'unit (guard-x (play-guard P)) (guard-y (play-guard P))
+                     'booth booth-x booth-y (guard-x (play-unit-guard P 0)) (guard-y (play-unit-guard P 0)))) (newline)
+      (assert-equal 'playing (play-outcome P))
+      (assert-true (< (abs (- (walker-x W) 16.8)) 0.2))
+      (assert-equal 3 (car (lesson-now)))
+      ;; its unit back at its start (route point 0, (22.5 1))
+      (assert-true (< (+ (abs (- (guard-x (play-guard P)) 22.5)) (abs (- (guard-y (play-guard P)) 1.0))) 0.3))
+      ;; the sound room's unit untouched
+      (assert-true (< (+ (abs (- (guard-x (play-unit-guard P 0)) booth-x)) (abs (- (guard-y (play-unit-guard P 0)) booth-y))) 1e-9))
+      ;; the fail line once; the lessons before still succeeded
+      (assert-equal 1 (length (filter (lambda (e) (equal? e '(patrol . fail))) (said))))
+      (assert-true (member '(sound . success) (said))))))

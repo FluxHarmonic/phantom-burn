@@ -26,9 +26,10 @@
    (sound-tile    corners: ((10.5 0) (13.5 0) (13.5 8) (10.5 8))  floor: 0  ceiling: 3.0  surface: tile    light: c1)
    (sound-carpet  corners: ((13.5 0) (16 0) (16 8) (13.5 8))      floor: 0  ceiling: 3.0  surface: carpet  light: c1)
    (booth         corners: ((10.5 8) (13.5 8) (13.5 10.5) (10.5 10.5))  floor: 0  ceiling: 3.0  surface: tile  light: c1)
-   (patrol        corners: ((16 0) (24 0) (24 8) (16 8))          floor: 0  ceiling: 3.0  surface: tile    light: c1)
-   (deck-room     corners: ((24 0) (32 0) (32 8) (24 8))          floor: 0  ceiling: 3.0  surface: carpet  light: c1)
-   (facilities    corners: ((32 0) (40 0) (40 8) (32 8))          floor: 0  ceiling: 3.0  surface: tile    light: c2)
+   (patrol        corners: ((16 0) (24 0) (24 8) (16 8))          floor: 0  ceiling: 3.0  surface: carpet  light: c1)   ; carpet: this lesson is timing, not sound
+   (deck-room     corners: ((24 0) (32 0) (32 8) (24 8))          floor: 0  ceiling: 3.0  surface: carpet  light: none)   ; dark: the unit at the door feels you within 2 m
+   (facilities    corners: ((32 0) (40 0) (40 8) (32 8))          floor: 0  ceiling: 3.0  surface: carpet  light: c2)   ; carpet: the vent covers a walk past the unit
+   (badge-nook    corners: ((32 8) (34.5 8) (34.5 10.5) (32 10.5))  floor: 0  ceiling: 3.0  surface: tile  light: none)   ; the badge, out of the unit's sight
    (camera-room   corners: ((40 0) (48 0) (48 8) (40 8))          floor: 0  ceiling: 3.0  surface: tile    light: c3)
    (terminal-room corners: ((48 0) (56 0) (56 8) (48 8))          floor: 0  ceiling: 3.0  surface: carpet  light: c1)
    (exit-room     corners: ((56 0) (64 0) (64 8) (56 8))          floor: 0  ceiling: 3.0  surface: tile    light: c1))
@@ -41,6 +42,7 @@
    (door    between: (sound-carpet patrol)       at: (16 4))
    (door    between: (patrol deck-room)          at: (24 4))
    (door    between: (deck-room facilities)      at: (32 4))
+   (arch    between: (facilities badge-nook)     at: (33.25 8))
    (door    between: (facilities camera-room)    at: (40 4))
    (door    between: (camera-room terminal-room) at: (48 4))
    (door    between: (terminal-room exit-room)   at: (56 4))
@@ -49,18 +51,25 @@
   lights: ((c1 level: 0.7) (c2 level: 0.7) (c3 level: 0.7))
   things: (;; 2, sound: a unit posted behind the booth's glass, listening
            (guard   kind: patrol  route: ((12 9.4))  waits: (4))
-           ;; 3, patrol: a unit walking back and forth past the east doorway
-           (guard   kind: patrol  route: ((22 7) (22 1))  waits: (1 1))
-           ;; 4, the deck: a unit posted by the east doorway; the phone on a desk
+           ;; 3, patrol: a unit on a loop past the east doorway, north up its side,
+           ;; west along the north wall, back on the diagonal; no waits. Go while it
+           ;; walks west, its back to the door.
+           (guard   kind: patrol  route: ((22.5 1) (22.5 7.5) (18 7.5))  waits: (0 0 0))
+           ;; 4, the deck: a unit posted by the east doorway (in the dark it only
+           ;; feels you within 2 m, so you can't pass it); the phone on a desk at
+           ;; the north wall's middle pulls it away
            (guard   kind: patrol  route: ((30.8 4))  waits: (4))
-           (desk    in: deck-room  from: (corner 3 (2 -1))  kind: office-desk)          ; (26 7)
-           (phone   id: sim-phone  on-desk: (25.45 6.85))
+           (desk    in: deck-room  from: (corner 3 (4 -1))  kind: office-desk)          ; (28 7)
+           (phone   id: sim-phone  on-desk: (27.45 6.85))
            ;; 5, FACILITIES: the badge by the door, the zone, the vent, the blinds, a unit
-           (desk    in: facilities  from: (corner 0 (1.5 1.5))  kind: office-desk)      ; (33.5 1.5)
-           (badge   on-desk: (33.0 1.25)  tier: facilities)
+           (desk    in: badge-nook  from: (centre (0 0))  kind: office-desk)           ; (33.25 9.25)
+           (badge   on-desk: (32.75 9.0)  tier: facilities)
            (vent    id: sim-vent    in: facilities  at: (37.2 4.4))        ; clear of the ceiling lights
            (blinds  id: sim-blinds  in: facilities  along: ((34 0) (38 0)))
-           (guard   kind: patrol  route: ((34 6.5) (38.5 6.5))  waits: (2 2))
+           ;; the unit guards the east door, pacing just north of it, side-on to the
+           ;; entry and the badge's nook; getting past it is the lesson (the dark,
+           ;; and the vent's roar over your steps on the tile)
+           (guard   kind: patrol  route: ((38.8 5.4) (38.8 7.5))  waits: (0 0))
            ;; 6, the camera: on the north wall looking south over the room; the
            ;; strip under it is out of its view, and c3 off blinds it
            (camera  id: sim-camera  in: camera-room  at: (44 8)  look: (44 3.5 -0.6)  fov: 60  range: 9)
@@ -85,7 +94,7 @@
               on-enter: "Aim at the phone and hold your deck. Units are built to answer. Go while it's busy."
               on-success: "Nice. They always pick up."
               on-fail: "Caught. Ring the phone first, then move while it's answering.")
-   (facilities rooms: (facilities)  start: (32.8 4)  facing: 0  goal: (through with: badge used: facilities never: hunting)
+   (facilities rooms: (facilities badge-nook)  start: (32.8 4)  facing: 0  goal: (through with: badge used: facilities never: hunting)
               on-enter: "That badge upgrades your deck. Kill the lights, or run the vent to cover your steps. Gibson notices a dark room if a unit walks into it, though."
               on-success: "FACILITIES. The building's starting to listen to you."
               on-fail: "Caught. Take the badge, then use it: the lights, the vent, the blinds.")

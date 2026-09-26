@@ -33,7 +33,7 @@
           (phantom guard guard))
 
   (export make-practice practice? practice-reset! practice-tick! practice-note-command!
-          practice-reset-room! practice-crash practice-lesson practice-done? practice-index
+          practice-reset-room! practice-start-walker practice-crash practice-lesson practice-done? practice-index
           practice-lines-said DARK-VIS CRASH-KEEP)
 
   (begin
@@ -243,19 +243,26 @@
     (define (practice-reset-room! pr core)
       (let* ((cur (max 0 (vector-ref pr 2)))
              (l (lesson pr cur))
-             (u (vector-ref (vector-ref pr 7) cur))
-             (coll (vector-ref (play-guard-world core) 1))
-             (x (lesson-x l)) (y (lesson-y l))
-             (z (or (collide-floor coll x y -1.0 1.0) 0.0)))
+             (u (vector-ref (vector-ref pr 7) cur)))
         (play-reset-room! core (lesson-rooms l) u)
         (when (>= u 0) (play-set-unit! core u))
         ;; this visit's tracking starts over; the lines said stay said
         (let ((t (track pr cur)))
           (vector-set! t 3 CALM) (vector-set! t 4 #f) (vector-set! t 5 #f)
           (vector-set! t 6 0.0) (vector-set! t 7 #f) (vector-set! t 8 #f))
-        ;; the floor file's facing is degrees anticlockwise from east; the
-        ;; walker's yaw is from north
+        (lesson-walker pr core cur)))
+
+    ;; You at lesson i's start, facing as the floor file says: its facing is
+    ;; degrees anticlockwise from east (the README), the walker's yaw is from
+    ;; north. (play-start-walker passes floor 14's start facing through as
+    ;; yaw, which its replays are built on; the sim places its own.)
+    (define (lesson-walker pr core i)
+      (let* ((l (lesson pr i))
+             (coll (vector-ref (play-guard-world core) 1))
+             (x (lesson-x l)) (y (lesson-y l))
+             (z (or (collide-floor coll x y -1.0 1.0) 0.0)))
         (make-walker x y z (* (- (lesson-facing l) 90.0) (/ 3.141592653589793 180.0)))))
+    (define (practice-start-walker pr core) (lesson-walker pr core 0))
 
     ;; For the shell (the API, §2): ((TEXT AGE SPEAKER) ...), newest first.
     (define (practice-crash pr)

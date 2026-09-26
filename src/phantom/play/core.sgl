@@ -342,8 +342,13 @@
     (define (device-approaches data gw)
       (let* ((nav (guard-world-nav gw))
              (f (make-field nav))
-             (route (play-route data))
-             (_ (nav-field! nav f (vector-ref route 0) (vector-ref route 1) 0.0 #f #f #f))
+             ;; grown from where you arrive, which every room you can reach
+             ;; connects to (PRACTICE: the sim's first unit is behind glass, and
+             ;; a field from its route reached only its booth; on floor 14 the
+             ;; arrival and the route's first point share the lobby, so its
+             ;; approaches are as they were)
+             (start (play-start data))
+             (_ (nav-field! nav f (vector-ref start 0) (vector-ref start 1) 0.0 #f #f #f))
              (dist (field-dist f))
              (rooms (play-rooms data))
              (ds (play-devices data)))
