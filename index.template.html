@@ -89,7 +89,7 @@
   </div>
   <div id="status"></div>
   <div id="how">
-    <span class="start">Press any key, click or tap to start.<br></span>
+    <span class="start">Choose PRACTICE (your first run: Crash walks you through it) or INFILTRATE: arrows or W/S, then any key; or tap one.<br></span>
     <b>Get the FACILITIES badge from the FM office desk, then leave by the stairwell door under the mezzanine. One of Gibson's security units patrols; if it hunts you down, the floor restarts.</b><br>
     <span class="deck"><b>Your deck:</b> <span class="desk">aim at a phone, a printer, a vent, the blinds or a ceiling light and hold the right mouse button (or T).</span><span class="phone">aim at a phone, a printer, a vent, the blinds or a ceiling light and hold DECK.</span> The prompt at the bottom left says what it will do; STAFF can ring and print, the badge makes you FACILITIES. The camera by the lifts watches the lit floor it tints.<br></span>
     <span class="desk">Click, then WASD and mouse. Shift sneaks (it hears you on hard floors), C crouches, Q and E lean. F uses: the corridor's light panel (it wants the badge; the dark hides you) and the stairwell door's card reader. A ringing phone or a running printer draws the guard to look. The eye at the bottom shows how visible you are.</span>
@@ -153,7 +153,17 @@
       window.AudioContext = Wrapped;
       if (window.webkitAudioContext) window.webkitAudioContext = Wrapped;
     })();
-    var floor =(params.get("floor") || (params.has("title") ? "root-room" : "14-slice")).replace(/[^A-Za-z0-9_-]/g, "");
+    // The flow's floor (PRACTICE, D38): the title's menu offers PRACTICE (floor
+    // sim) and INFILTRATE (floor 14). One floor loads behind the title: sim
+    // for a first-timer, 14 once practice has been finished on this browser
+    // (localStorage phantomburn.practiced); picking the other reloads with
+    // ?go=FLOOR, which goes straight to it.
+    var flowQuery = params.get("play") !== "0" && !params.has("title") &&
+      !["play", "title", "floor", "view", "shot", "card", "hud", "trace", "auto"].some(function (k) { return params.has(k); });
+    var practiced = (function () { try { return params.has("practiced") || localStorage.getItem("phantomburn.practiced") === "1"; } catch (e) { return params.has("practiced"); } })();
+    var go = (params.get("go") || "").replace(/[^A-Za-z0-9_-]/g, "");
+    var floor = (params.get("floor") || go || (params.has("title") ? "root-room" : (flowQuery && !practiced ? "sim" : "14-slice")))
+      .replace(/[^A-Za-z0-9_-]/g, "");
     var dir = floor === "stand-in" ? "assets/stand-in/" : "assets/floors/" + floor + "/";
     var collideFile = floor === "stand-in" ? "floor14.collide.b64" : "collide.b64";
     function withApp(fn) {
@@ -186,8 +196,7 @@
     // a query with none of the developer's doors, so ?play=1 skips the
     // title and the gates' own queries (floor=, hud=, title=1, ...) load
     // exactly what they did.
-    var flow = playing && !["play", "title", "floor", "view", "shot", "card", "hud", "trace", "auto"]
-      .some(function (k) { return params.has(k); });
+    var flow = playing && flowQuery;
     if (flow) document.body.classList.add("flow");
     var how = document.getElementById("how");
     var hideTimer = null;
@@ -211,6 +220,14 @@
         var line = Array.prototype.join.call(arguments, " ");
         if (line === "phantom-burn: mode title") { document.body.classList.add("ontitle"); showHow(); }
         if (line === "phantom-burn: mode game") document.body.classList.remove("ontitle");
+        // the menu picked the floor that is not loaded: reload onto it
+        if (line.indexOf("phantom-burn: go ") === 0) {
+          var q = new URLSearchParams(location.search);
+          q.set("go", line.slice("phantom-burn: go ".length).replace(/[^A-Za-z0-9_-]/g, ""));
+          location.search = q.toString();
+        }
+        // practice finished: INFILTRATE is the default from now on
+        if (line === "phantom-burn: practice done") { try { localStorage.setItem("phantomburn.practiced", "1"); } catch (e) { /* private window */ } }
         log1.apply(null, arguments);
       };
     })();
@@ -230,7 +247,7 @@
       if (app.ready && app.ready.then) app.ready.then(function () { status.textContent = ""; });
       var booted = app.ready && app.ready.then ? app.ready : Promise.resolve();
       booted.then(function () {
-        app.dispatch("params", location.search.replace(/^\?/, "") + (flow ? "&flow=1" : ""));
+        app.dispatch("params", location.search.replace(/^\?/, "") + (flow ? "&flow=1" : "") + (practiced ? "&practiced=1" : ""));
         app.dispatch("floor", floor);
         app.dispatch("dpr", String(window.devicePixelRatio || 1));
         window.addEventListener("resize", function () { app.dispatch("dpr", String(window.devicePixelRatio || 1)); });
@@ -285,7 +302,13 @@
       }).catch(function (e) { status.textContent = String(e.message || e); });
 
       // a click or a tap on the title starts (a key does too, in the game)
-      canvas.addEventListener("pointerdown", function () { if (flow) app.dispatch("press", "start"); });
+      // on the title: where the tap or click landed, in canvas pixels (the
+      // menu's items are targets); in the game it is the pointer lock's click
+      canvas.addEventListener("pointerdown", function (e) {
+        if (!flow || !document.body.classList.contains("ontitle")) return;
+        var r = canvas.getBoundingClientRect();
+        app.dispatch("tap", Math.round((e.clientX - r.left) * canvas.width / r.width) + "," + Math.round((e.clientY - r.top) * canvas.height / r.height));
+      });
       canvas.addEventListener("click", function () {
         if (document.pointerLockElement !== canvas && canvas.requestPointerLock) canvas.requestPointerLock();
       });

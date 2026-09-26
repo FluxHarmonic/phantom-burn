@@ -38,6 +38,7 @@
           (phantom game))
 
   (export deck-hud-draw! terminal-draw! deck-hud-reset! deck-hud-use-map! device-parts-update!
+          crash-lines-draw!
           map-outlines map-openings map-devices)
 
   (begin
@@ -135,6 +136,56 @@
             (draw-filled-rect bx by bw k)
             (color! C-SELECTED)
             (draw-filled-rect bx by (* bw (max 0.0 (min 1.0 prog))) k)))
+        (set-color 1.0 1.0 1.0)))
+
+    ;; --- Crash's lines on the deck (PRACTICE, D38; practice API v2 §2) --------
+    ;;
+    ;; (crash-lines-draw! w h k lines), lines = (play-mode-crash) = ((TEXT AGE
+    ;; SPEAKER) ...), newest first. Chat on the deck, never modal: stacked
+    ;; above the prompt, the newest nearest it, each wrapped to CHAT-COLS
+    ;; characters, the speaker's name first (CRASH in C-SELECTED cyan; gibson,
+    ;; on a later floor, in C-GIBSON violet with the `# ` mark). A line stays
+    ;; for CHAT-HOLD s plus a beat per 16 characters, then fades over a second;
+    ;; older lines are a little dimmer.
+    (define C-GIBSON (hex "#B36BFF"))
+    (define CHAT-COLS 52)
+    (define CHAT-HOLD 4.0)
+    (define (wrap text cols)          ; -> list of strings, broken at spaces
+      (let loop ((words (split-words text)) (line "") (out '()))
+        (cond ((null? words) (reverse (if (string=? line "") out (cons line out))))
+              ((string=? line "") (loop (cdr words) (car words) out))
+              ((> (+ (string-length line) 1 (string-length (car words))) cols) (loop words "" (cons line out)))
+              (else (loop (cdr words) (string-append line " " (car words)) out)))))
+    (define (split-words s)
+      (let loop ((i 0) (start 0) (acc '()))
+        (cond ((= i (string-length s)) (reverse (if (> i start) (cons (substring s start i) acc) acc)))
+              ((char=? (string-ref s i) #\space) (loop (+ i 1) (+ i 1) (if (> i start) (cons (substring s start i) acc) acc)))
+              (else (loop (+ i 1) start acc)))))
+    (define (crash-lines-draw! w h k lines)
+      (let* ((ox (ox-of w k)) (oy (oy-of h k)) (x (+ ox (* 6 k)))
+             (bottom (+ oy (* 228 k))))   ; above the prompt and its HOLD TO RUN
+        (let loop ((ls lines) (y bottom) (n 0))
+          (unless (null? ls)
+            (let* ((e (car ls)) (text (car e)) (age (cadr e))
+                   (speaker (if (pair? (cddr e)) (caddr e) 'crash))
+                   (gib? (eq? speaker 'gibson))
+                   (hold (+ CHAT-HOLD (/ (string-length text) 16.0)))
+                   (a (* (max 0.0 (min 1.0 (- (+ hold 1.0) age))) (if (= n 0) 1.0 0.75)))
+                   (label (if gib? "# " "CRASH  "))
+                   (rows (wrap text (- CHAT-COLS (string-length label))))
+                   (top (- y (* k 10 (length rows)))))
+              (when (> a 0.0)
+                (color! C-BG (* 0.55 a))
+                (with-blend-mode 'normal
+                  (draw-filled-rect (- x (* 3 k)) (- top (* 2 k)) (* k (+ 6 (* 6 CHAT-COLS))) (+ (* k 10 (length rows)) (* 2 k))))
+                (color! (if gib? C-GIBSON C-SELECTED) a)
+                (draw-text label x top k)
+                (color! (if gib? C-GIBSON C-TEXT) a)
+                (let rows-loop ((rs rows) (yy top))
+                  (unless (null? rs)
+                    (draw-text (car rs) (+ x (text-width label k)) yy k)
+                    (rows-loop (cdr rs) (+ yy (* 10 k))))))
+              (loop (cdr ls) (if (> a 0.0) (- top (* 4 k)) y) (+ n 1)))))
         (set-color 1.0 1.0 1.0)))
 
     ;; --- the devices' state-driven parts (v4 §1 (c)) -----------------------------

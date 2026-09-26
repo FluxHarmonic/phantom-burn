@@ -33,9 +33,10 @@
           (sigil math)
           (sigil graphics)
           (sigil geometry)
+          (phantom text)
           (phantom render))
 
-  (export title-init! title-frame! TITLE-SETTLED)
+  (export title-init! title-frame! TITLE-SETTLED title-set-menu! title-menu-hit)
 
   (begin
 
@@ -497,5 +498,53 @@ void main() {
             (draw-letters! t)
             (draw-beam! t)))
         (render-post!)
-        (render-composite! w h)
-        (end-frame)))))
+        (let ((k (render-composite! w h)))
+          (when *menu* (menu-draw! t w h k)))
+        (end-frame)))
+
+    ;; --- the menu (PRACTICE, D38) ----------------------------------------------
+    ;;
+    ;; (title-set-menu! items sel hint): the choices under the letters, the
+    ;; selected one with Crash's `> ` cursor in C-SELECTED cyan, the rest in
+    ;; C-TEXT-DIM; hint, a line under them (a first-timer's pointer at
+    ;; PRACTICE) or #f. #f for items takes the menu away. It fades in once the
+    ;; letters have landed (TITLE-SETTLED). (title-menu-hit w h x y) -> the
+    ;; index of the item at window pixel (x, y), or #f: a tap or a click.
+    (define *menu* #f)               ; (items sel hint)
+    (define (title-set-menu! items sel hint)
+      (text-init!)
+      (set! *menu* (and items (list items sel hint))))
+    (define MENU-Y 170)              ; frame pixels: the first item's top
+    (define MENU-STEP 22)
+    (define (menu-geometry w h k)    ; -> (ox oy ts)
+      (list (quotient (- w (* VIEW-W k)) 2) (quotient (- h (* VIEW-H k)) 2) (* 2 k)))
+    (define (item-x w k label ts)
+      (- (quotient w 2) (quotient (text-width (string-append "> " label) ts) 2)))
+    (define (menu-draw! t w h k)
+      (let* ((g (menu-geometry w h k)) (oy (cadr g)) (ts (caddr g))
+             (items (car *menu*)) (sel (cadr *menu*)) (hint (caddr *menu*))
+             (a (max 0.0 (min 1.0 (/ (- t (- TITLE-SETTLED 0.8)) 0.6)))))
+        (when (> a 0.0)
+          (let loop ((is items) (i 0))
+            (unless (null? is)
+              (let* ((label (car is)) (y (+ oy (* k (+ MENU-Y (* i MENU-STEP)))))
+                     (x (item-x w k label ts)))
+                (if (= i sel)
+                    (begin (set-color 0.302 0.949 0.851 a) (draw-text (string-append "> " label) x y ts))
+                    (begin (set-color 0.451 0.502 0.651 a) (draw-text (string-append "  " label) x y ts))))
+              (loop (cdr is) (+ i 1))))
+          (when hint
+            (let* ((y (+ oy (* k (+ MENU-Y (* (length items) MENU-STEP) 2)))) (hs k))
+              (set-color 0.8 0.902 1.0 (* 0.8 a))
+              (draw-text hint (- (quotient w 2) (quotient (text-width hint hs) 2)) y hs)))
+          (set-color 1.0 1.0 1.0 1.0))))
+    (define (title-menu-hit w h x y)
+      (and *menu*
+           (let* ((k (max 1 (min (quotient w VIEW-W) (quotient h VIEW-H))))   ; render-composite!'s scale
+                  (g (menu-geometry w h k)) (oy (cadr g)))
+             (let loop ((i 0))
+               (and (< i (length (car *menu*)))
+                    (let ((top (+ oy (* k (+ MENU-Y (* i MENU-STEP) -6)))))
+                      (if (and (>= y top) (< y (+ top (* k MENU-STEP))))
+                          i
+                          (loop (+ i 1)))))))))))
