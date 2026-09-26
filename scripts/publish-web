@@ -163,7 +163,13 @@ deploy() {   # branch -> the deployment URL on stdout
   set -e
   cat "$WORK/deploy-$1.log" >&2
   [ "$drc" = 0 ] || { say "wrangler pages deploy to $1 failed (rc=$drc)"; exit 1; }
-  url="$(grep -o 'https://[a-z0-9.-]*\.pages\.dev' "$WORK/deploy-$1.log" | tail -1)"
+  # The FIRST pages.dev URL wrangler prints is this deployment's own
+  # (https://<id>.phantomburn.pages.dev); the last is the branch alias
+  # (preview.phantomburn.pages.dev), whose edge cache can still serve an
+  # older deployment's immutable files (P3's first preview: P2's
+  # /<slug>/phantom-burn.wasm, cf-cache-status HIT, a false fail on the
+  # missing leg). Verify the deployment itself.
+  url="$(grep -o 'https://[a-z0-9.-]*\.pages\.dev' "$WORK/deploy-$1.log" | head -1)"
   [ -n "$url" ] || { say "the deploy to $1 printed no pages.dev URL; check it by hand: node scripts/verify-live.mjs <url> $DIR"; exit 1; }
   echo "$url"
 }
