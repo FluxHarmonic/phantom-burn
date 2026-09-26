@@ -665,27 +665,36 @@ void main() {
     ;; out to RANGE) crosses 0.9 m, where play tests your chest, projected
     ;; down. Brightest on the axis, fading to the cone's edge and its range,
     ;; cut at the room's outline (walls; play's ray also stops at props).
-    ;; Blended over the floor (a tint, which a bright floor keeps; added light
-    ;; burned tile to white), and the post pass dithers it. Its tint is
+    ;; Stippled over the floor (see CONE-FRAGMENT). Its tint is
     ;; set each frame from the camera's state ((phantom deck hud)).
-    (define (cone-layout) (make-vertex-layout '((position float3) (weight float))))
+    ;; the weight rides in position.w: a lone float attribute read as ~0 here
+    (define (cone-layout) (make-vertex-layout '((position float4))))
     (define CONE-VERTEX
       "uniform mat4 view_proj;
 uniform vec4 eye;
-in vec3 position;
-in float weight;
+in vec4 position;            // xyz the floor point, w the pool's weight there
 out float v_w;
 void main() {
-  float fog = clamp(length(position - eye.xyz) / eye.w, 0.0, 1.0);
-  v_w = weight * (1.0 - fog * fog);
-  gl_Position = view_proj * vec4(position, 1.0);
+  float fog = clamp(length(position.xyz - eye.xyz) / eye.w, 0.0, 1.0);
+  v_w = position.w * (1.0 - fog * fog);
+  gl_Position = view_proj * vec4(position.xyz, 1.0);
 }
 ")
+    ;; A stipple, not a blend: each view pixel is the tint (a palette colour,
+    ;; exactly) or left alone, by a Bayer 4x4 threshold against the pool's
+    ;; strength there. A blend mixed the tint with the floor into colours the
+    ;; post pass then broke into bands (pink and yellow on the lobby's tile).
     (define CONE-FRAGMENT
       "uniform vec4 tint;          // rgb, a the strength
 in float v_w;
 out vec4 frag_color;
-void main() { frag_color = vec4(tint.rgb, clamp(tint.a * v_w, 0.0, 1.0)); }
+const float BAYER[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0,
+                                  3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+void main() {
+  int i = int(mod(gl_FragCoord.x, 4.0)) + 4 * int(mod(gl_FragCoord.y, 4.0));
+  if (tint.a * v_w <= (BAYER[i] + 0.5) / 16.0) discard;
+  frag_color = vec4(tint.rgb, 1.0);
+}
 ")
     (define *cone-pipe* #f)
     (define *cones* '())          ; ((id mesh count tint-bytevector) ...)
@@ -771,7 +780,7 @@ void main() { frag_color = vec4(tint.rgb, clamp(tint.a * v_w, 0.0, 1.0)); }
                  (and (> n 0)
                       (let ((tint (make-bytevector 16 0)))
                         ;; idle: C-SELECTED cyan, faint, until play says otherwise
-                        (f32! tint 0 0.302) (f32! tint 1 0.949) (f32! tint 2 0.851) (f32! tint 3 0.25)
+                        (f32! tint 0 0.302) (f32! tint 1 0.949) (f32! tint 2 0.851) (f32! tint 3 0.3)
                         (list (list-ref dev 0) (make-mesh (cone-layout) bv) n tint))))))))
 
     (define (build-cones! info)
