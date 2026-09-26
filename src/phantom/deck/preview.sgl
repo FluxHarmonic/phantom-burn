@@ -62,6 +62,12 @@
           ((5) '(staff #f #f 0.0 ready))
           (else '(facilities lobby-blinds blinds-close 0.0 ready)))))
 
+    ;; Crash's lines, as the sim's first room would give them (newest first)
+    (define (preview-crash t)
+      (list (list "Hold the deck on the phone. The unit hears it ring and goes to look." (max 0.0 (- t 2.0)) 'crash)
+            (list "That's a patrol unit. It walks a loop; watch it once before you move." (+ t 3.0) 'crash)
+            (list "Stay out of the light. The eye at the bottom tells you how visible you are." (+ t 9.0) 'crash)))
+
     (define ROWS
       '((fm-phone phone ring #t staff)
         (printer printer print #t staff)
@@ -99,6 +105,8 @@
                   (device-parts-update! (preview-devices t))
                   (if terminal?
                       (terminal-draw! w h k (preview-terminal t) (preview-devices t))
-                      (deck-hud-draw! w h k (preview-deck t)))))
+                      (begin
+                        (crash-lines-draw! w h k (preview-crash t))
+                        (deck-hud-draw! w h k (preview-deck t))))))
               (lambda (key) #f)
               (lambda (held?) #f)))))
