@@ -770,7 +770,7 @@ void main() { frag_color = vec4(tint.rgb * (tint.a * v_w), 1.0); }
                  (and (> n 0)
                       (let ((tint (make-bytevector 16 0)))
                         ;; idle: C-SELECTED cyan, faint, until play says otherwise
-                        (f32! tint 0 0.302) (f32! tint 1 0.949) (f32! tint 2 0.851) (f32! tint 3 0.16)
+                        (f32! tint 0 0.302) (f32! tint 1 0.949) (f32! tint 2 0.851) (f32! tint 3 0.35)
                         (list (list-ref dev 0) (make-mesh (cone-layout) bv) n tint))))))))
 
     (define (build-cones! info)
