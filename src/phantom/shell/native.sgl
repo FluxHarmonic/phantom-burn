@@ -6,7 +6,7 @@
 ;;;                [--snap] [--affine] [--trace] [--auto] [--night N] [--no-lift] [--pools G]
 ;;;                [--on all|none|c1,c3]
 ;;;                [--hide PART] [--deck-preview] [--terminal-preview]
-;;;                [--look X,Y,Z,TX,TY,TZ] [--deck-held]
+;;;                [--look X,Y,Z,TX,TY,TZ] [--deck-held] [--press KEY@SECONDS,...]
 ;;;                [--guard X,Y[,Z[,R]]] [--guard-speed V] [--guard-state S] [--guard-light L]
 ;;;   phantom-burn --title [--title-at T] [--freeze]   the title screen
 ;;;   phantom-burn --play [...]                        P1: the guard, the badge, the exit
@@ -102,7 +102,41 @@
     ;; The keys whose presses the game reads (style lab, crouch, views).
     (define PRESS-KEYS
       (map string->symbol '("c" "p" "[" "]" "/" "b" "n" "-" "=" "h" "v" "x" "7" "8" "9"
-                            "j" "k" "l" "1" "2" "3" "4" "5" "6" "0" "," "." "g" ";" "'" "f")))
+                            "j" "k" "l" "1" "2" "3" "4" "5" "6" "0" "," "." "g" ";" "'" "f"
+                            ;; the terminal's selection (P3): play takes them while it is open
+                            "w" "s" "up" "down")))
+
+    ;; --press KEY@SECONDS,...: presses at those times of play (shots of the
+    ;; terminal and the deck), as if typed then
+    (define *presses* '())      ; ((seconds . key) ...), earliest first
+    (define (presses-from s)
+      (let loop ((items (split-commas s)) (acc '()))
+        (if (null? items)
+            (let sort ((l acc) (out '()))     ; insertion, by time
+              (if (null? l) out
+                  (sort (cdr l) (let put ((o out))
+                                  (cond ((null? o) (list (car l)))
+                                        ((< (car (car l)) (car (car o))) (cons (car l) o))
+                                        (else (cons (car o) (put (cdr o)))))))))
+            (let* ((item (car items)) (at (let find ((i 0)) (cond ((= i (string-length item)) #f)
+                                                                   ((char=? (string-ref item i) #\@) i)
+                                                                   (else (find (+ i 1)))))))
+              (loop (cdr items)
+                    (if at
+                        (cons (cons (or (string->number (substring item (+ at 1) (string-length item))) 0.0)
+                                    (string->symbol (substring item 0 at)))
+                              acc)
+                        acc))))))
+    (define (split-commas s)
+      (let loop ((i 0) (start 0) (acc '()))
+        (cond ((= i (string-length s)) (reverse (cons (substring s start i) acc)))
+              ((char=? (string-ref s i) #\,) (loop (+ i 1) (+ i 1) (cons (substring s start i) acc)))
+              (else (loop (+ i 1) start acc)))))
+    (define (due-presses! elapsed)
+      (let loop ((acc '()))
+        (if (and (pair? *presses*) (<= (car (car *presses*)) elapsed))
+            (let ((k (cdr (car *presses*)))) (set! *presses* (cdr *presses*)) (loop (cons k acc)))
+            acc)))
 
     (define (pressed-keys)
       (let loop ((ks PRESS-KEYS) (acc '()))
@@ -208,6 +242,7 @@
             (let ((n (map (lambda (v) (* 1.0 (or v 0))) (numbers l))))
               (when (= (length n) 6) (apply game-place! n)))))
         (when (member "--deck-held" args) (set! *deck-held* #t))
+        (let ((p (arg-value args "--press" #f))) (when p (set! *presses* (presses-from p))))
         ;; P3: the deck's prompt or the terminal from made-up data (no play logic)
         (cond ((member "--terminal-preview" args) (game-set-play! (deck-preview-hooks #t)))
               ((member "--deck-preview" args) (game-set-play! (deck-preview-hooks #f))))
@@ -218,7 +253,7 @@
             (when (and (not captured?) (mouse-pressed? 'left))
               (set-cursor-captured! #t #f))
             (game-frame! dt (frame-width) (frame-height)
-                         (make-controls held? (pressed-keys)
+                         (make-controls held? (append (due-presses! elapsed) (pressed-keys))
                                         (if captured? (mouse-dx) 0) (if captured? (mouse-dy) 0)
                                         0.0 0.0 0.0 0.0))
             (sound-game-frame! dt (game-walker))
