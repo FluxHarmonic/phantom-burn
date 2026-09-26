@@ -42,7 +42,24 @@
          (pitch (atan dz (sqrt (+ (* dx dx) (* dy dy))))))
     (walker-step w1 (make-input 0.0 0.0 0.0 pitch #f #f #f 0) TICK C)))
 
-(define (hold p w n) (let loop ((i 0) (last #f)) (if (< i n) (loop (+ i 1) (or (play-deck! p w #t) last)) last)))
+(define (walker-looking-at x y tx ty tz)
+  (let* ((dx (- tx x)) (dy (- ty y))
+         (w1 (make-walker x y 0.0 (atan (- dx) dy)))
+         (pitch (atan (- tz (walker-eye-z w1)) (sqrt (+ (* dx dx) (* dy dy))))))
+    (walker-step w1 (make-input 0.0 0.0 0.0 pitch #f #f #f 0) TICK C)))
+
+;; A play with the badge in hand: walked to from the FM office's door.
+(define FORWARD (make-input 0.0 1.0 0.0 0.0 #f #f #f 0))
+(define (with-badge)
+  (let ((p (fresh)))
+    (let loop ((i 0) (w (make-walker 24.0 17.6 0.0 0.0)))
+      (if (or (play-badge? p) (>= i 120))
+          p
+          (let ((w (walker-step w FORWARD TICK C)))
+            (play-tick! p w on? 1.0 2.0)
+            (loop (+ i 1) w))))))
+
+(define (hold p w n) (let loop ((i 0) (last #f)) (if (< i n) (loop (+ i 1) (or (play-deck! p w #t on?) last)) last)))
 
 (test-group "the floor's devices"
   (test "floor 14 has its six devices, with their tiers"
@@ -59,11 +76,11 @@
 (test-group "the deck"
   (test "aimed at the phone from 2 m, a 0.8 s hold rings it (STAFF)"
     (let* ((p (fresh)) (w (walker-at-looking 17.45 15.85 PHONE)))
-      (play-deck! p w #f)
-      (display (list 'aim (deck-list (play-deck p) (play-devices-state p) (play-tier p)))) (newline)
+      (play-deck! p w #f on?)
+      (display (list 'aim (deck-list (play-deck p) (play-devices-state p) (play-tier p) on?))) (newline)
       (assert-equal PHONE (deck-target (play-deck p)))
       (assert-false (deck-blocked? (play-deck p)))
-      (assert-equal 'ring (deck-command (play-deck p) (play-devices-state p)))
+      (assert-equal 'ring (deck-command (play-deck p) (play-devices-state p) on?))
       ;; not yet at 0.75 s
       (hold p w 45)
       (assert-equal 'idle (devices-state (play-devices-state p) PHONE))
@@ -71,17 +88,17 @@
         (assert-true (and (pair? r) (eq? (car r) 'run)))
         (assert-equal 'ringing (devices-state (play-devices-state p) PHONE)))
       ;; one hold, one command: still held, nothing more
-      (assert-false (play-deck! p w #t))
+      (assert-false (play-deck! p w #t on?))
       (assert-true (memq 'deck-confirm (map car (play-take-events! p))))))
   (test "letting go early runs nothing"
     (let* ((p (fresh)) (w (walker-at-looking 17.45 15.85 PHONE)))
       (hold p w 30)
-      (play-deck! p w #f)
+      (play-deck! p w #f on?)
       (hold p w 30)
       (assert-equal 'idle (devices-state (play-devices-state p) PHONE))))
   (test "the vent is FACILITIES: denied to STAFF"
     (let* ((p (fresh)) (w (walker-at-looking 16.5 8.3 VENT)))
-      (play-deck! p w #f)
+      (play-deck! p w #f on?)
       (assert-equal VENT (deck-target (play-deck p)))
       (let ((r (hold p w 60)))
         (assert-true (and (pair? r) (eq? (car r) 'deny))))
@@ -89,21 +106,41 @@
       (assert-equal 'off (devices-state (play-devices-state p) VENT))))
   (test "the printer from 3 m with a clear view: not blocked by its own body (the shell's report)"
     (let* ((p (fresh)) (w (walker-at-looking 23.2 15.8 PRINTER)))
-      (play-deck! p w #f)
+      (play-deck! p w #f on?)
       (assert-equal PRINTER (deck-target (play-deck p)))
       (assert-false (deck-blocked? (play-deck p)))
-      (assert-equal 'print (deck-command (play-deck p) (play-devices-state p)))))
+      (assert-equal 'print (deck-command (play-deck p) (play-devices-state p) on?))))
   (test "through a wall: blocked, and holding does nothing"
     (let* ((p (fresh)) (w (walker-at-looking 18.5 12.4 PHONE)))
-      (play-deck! p w #f)
+      (play-deck! p w #f on?)
       (assert-equal PHONE (deck-target (play-deck p)))
       (assert-true (deck-blocked? (play-deck p)))
       (hold p w 60)
       (assert-equal 'blocked (deck-status (play-deck p)))
       (assert-equal 'idle (devices-state (play-devices-state p) PHONE))))
+  (test "the terminal's list: the six devices, then a lights row per zone (c1 c2 c3), on by on?"
+    (let* ((p (fresh)) (l (devices-list (play-devices-state p) (lambda (c) (not (eq? c 'c2))))))
+      (display (list 'devices-list l)) (newline)
+      (assert-equal 9 (length l))
+      (assert-equal 'lights (cadr (list-ref l 6)))
+      (assert-true (equal? (list-ref (assq 'lights-c2 l) 5) 'off))
+      (assert-true (equal? (list-ref (assq 'lights-c1 l) 5) 'on))))
+  (test "a lobby light, with the badge (FACILITIES): the hold switches the lobby's zone off"
+    (let* ((p (with-badge)) (w (walker-looking-at 4.75 1.0 4.75 4.75 5.9)))
+      (play-deck! p w #f on?)
+      (display (list 'light-aim (deck-list (play-deck p) (play-devices-state p) (play-tier p) on?))) (newline)
+      (assert-equal 'facilities (play-tier p))
+      (assert-equal 'lights-off (deck-command (play-deck p) (play-devices-state p) on?))
+      (let ((r (hold p w 60)))
+        (assert-true (equal? r '(lights c2 lights-off))))))
+  (test "a lobby light as STAFF: denied"
+    (let* ((p (fresh)) (w (walker-looking-at 4.75 1.0 4.75 4.75 5.9)))
+      (play-deck! p w #f on?)
+      (let ((r (hold p w 60)))
+        (assert-true (and (pair? r) (eq? (car r) 'deny))))))
   (test "looking away: no target"
     (let* ((p (fresh)) (w (make-walker 17.45 15.85 0.0 3.14159)))
-      (play-deck! p w #f)
+      (play-deck! p w #f on?)
       (assert-equal -1 (deck-target (play-deck p))))))
 
 ;; The unit, from point leg of its route (0: the lobby; 2: the office), for n ticks

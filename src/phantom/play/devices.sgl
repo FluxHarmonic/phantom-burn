@@ -23,6 +23,7 @@
 (define-library (phantom play devices)
   (import (sigil core)
           (sigil math)
+          (sigil list)
           (phantom play data)
           (phantom guard sense))
 
@@ -30,7 +31,7 @@
           devices-state devices-timer devices-state-set! devices-command devices-run!
           devices-list tier-allows? tier-rank
           make-deck deck? deck-reset! deck-aim! deck-step!
-          deck-target deck-blocked? deck-command deck-progress deck-status deck-list
+          deck-target deck-blocked? deck-command deck-circuit deck-progress deck-status deck-list
           RING-TIME PRINT-TIME VENT-TIME DECK-RANGE DECK-CONE DECK-HOLD DECK-DONE-SHOW)
 
   (begin
@@ -60,11 +61,34 @@
 
     ;; The devices: a vector
     ;;  0 tag  1 data  2 states (a vector of symbols, by device index)
-    ;;  3 timers (a vector of seconds)
-    (define (devices? v) (and (vector? v) (= (vector-length v) 4) (eq? (vector-ref v 0) 'devices)))
+    ;;  3 timers (a vector of seconds)  4 the lighting zones: one per
+    ;;  switchable circuit with fixtures, #(id circuit x y z) at its fixtures'
+    ;;  middle (the terminal's lights rows and glyphs)
+    (define (devices? v) (and (vector? v) (= (vector-length v) 5) (eq? (vector-ref v 0) 'devices)))
     (define (make-devices data)
       (let ((n (device-count data)))
-        (devices-reset! (vector 'devices data (make-vector n 'idle) (make-vector n 0.0)))))
+        (devices-reset! (vector 'devices data (make-vector n 'idle) (make-vector n 0.0) (lighting-zones data)))))
+
+    (define (lighting-zones data)
+      (let* ((fs (vector->list (play-fixtures data)))
+             (circuits (let loop ((l fs) (acc '()))
+                         (cond ((null? l) (reverse acc))
+                               ((memq (vector-ref (car l) 3) acc) (loop (cdr l) acc))
+                               (else (loop (cdr l) (cons (vector-ref (car l) 3) acc)))))))
+        (list->vector
+          (map (lambda (c)
+                 (let* ((mine (filter (lambda (f) (eq? (vector-ref f 3) c)) fs))
+                        (n (* 1.0 (length mine)))
+                        (sum (lambda (k) (fold-left (lambda (a f) (+ a (vector-ref f k))) 0.0 mine))))
+                   (vector (string->symbol (string-append "lights-" (symbol->string c))) c
+                           (/ (sum 0) n) (/ (sum 1) n) (/ (sum 2) n))))
+               circuits))))
+    (define (zone-id dv c)
+      (let ((zs (vector-ref dv 4)))
+        (let loop ((i 0))
+          (cond ((>= i (vector-length zs)) c)
+                ((eq? (vector-ref (vector-ref zs i) 1) c) (vector-ref (vector-ref zs i) 0))
+                (else (loop (+ i 1)))))))
 
     (define (initial-state kind)
       (case kind ((vent) 'off) ((blinds) 'open) (else 'idle)))
@@ -125,10 +149,15 @@
             (loop (+ i 1))))))
 
     ;; For the shell (the API, §2): ((ID KIND X Y Z STATE) ...), STATE a
-    ;; symbol, or (STATE SECONDS-LEFT) for a phone ringing and a vent on.
-    (define (devices-list dv)
+    ;; symbol, or (STATE SECONDS-LEFT) for a phone ringing and a vent on;
+    ;; then a lights row per lighting zone, (lights-C lights X Y Z on|off)
+    ;; by on?, the circuits' state.
+    (define (devices-list dv on?)
       (let ((ds (play-devices (vector-ref dv 1))))
-        (let loop ((i (- (vector-length ds) 1)) (acc '()))
+        (let loop ((i (- (vector-length ds) 1))
+                   (acc (map (lambda (z) (list (vector-ref z 0) 'lights (vector-ref z 2) (vector-ref z 3) (vector-ref z 4)
+                                               (if (on? (vector-ref z 1)) 'on 'off)))
+                             (vector->list (vector-ref dv 4)))))
           (if (< i 0)
               acc
               (let* ((d (vector-ref ds i)) (s (devices-state dv i)))
@@ -155,53 +184,78 @@
     (define (deck-progress k) (vector-ref k 3))
     (define (deck-status k) (vector-ref k 4))
 
+    ;; The deck's targets are the devices (index 0 to n-1) and the floor's
+    ;; switchable ceiling lights, its fixtures (index n and on), each
+    ;; switching its whole circuit (design §3: every lighting zone from the
+    ;; deck, FACILITIES).
+    (define (n-devices dv) (vector-length (play-devices (vector-ref dv 1))))
+    (define (n-targets dv) (+ (n-devices dv) (fixture-count (vector-ref dv 1))))
+    (define (fixture-of dv t) (vector-ref (play-fixtures (vector-ref dv 1)) (- t (n-devices dv))))
+    (define (target-light? dv t) (>= t (n-devices dv)))
+    (define (target-x dv t) (if (target-light? dv t) (vector-ref (fixture-of dv t) 0) (device-x (device-of dv t))))
+    (define (target-y dv t) (if (target-light? dv t) (vector-ref (fixture-of dv t) 1) (device-y (device-of dv t))))
+    ;; where you aim at it (under a fixture's diffuser: it hangs from the ceiling)
+    (define (target-aim-z dv t)
+      (if (target-light? dv t)
+          (- (vector-ref (fixture-of dv t) 2) 0.05)
+          (let ((d (device-of dv t))) (+ (device-z d) (aim-up (device-kind d))))))
+    (define (target-need dv t) (if (target-light? dv t) 'facilities (device-tier (device-of dv t))))
+    ;; a light's circuit, else #f
+    (define (target-circuit dv t) (and (>= t 0) (target-light? dv t) (vector-ref (fixture-of dv t) 3)))
+    ;; for the prompt: a device's ID, a light's zone (lights-C)
+    (define (target-id dv t) (if (target-light? dv t) (zone-id dv (target-circuit dv t)) (device-id (device-of dv t))))
+
     ;; What the eye at (ex ey ez), looking along yaw (0 north, counter-
-    ;; clockwise) and pitch (up), aims at: the device nearest the middle of
+    ;; clockwise) and pitch (up), aims at: the target nearest the middle of
     ;; the view within the range and cone, into (deck-target k) and
     ;; (deck-blocked? k).
     (define (deck-aim! k dv coll glass ex ey ez yaw pitch)
-      (let* ((ds (play-devices (vector-ref dv 1)))
-             (cp (cos pitch))
-             (vx (* (- (sin yaw)) cp)) (vy (* (cos yaw) cp)) (vz (sin pitch)))
+      (let* ((cp (cos pitch))
+             (vx (* (- (sin yaw)) cp)) (vy (* (cos yaw) cp)) (vz (sin pitch))
+             (n (n-targets dv)))
         (let loop ((i 0) (best -1) (bc DECK-CONE))
-          (if (< i (vector-length ds))
-              (let* ((d (vector-ref ds i))
-                     (dx (- (device-x d) ex)) (dy (- (device-y d) ey)) (dz (- (+ (device-z d) (aim-up (device-kind d))) ez))
+          (if (< i n)
+              (let* ((dx (- (target-x dv i) ex)) (dy (- (target-y dv i) ey)) (dz (- (target-aim-z dv i) ez))
                      (len (sqrt (+ (* dx dx) (* dy dy) (* dz dz))))
                      (c (if (> len 1e-6) (/ (+ (* dx vx) (* dy vy) (* dz vz)) len) -1.0)))
                 (if (and (<= len DECK-RANGE) (> c bc))
                     (loop (+ i 1) i c)
                     (loop (+ i 1) best bc)))
               (begin
-                ;; a hold is on one device: aiming off it starts over
+                ;; a hold is on one target: aiming off it starts over
                 (unless (= best (vector-ref k 1)) (vector-set! k 3 0.0))
                 (vector-set! k 1 best)
                 (vector-set! k 2
                              (and (>= best 0)
-                                  (let* ((d (vector-ref ds best))
-                                         (dx (- (device-x d) ex)) (dy (- (device-y d) ey))
-                                         (dz (- (+ (device-z d) (aim-up (device-kind d))) ez))
+                                  (let* ((dx (- (target-x dv best) ex)) (dy (- (target-y dv best) ey))
+                                         (dz (- (target-aim-z dv best) ez))
                                          (len (sqrt (+ (* dx dx) (* dy dy) (* dz dz))))
                                          (f (if (> len AIM-BACK) (/ (- len AIM-BACK) len) 0.0)))
                                     (not (sight-clear? coll glass ex ey ez
                                                        (+ ex (* f dx)) (+ ey (* f dy)) (+ ez (* f dz)))))))
                 k)))))
 
-    ;; The command on the aimed device, or #f.
-    (define (deck-command k dv)
-      (and (>= (deck-target k) 0) (devices-command dv (deck-target k))))
+    ;; The command on the aimed target, or #f; on? is the circuits' state.
+    (define (deck-command k dv on?)
+      (let ((t (deck-target k)))
+        (cond ((< t 0) #f)
+              ((target-light? dv t) (if (on? (target-circuit dv t)) 'lights-off 'lights-on))
+              (else (devices-command dv t)))))
+    (define (deck-circuit k dv) (target-circuit dv (deck-target k)))
 
-    ;; One tick of the deck with held? the deck's hold and tier the runner's.
-    ;; Returns what happened, for the caller to act on and play:
-    ;;   (hold)                   a hold began on a device it may command
-    ;;   (run INDEX COMMAND)      the hold completed: the caller runs it
-    ;;   (deny INDEX)             held on a device beyond the tier
+    ;; One tick of the deck with held? the deck's hold, tier the runner's and
+    ;; on? the circuits' state. Returns what happened, for the caller to act
+    ;; on and play:
+    ;;   (hold)                   a hold began on a target it may command
+    ;;   (run INDEX COMMAND)      the hold completed: the caller runs it (a
+    ;;                            light's: (deck-circuit k dv) is its circuit)
+    ;;   (deny INDEX)             held on a target beyond the tier
     ;;   #f                       nothing
-    (define (deck-step! k dv held? tier dt)
+    (define (deck-step! k dv held? tier dt on?)
       (let* ((t (deck-target k))
              (was (vector-ref k 7))
-             (cmd (deck-command k dv))
-             (need (and (>= t 0) (device-tier (vector-ref (play-devices (vector-ref dv 1)) t))))
+             (cmd (deck-command k dv on?))
+             (need (and (>= t 0) (target-need dv t)))
              (allowed (and need (tier-allows? tier need)))
              (result #f))
         (vector-set! k 7 held?)
@@ -236,11 +290,12 @@
           (unless (memq (vector-ref k 4) '(done denied)) (vector-set! k 4 'holding)))
         result))
 
-    ;; For the shell (the API, §2): (TIER TARGET COMMAND PROGRESS STATUS).
-    (define (deck-list k dv tier)
+    ;; For the shell (the API, §2): (TIER TARGET COMMAND PROGRESS STATUS);
+    ;; a light's TARGET is its zone (lights-C).
+    (define (deck-list k dv tier on?)
       (let ((t (deck-target k)))
         (list tier
-              (and (>= t 0) (device-id (vector-ref (play-devices (vector-ref dv 1)) t)))
-              (deck-command k dv)
+              (and (>= t 0) (target-id dv t))
+              (deck-command k dv on?)
               (deck-progress k)
               (deck-status k))))))

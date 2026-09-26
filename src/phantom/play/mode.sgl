@@ -128,10 +128,10 @@
 
     ;; For the shell: the devices' states and the deck's prompt (§2).
     (define (play-mode-devices)
-      (if *core* (devices-list (play-devices-state *core*)) '()))
+      (if *core* (devices-list (play-devices-state *core*) render-circuit-on?) '()))
     (define (play-mode-deck)
       (if *core*
-          (deck-list (play-deck *core*) (play-devices-state *core*) (play-tier *core*))
+          (deck-list (play-deck *core*) (play-devices-state *core*) (play-tier *core*) render-circuit-on?)
           (list 'staff #f #f 0.0 'ready)))
 
     (define (command-line cmd)
@@ -154,6 +154,9 @@
              ((blinds-open) (render-circuit-set! 'city #t))
              (else #f))
            (let ((line (command-line (caddr r)))) (when line (say! line))))
+          ((lights)
+           (render-circuit-set! (cadr r) (eq? (caddr r) 'lights-on))
+           (say! (if (eq? (caddr r) 'lights-on) "LIGHTS ON" "LIGHTS OFF")))
           ((deny) (say! "YOUR TIER CANNOT COMMAND THAT"))
           (else #f))))
 
@@ -271,7 +274,7 @@
            (set! *use* #f)
            (apply-use! (play-use! *core* w render-circuit-on?)))
          (set! *message-t* (max 0.0 (- *message-t* TICK)))
-         (apply-deck! (play-deck! *core* w *deck-held*))
+         (apply-deck! (play-deck! *core* w *deck-held* render-circuit-on?))
          (let ((o (if (eq? (play-outcome *core*) 'won)
                       'won
                       (play-tick! *core* w render-circuit-on? (render-night) (render-pools)))))

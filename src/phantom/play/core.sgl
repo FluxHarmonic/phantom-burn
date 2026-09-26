@@ -337,28 +337,39 @@
            (or (= a b)
                (= (room-group (vector-ref (play-rooms data) a)) (room-group (vector-ref (play-rooms data) b))))))
 
-    ;; The deck, once a tick with held? its hold (the caller's input): aims
-    ;; from the walker's eye, steps the hold, and runs a completed command.
-    ;; Returns deck-step!'s result ((hold), (run INDEX COMMAND), (deny
-    ;; INDEX) or #f).
-    (define (play-deck! p w held?)
+    ;; The deck, once a tick with held? its hold (the caller's input) and on?
+    ;; the circuits' state: aims from the walker's eye, steps the hold, and
+    ;; runs a completed command on a device. Returns what happened:
+    ;;   (hold) (deny INDEX) (run INDEX COMMAND) as deck-step! says
+    ;;   (lights CIRCUIT lights-off|lights-on)  a light's zone switched: the
+    ;;                                    caller switches it (the renderer
+    ;;                                    holds the state, as for a panel)
+    ;;   #f
+    (define (play-deck! p w held? on?)
       (if (not (eq? (vector-ref p 8) 'playing))
           #f
           (let* ((data (vector-ref p 1)) (dv (vector-ref p 29)) (k (vector-ref p 30))
                  (coll (vector-ref (vector-ref p 2) 1)))
             (deck-aim! k dv coll (play-glass data) (walker-eye-x w) (walker-eye-y w) (walker-eye-z w)
                        (walker-yaw w) (walker-pitch w))
-            (let ((r (deck-step! k dv held? (play-tier p) TICK)))
-              (when (pair? r)
-                (case (car r)
-                  ((hold) (event! p 'deck-hold (walker-x w) (walker-y w)))
-                  ((deny) (event! p 'deck-deny (walker-x w) (walker-y w)))
-                  ((run)
-                   (let* ((i (cadr r)) (d (vector-ref (play-devices data) i))
-                          (ev (devices-run! dv i (caddr r))))
+            (let ((r (deck-step! k dv held? (play-tier p) TICK on?)))
+              (if (pair? r)
+                  (case (car r)
+                    ((hold) (event! p 'deck-hold (walker-x w) (walker-y w)) r)
+                    ((deny) (event! p 'deck-deny (walker-x w) (walker-y w)) r)
+                    ((run)
                      (event! p 'deck-confirm (walker-x w) (walker-y w))
-                     (when ev (event! p ev (device-x d) (device-y d)))))))
-              r))))
+                     (let ((c (deck-circuit k dv)))
+                       (if c
+                           ;; a lighting zone: the panel's click, where you are
+                           (begin (event! p (if (eq? (caddr r) 'lights-off) 'panel-off 'panel-on) (walker-x w) (walker-y w))
+                                  (list 'lights c (caddr r)))
+                           (let* ((i (cadr r)) (d (vector-ref (play-devices data) i))
+                                  (ev (devices-run! dv i (caddr r))))
+                             (when ev (event! p ev (device-x d) (device-y d)))
+                             r))))
+                    (else r))
+                  r)))))
 
     ;; --- incidents (design §5, D19) ------------------------------------------------
 

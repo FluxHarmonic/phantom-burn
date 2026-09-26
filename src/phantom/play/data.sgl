@@ -30,7 +30,8 @@
           room-name room-floor room-ceiling room-group room-circuit room-crouch-only?
           edge-kind edge-a edge-b edge-x edge-y edge-width edge-zlo edge-zhi edge-walk edge-sight edge-sound edge-needs
           play-devices device-count device-id device-kind device-x device-y device-z device-facing device-tier
-          device-room device-args device-index)
+          device-room device-args device-index
+          play-fixtures fixture-count)
 
   (begin
 
@@ -51,7 +52,10 @@
     ;;  20 noise ambient (an alist)  21 room grid starts  22 room grid layers
     ;;  (z room, 2 per layer; on the light grid's cells)
     ;;  P3: 23 devices (vector of device vectors, in play.sexp's order)
-    (define (play-data? d) (and (vector? d) (= (vector-length d) 24) (eq? (vector-ref d 0) 'play-data)))
+    ;;  24 fixtures: the switchable ceiling lights, #(x y z circuit) each
+    (define (play-data? d) (and (vector? d) (= (vector-length d) 25) (eq? (vector-ref d 0) 'play-data)))
+    (define (play-fixtures d) (vector-ref d 24))
+    (define (fixture-count d) (vector-length (vector-ref d 24)))
     (define (play-rooms d) (vector-ref d 15))
     (define (play-edges d) (vector-ref d 16))
     (define (play-surface-noise d) (vector-ref d 17))
@@ -214,6 +218,10 @@
                     (map (lambda (v) (vector (car v) (cadr v) (flo (list-ref v 2)) (flo (list-ref v 3)) (flo (list-ref v 4))
                                              (flo (list-ref v 5)) (list-ref v 6) (list-ref v 7)
                                              (list->vector (map flo (drop v 8)))))
+                         (if e (cdr e) '()))))
+                (let ((e (assq 'fixtures datum)))
+                  (list->vector
+                    (map (lambda (v) (vector (flo (car v)) (flo (cadr v)) (flo (caddr v)) (cadddr v)))
                          (if e (cdr e) '())))))))
 
     ;; The room grid: (roomgrid N k z room ...) on the light grid's cells,
