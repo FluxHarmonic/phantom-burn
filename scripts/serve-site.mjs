@@ -18,6 +18,10 @@
 //               topics/cloudflare-pages-serves-index-for-a-missing-path.
 //   pretty URLs a directory asked for without its slash is a 308 to the slash;
 //               /x/index.html is a 308 to /x/.
+//   _redirects  the tree's root _redirects file: "FROM TO [STATUS]" per line,
+//               the first matching rule wins, a trailing /* in FROM carries
+//               the rest of the path into :splat in TO, the status defaults to
+//               302 (phantomburn.net keeps /p-<old>/* -> /beta/:splat 301)
 //   hidden      _headers and _redirects are consumed, not served (404).
 import http from "node:http";
 import https from "node:https";
@@ -64,10 +68,19 @@ export function headersFor(rules, urlPath) {
 
 // The request handler for the tree at ROOT. onRequest(method, path, status)
 // is called for every request, for a caller that wants the log.
+export function parseRedirects(text) {
+  return text.split("\n").map((l) => l.replace(/#.*/, "").trim()).filter(Boolean).map((l) => {
+    const [from, to, status] = l.split(/\s+/);
+    return { from, to, status: status ? Number(status) : 302 };
+  });
+}
+
 export function createHandler(root, onRequest = () => {}) {
   root = path.resolve(root);
   const hfile = path.join(root, "_headers");
   const rules = fs.existsSync(hfile) ? parseHeaders(fs.readFileSync(hfile, "utf8")) : [];
+  const rfile = path.join(root, "_redirects");
+  const redirects = fs.existsSync(rfile) ? parseRedirects(fs.readFileSync(rfile, "utf8")) : [];
   const inside = (fp) => fp === root || fp.startsWith(root + path.sep);
   const isFile = (fp) => { try { return fs.statSync(fp).isFile(); } catch { return false; } };
   const isDir = (fp) => { try { return fs.statSync(fp).isDirectory(); } catch { return false; } };
@@ -107,6 +120,13 @@ export function createHandler(root, onRequest = () => {}) {
     if (!inside(fp)) { res.writeHead(403).end(); onRequest(method, urlPath, 403); return; }
     const base = path.basename(urlPath);
     if (urlPath === "/_headers" || urlPath === "/_redirects") return notFound(res, method, urlPath);
+    for (const r of redirects) {
+      const splat = r.from.endsWith("/*") ? (urlPath.startsWith(r.from.slice(0, -1)) ? urlPath.slice(r.from.length - 1) : null)
+                                          : (urlPath === r.from ? "" : null);
+      if (splat !== null) {
+        res.writeHead(r.status, { location: r.to.replace(":splat", splat) }).end(); onRequest(method, urlPath, r.status); return;
+      }
+    }
     if (base === "index.html") {
       const to = urlPath.slice(0, -"index.html".length);
       res.writeHead(308, { location: to }).end(); onRequest(method, urlPath, 308); return;

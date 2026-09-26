@@ -7,20 +7,22 @@
 // Serves the tree on loopback through scripts/serve-site.mjs (Pages' rules:
 // the tree's own _headers, real 404s from 404.html, pretty URLs) and checks:
 //   manifest   the tree still hashes to build/site.manifest
-//   secret     the slug appears in no public file (/, 404, robots, _headers)
-//   root       / is 200 html with no link (<a) and no slug
+//   old-path   the game's first path (each _redirects source) is in no public
+//              file but _redirects, and has no directory in the tree
+//   root       / is 200 html with no link (<a) and no game path
 //   robots     /robots.txt disallows everything
 //   noindex    every response carries X-Robots-Tag: noindex
 //   files      every file in the manifest is served 200 byte for byte, and
 //              nothing but .html is served as html
 //   missing    a missing path is a 404 with 404.html's body, at the root and
 //              under the slug; /_headers is not served
-//   slash      /<slug> redirects (308) to /<slug>/
+//   slash      /<game> redirects (308) to /<game>/
+//   redirect   every _redirects rule answers its status and Location (the
+//              game's first path 301s to /beta/, the rest of the path kept)
 //   wasm       exactly one wasm, at w/<sha16>/phantom-burn.wasm, named by its
 //              own sha256; the page's data-wasm names it; the old
-//              /<slug>/phantom-burn.wasm is gone (a 404); the Function
-//              (functions/w/[[path]].js) and wrangler.jsonc do not name the
-//              slug (t-5b3251: in production the wasm is in R2)
+//              /<game>/phantom-burn.wasm is gone (a 404) (t-5b3251: in
+//              production the wasm is in R2)
 //   boots      the game at /<slug>/ and its title (?title=1) boot in headless
 //              Chrome through this same server with no console error, and
 //              fetched the wasm from /w/<sha16>/ and nowhere else
@@ -32,7 +34,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
-import { createHandler } from "./serve-site.mjs";
+import { createHandler, parseRedirects } from "./serve-site.mjs";
 
 const DIR = path.resolve((process.argv[2] || "").replace(/\/$/, ""));
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
@@ -55,17 +57,21 @@ const got = execFileSync(path.join(REPO, "scripts/tree-manifest"), [DIR], { enco
 want === got ? ok("manifest", `${got.split("\n").length} files match`) : bad("manifest", "the tree no longer matches its manifest; restage");
 const files = got.split("\n").map((l) => l.slice(66)).filter((f) => !f.startsWith("@"));   // @: functions/, wrangler.jsonc
 
-// the slug: the one directory at the root named like one
-const slugs = fs.readdirSync(DIR).filter((n) => /^p-[a-z2-7]{10}$/.test(n) && fs.statSync(path.join(DIR, n)).isDirectory());
-if (slugs.length !== 1) { console.log(`SETUP-FAILED: want exactly one p-<10> directory at the root, found ${slugs.length}`); process.exit(2); }
-const SLUG = slugs[0];
+// the game's path, from the manifest's header (stage-web writes # game NAME)
+const SLUG = (fs.readFileSync(MAN, "utf8").match(/^# game (\S+)$/m) || [])[1];
+if (!SLUG || !fs.statSync(path.join(DIR, SLUG), { throwIfNoEntry: false })?.isDirectory()) { console.log(`SETUP-FAILED: the manifest names no game directory (# game), or it is missing`); process.exit(2); }
+const REDIRECTS = fs.existsSync(path.join(DIR, "_redirects")) ? parseRedirects(fs.readFileSync(path.join(DIR, "_redirects"), "utf8")) : [];
 
-// secret
-for (const f of ["index.html", "404.html", "robots.txt", "_headers"]) {
-  if (!fs.existsSync(path.join(DIR, f))) { bad("secret", `${f} is missing from the tree`); continue; }
+// old-path: the first path lives on only as a redirect source
+const OLD = REDIRECTS.map((r) => r.from.replace(/\/\*$/, "").replace(/^\//, "")).filter((p, i, a) => p && a.indexOf(p) === i);
+for (const f of ["index.html", "404.html", "robots.txt", "_headers", "_redirects"]) {
+  if (!fs.existsSync(path.join(DIR, f))) { bad("old-path", `${f} is missing from the tree`); continue; }
+  if (f === "_redirects") continue;
   const t = fs.readFileSync(path.join(DIR, f), "utf8");
-  t.includes(SLUG) || t.includes(SLUG.slice(2)) ? bad("secret", `${f} names the game's path`) : ok("secret", `${f} does not name the game's path`);
+  const named = OLD.filter((p) => t.includes(p));
+  named.length ? bad("old-path", `${f} names ${named.join(" ")}`) : ok("old-path", `${f} names no old path`);
 }
+for (const p of OLD) fs.existsSync(path.join(DIR, p)) ? bad("old-path", `${p} exists in the tree`) : ok("old-path", `/${p}/ is only a redirect`);
 
 // wasm: one, content-named, and what the page points at
 const wasms = files.filter((f) => f.endsWith(".wasm"));
@@ -77,10 +83,6 @@ else ok("wasm", `the wasm is w/${m[1]}/phantom-burn.wasm, named by its sha256`);
 const page = fs.readFileSync(path.join(DIR, SLUG, "index.html"), "utf8");
 m && page.includes(`data-wasm="/w/${m[1]}/phantom-burn"`) && !page.includes('data-wasm="phantom-burn"')
   ? ok("wasm", "the page's data-wasm names it") : bad("wasm", "the page's data-wasm does not name the staged wasm");
-for (const f of ["functions/w/[[path]].js", "wrangler.jsonc"]) {
-  const t = fs.readFileSync(path.join(REPO, f), "utf8");
-  t.includes(SLUG) || t.includes(SLUG.slice(2)) ? bad("secret", `${f} names the game's path`) : ok("secret", `${f} does not name the game's path`);
-}
 
 // every request the boots make, to see where the page took its wasm from
 const asked = new Set();
@@ -106,7 +108,7 @@ robots.status === 200 && /User-agent:\s*\*/.test(robots.body.toString()) && /^Di
 // files, noindex
 let served = 0, noidx = 0;
 for (const f of files) {
-  if (f === "_headers") continue;
+  if (f === "_headers" || f === "_redirects") continue;   // consumed by Pages, never served
   const url = "/" + f.split("/").map(encodeURIComponent).join("/");
   const r = await get(url.endsWith("/index.html") ? url.slice(0, -"index.html".length) : url);
   const same = r.status === 200 && sha(r.body) === sha(fs.readFileSync(path.join(DIR, f)));
@@ -114,19 +116,28 @@ for (const f of files) {
   if (same && htmlOk) served++; else bad("files", `${f}: ${r.status} ${r.type}${same ? "" : " (bytes differ)"}`);
   if (/noindex/.test(r.robots)) noidx++; else bad("noindex", `${f} has no X-Robots-Tag: noindex`);
 }
-const nfiles = files.filter((f) => f !== "_headers").length;
+const nfiles = files.filter((f) => f !== "_headers" && f !== "_redirects").length;
 if (served === nfiles) ok("files", `${served} of ${nfiles} served byte for byte`);
 if (noidx === nfiles) ok("noindex", `all ${noidx} files carry X-Robots-Tag: noindex`);
 
 // missing
 const four = fs.existsSync(path.join(DIR, "404.html")) ? fs.readFileSync(path.join(DIR, "404.html")) : Buffer.from("(no 404.html)");
-for (const p of ["/no-such-page", `/${SLUG}/no-such-file.js`, "/p-aaaaaaaaaa/", "/_headers", `/${SLUG}/phantom-burn.wasm`, "/w/0000000000000000/phantom-burn.wasm"]) {
+for (const p of ["/no-such-page", `/${SLUG}/no-such-file.js`, "/p-aaaaaaaaaa/", "/_headers", "/_redirects", `/${SLUG}/phantom-burn.wasm`, "/w/0000000000000000/phantom-burn.wasm"]) {
   const r = await get(p);
   r.status === 404 && sha(r.body) === sha(four) && /noindex/.test(r.robots)
-    ? ok("missing", `${p.split(SLUG).join("<slug>")} is a 404 with 404.html`) : bad("missing", `${p.split(SLUG).join("<slug>")}: ${r.status}`);
+    ? ok("missing", `${p} is a 404 with 404.html`) : bad("missing", `${p}: ${r.status}`);
 }
 const slash = await get(`/${SLUG}`);
-slash.status === 308 && slash.location === `/${SLUG}/` ? ok("slash", "/<slug> redirects to /<slug>/") : bad("slash", `${slash.status} -> ${slash.location}`);
+slash.status === 308 && slash.location === `/${SLUG}/` ? ok("slash", `/${SLUG} redirects to /${SLUG}/`) : bad("slash", `${slash.status} -> ${slash.location}`);
+// redirect: each rule, with a sample path under a splat
+for (const r of REDIRECTS) {
+  const tail = r.from.endsWith("/*") ? "assets/sigil-web-app.js" : "";
+  const from = r.from.endsWith("/*") ? r.from.slice(0, -1) + tail : r.from;
+  const want = r.to.replace(":splat", tail);
+  const g = await get(from + (tail ? "?x=1" : ""));
+  g.status === r.status && g.location === want ? ok("redirect", `${from} ${r.status} -> ${want}`) : bad("redirect", `${from}: ${g.status} -> ${g.location} (want ${r.status} -> ${want})`);
+}
+if (!REDIRECTS.some((r) => r.to.startsWith(`/${SLUG}/`))) bad("redirect", `no rule sends anything to /${SLUG}/`);
 
 // boots (what the page requests is recorded from here on: the probes above are not the page's)
 asked.clear();
@@ -141,8 +152,8 @@ for (const [q, want] of [["hud=0", "game"], ["title=1", "title"]]) {
     ch.on("close", (code) => { clearTimeout(kill); resolve({ status: code, out: o }); });
   });
   const out = r.out;
-  r.status === 0 && /shot ->/.test(out) ? ok("boots", `the ${want} boots at /<slug>/?${q} with no console error`)
-    : bad("boots", `the ${want} at /<slug>/?${q}: rc ${r.status}: ${out.split("\n").filter((l) => !/^retry/.test(l)).slice(0, 3).join(" | ").slice(0, 300)}`);
+  r.status === 0 && /shot ->/.test(out) ? ok("boots", `the ${want} boots at /${SLUG}/?${q} with no console error`)
+    : bad("boots", `the ${want} at /${SLUG}/?${q}: rc ${r.status}: ${out.split("\n").filter((l) => !/^retry/.test(l)).slice(0, 3).join(" | ").slice(0, 300)}`);
 }
 server.close();
 if (m) {
@@ -150,7 +161,7 @@ if (m) {
   const other = [...asked].filter((u) => u.endsWith(".wasm") && u !== want);
   asked.has(want) && other.length === 0
     ? ok("boots", "the page fetched its wasm from /w/<sha16>/ and no other wasm")
-    : bad("boots", `the page's wasm requests: ${[...asked].filter((u) => u.endsWith(".wasm")).map((u) => u.split(SLUG).join("<slug>")).join(" ") || "none"}`);
+    : bad("boots", `the page's wasm requests: ${[...asked].filter((u) => u.endsWith(".wasm")).join(" ") || "none"}`);
 }
 
 if (fail === 0) {

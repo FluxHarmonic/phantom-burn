@@ -26,7 +26,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 
 const args = process.argv.slice(2);
 const opt = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : dflt; };
@@ -62,12 +62,19 @@ const server = http.createServer((req, res) => {
 if (!URL_BASE) await new Promise((r) => server.listen(PORT, "127.0.0.1", r));
 
 const udd = fs.mkdtempSync("/tmp/phantom-shot-chrome-");
+// The audio rule (worker-instructions): --mute-audio AND PULSE_SINK=worker-null,
+// because --mute-audio alone still opens a stream on David's audio device.
+// The null sink is made if missing (best effort: no pactl, no sink to make).
+try {
+  const sinks = execFileSync("pactl", ["list", "short", "sinks"], { encoding: "utf8" });
+  if (!/\bworker-null\b/.test(sinks)) execFileSync("pactl", ["load-module", "module-null-sink", "sink_name=worker-null"]);
+} catch { /* no pulse here */ }
 const chrome = spawn("google-chrome", [
   "--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--mute-audio",
   "--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader",
   "--enable-webgl", "--ignore-gpu-blocklist",
   `--remote-debugging-port=${CDP}`, `--user-data-dir=${udd}`, "--window-size=800,450", "about:blank",
-], { stdio: "ignore", detached: true });
+], { stdio: "ignore", detached: true, env: { ...process.env, PULSE_SINK: "worker-null" } });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function killChromeGroup(sig) { try { process.kill(-chrome.pid, sig); } catch { /* gone */ } }
 let exiting = false;

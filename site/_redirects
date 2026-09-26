@@ -1,0 +1,6 @@
+# phantomburn.net's redirects (Cloudflare Pages _redirects: FROM TO STATUS).
+# The game moved from its first, unguessable path to /beta/ (David,
+# 2026-09-26: "a memorable address"); links shared to the old path keep
+# working. scripts/check-site.mjs and verify-live.mjs follow every rule here.
+/p-wuypeb4rqy/* /beta/:splat 301
+/p-wuypeb4rqy /beta/ 301
