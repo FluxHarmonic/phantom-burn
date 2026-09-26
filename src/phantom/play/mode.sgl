@@ -194,9 +194,11 @@
     ;;           panel-on, panel-off, reader-ok, reader-deny, door-open, caught;
     ;;           P3's deck-hold, deck-confirm, deck-deny, print-done,
     ;;           blinds-open, blinds-close
-    ;;   sounding (P3) ((id kind x y atten muffled? path-m) ...) every device
-    ;;           sounding this frame (a ringing phone, a running printer, the
-    ;;           vent on): playback loops each while it is listed
+    ;;   sounding (P3) ((id kind x y atten muffled? path-m level) ...) every
+    ;;           device sounding this frame (a ringing phone, a running
+    ;;           printer, the vent on): playback loops each while it is
+    ;;           listed; level #f. And every camera, always, with level its
+    ;;           awareness of you 0..1 (the API §4, v8: its pips quicken)
     ;; The steps and events are taken: a second call the same frame has none.
     (define *feed-gx* #f) (define *feed-gy* #f)
     (define (play-mode-sound-feed w)
@@ -227,12 +229,14 @@
           (if (< i 0)
               acc
               (let ((d (vector-ref ds i)) (s (devices-state dv i)))
-                (if (memq s '(ringing running on))
+                (if (or (memq s '(ringing running on)) (eq? (device-kind d) 'camera))
                     (begin
                       (hear-path! h (device-room d) (device-x d) (device-y d) you (walker-x w) (walker-y w))
                       (loop (- i 1)
                             (cons (list (device-id d) (device-kind d) (device-x d) (device-y d)
-                                        (hear-gain h) (hear-muffled? h) (hear-path-m h))
+                                        (hear-gain h) (hear-muffled? h) (hear-path-m h)
+                                        (and (eq? (device-kind d) 'camera)
+                                             (if (eq? s 'alarmed) 1.0 (play-camera-awareness *core* i))))
                                   acc)))
                     (loop (- i 1) acc)))))))
 
