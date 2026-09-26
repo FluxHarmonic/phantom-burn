@@ -199,6 +199,12 @@
       (assert-true (>= (list-ref with 4) 0))
       (assert-true (> (list-ref with 5) (list-ref with 4)))
       (assert-true (assq 'phone-rang (play-incidents p)))
+      ;; robot speak (API §4 v9): it said it was searching, gave up, and was back
+      (let ((kinds (map car (play-take-events! p))))
+        (display (list 'speak (filter (lambda (k) (memq k '(robot-suspicious robot-searching robot-there robot-lost robot-back))) kinds))) (newline)
+        (assert-true (memq 'robot-searching kinds))
+        (assert-true (memq 'robot-lost kinds))
+        (assert-true (memq 'robot-back kinds)))
       (assert-true (equal? (car (car (play-patches p))) "PHONES MUTED ON THIS FLOOR"))))
   (test "a print job pulls the unit to the printer, off its route"
     (let* ((with (run-pull PRINTER #t (* 60 45) 2))

@@ -77,7 +77,9 @@
     ;;  35 the terminal: #(open? selected running-row progress status
     ;;  status-seconds rows), rows its targets in display order, each
     ;;  (device . INDEX) or (zone . CIRCUIT)
-    (define (play? p) (and (vector? p) (= (vector-length p) 36) (eq? (vector-ref p 0) 'play)))
+    ;;  36 returning: the unit gave up a search and is heading back to its
+    ;;  route (robot-back fires when it reaches a route point)
+    (define (play? p) (and (vector? p) (= (vector-length p) 37) (eq? (vector-ref p 0) 'play)))
     (define (play-terminal-open? p) (vector-ref (vector-ref p 35) 0))
     (define (play-camera-awareness p i) (vector-ref (vector-ref p 33) i))
     ;; for the HUD's eye: the most any camera that has you in view now is
@@ -135,7 +137,7 @@
                         '() 0 -1 '() #f
                         (make-devices data) (make-deck) (device-approaches data gw) 0.0
                         (make-vector (device-count data) 0.0) (camera-views data)
-                        (vector #f 0 -1 0.0 '(idle) 0.0 (terminal-targets data)))))
+                        (vector #f 0 -1 0.0 '(idle) 0.0 (terminal-targets data)) #f)))
         p))
 
     ;; A new attempt: the guard back at its start, the badge on the desk.
@@ -159,6 +161,7 @@
       (vector-set! p 32 0.0)
       (vector-fill! (vector-ref p 33) 0.0)
       (terminal-reset! (vector-ref p 35))
+      (vector-set! p 36 #f)
       p)
 
     ;; The path from the guard to you (for playback: how much of the guard
@@ -515,8 +518,38 @@
                   (if panel
                       (guard-notice! g 0.65 (cadr panel) (caddr panel) 0.0)
                       (guard-notice! g 0.65 (guard-x g) (guard-y g) (guard-z g))))))))
+        (speak! p was state)
         (vector-set! p 25 state)
         (vector-set! p 26 groom)))
+
+    ;; Robot speak (S1, the device API §4 v9): one event on each change of
+    ;; the unit's state, at its position, for a garbled mutter.
+    ;;   robot-suspicious  calm to suspicious (the "?")
+    ;;   robot-searching   into searching (from calm too: a device heard)
+    ;;   robot-there       into hunting (it has you)
+    ;;   robot-lost        a hunt given up (to searching), or a search (to calm)
+    ;;   robot-back        back on its route: at a route point after a search,
+    ;;                     or at once from suspicious (it never left it)
+    (define (speak! p was state)
+      (let* ((g (vector-ref p 3)) (x (guard-x g)) (y (guard-y g)))
+        (unless (= was state)
+          (cond
+            ((= state HUNTING) (event! p 'robot-there x y))
+            ((and (= state SEARCHING) (= was HUNTING)) (event! p 'robot-lost x y))
+            ((= state SEARCHING) (event! p 'robot-searching x y))
+            ((and (= state SUSPICIOUS) (= was CALM)) (event! p 'robot-suspicious x y))
+            ((and (= state CALM) (= was SUSPICIOUS)) (event! p 'robot-back x y))
+            ((= state CALM) (event! p 'robot-lost x y) (vector-set! p 36 #t))))
+        ;; heading back after a search: at a route point, it is back
+        (when (and (vector-ref p 36) (= state CALM))
+          (let ((r (play-route (vector-ref p 1))))
+            (let loop ((k 0))
+              (when (< k (vector-length r))
+                (let ((dx (- x (vector-ref r k))) (dy (- y (vector-ref r (+ k 1)))))
+                  (if (< (+ (* dx dx) (* dy dy)) 0.36)
+                      (begin (vector-set! p 36 #f) (event! p 'robot-back x y))
+                      (loop (+ k 2))))))))
+        (when (> state CALM) (vector-set! p 36 #f))))
 
     ;; The patch note (design §5): up to two patches, the most serious first,
     ;; each (system-line gibson-line). A badge seen in use is always one.
