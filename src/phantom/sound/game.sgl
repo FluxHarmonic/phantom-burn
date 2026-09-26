@@ -64,8 +64,9 @@
                line))))
 
     ;; the bank's progress, said once each (always, not only with ?trace): the
-    ;; seconds from the sound's making to every event sound being ready, and to
-    ;; the whole bank (the hum last): "phantom-burn: sound events-ready S" and
+    ;; seconds from the sound's making to the camera pip and the robot's bored, ? and
+    ;; THERE being ready, to every event kind having its sound, and to
+    ;; the whole bank: "phantom-burn: sound robot-ready S", "... events-ready S" and
     ;; "phantom-burn: sound bank-ready S"
     (define *t0* 0)
     (define *said* '())
@@ -78,7 +79,8 @@
               (display (string-append "phantom-burn: sound " (symbol->string (car m)) " "
                                       (number->string (/ (round (/ (- (current-milliseconds) *t0*) 10.0)) 100.0))))
               (newline)))
-          (list (cons (quote events-ready) bank-events-ready?) (cons (quote bank-ready) bank-ready?)))))
+          (list (cons (quote robot-ready) bank-robot-ready?)
+                (cons (quote events-ready) bank-events-ready?) (cons (quote bank-ready) bank-ready?)))))
 
     (define (sound-game-init! loader)
       (unless *s*
