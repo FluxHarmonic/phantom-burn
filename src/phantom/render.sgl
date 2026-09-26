@@ -44,6 +44,7 @@
           render-scene! render-make-world-mesh render-draw-world-mesh render-title-scene!
           render-draw-floor! render-floor-kind render-floor-info
           render-set-extra-draw! render-draw-object! render-hide-part! render-part-hidden?
+          render-set-cone! render-cone-ids
           render-load-guard! render-guard-ready? render-guard-parts render-draw-guard!
           make-camera camera-set!)
 
@@ -451,6 +452,10 @@ void main() {
             (fs (string-append (glsl-header) WORLD-FRAGMENT)))
         (set! *c-opaque* (make-pipeline layout vs fs))
         (set! *c-glass* (make-pipeline layout vs fs '(blend normal depth-write #f cull none))))
+      (set! *cone-pipe* (make-pipeline (cone-layout)
+                                       (string-append (glsl-header) CONE-VERTEX)
+                                       (string-append (glsl-header) CONE-FRAGMENT)
+                                       '(blend additive depth-write #f cull none)))
       (set! *g-pipe* (make-pipeline (guard-layout)
                                     (string-append (glsl-header) GUARD-VERTEX)
                                     (string-append (glsl-header) WORLD-FRAGMENT)))
@@ -502,6 +507,7 @@ void main() {
       (both (lambda (p) (set-pipeline-uniform! p 'model *model*))))
 
     (define (render-load-stand-in! load-mesh* load-texture* draws lights)
+      (build-cones! '())
       (set! *kind* 'stand-in) (set! *floor-info* #f)
       (model-turn!)
       (set! *circuits* STAND-IN-CIRCUITS)
@@ -537,6 +543,7 @@ void main() {
     (define (render-load-compiled! load-mesh* load-texture* info)
       (set! *kind* 'compiled)
       (set! *floor-info* info)
+      (build-cones! info)
       (set! *hidden* '())
       (model-turn!)
       (set! *circuits* (cdr (assq 'circuits info)))
@@ -649,6 +656,152 @@ void main() {
       (set-pipeline-uniform! *opaque* 'model *model*)
       (set-pipeline-uniform! *opaque* 'ambient *ambient-now*))
 
+    ;; --- the cameras' sight on the floor (P3, David: "I can't tell where it is
+    ;; looking") -------------------------------------------------------------------
+    ;;
+    ;; Each camera in floor.sexp's devices, (ID camera X Y Z HEADING TIER ROOM
+    ;; FOV RANGE PITCH), gets a pool of light on its room's floor: the cells
+    ;; where its cone (axis HEADING ccw from +x, PITCH up; half-angle FOV/2;
+    ;; out to RANGE) crosses 0.9 m, where play tests your chest, projected
+    ;; down. Brightest on the axis, fading to the cone's edge and its range,
+    ;; cut at the room's outline (walls; play's ray also stops at props).
+    ;; Drawn additively, so the post pass dithers it like light. Its tint is
+    ;; set each frame from the camera's state ((phantom deck hud)).
+    (define (cone-layout) (make-vertex-layout '((position float3) (weight float))))
+    (define CONE-VERTEX
+      "uniform mat4 view_proj;
+uniform vec4 eye;
+in vec3 position;
+in float weight;
+out float v_w;
+void main() {
+  float fog = clamp(length(position - eye.xyz) / eye.w, 0.0, 1.0);
+  v_w = weight * (1.0 - fog * fog);
+  gl_Position = view_proj * vec4(position, 1.0);
+}
+")
+    (define CONE-FRAGMENT
+      "uniform vec4 tint;          // rgb, a the strength
+in float v_w;
+out vec4 frag_color;
+void main() { frag_color = vec4(tint.rgb * (tint.a * v_w), 1.0); }
+")
+    (define *cone-pipe* #f)
+    (define *cones* '())          ; ((id mesh count tint-bytevector) ...)
+    (define DEG (/ 3.141592653589793 180.0))
+    (define CONE-CELL 0.2)        ; m
+    (define CONE-HEIGHT 0.9)      ; m above the floor: a standing chest
+
+    (define (inside? x y pts)     ; even-odd, pts ((x y) ...)
+      (let loop ((ps pts) (prev (car (reverse pts))) (in #f))
+        (if (null? ps)
+            in
+            (let* ((a (car ps)) (ax (car a)) (ay (cadr a)) (bx (car prev)) (by (cadr prev)))
+              (loop (cdr ps) a
+                    (if (and (not (eq? (> ay y) (> by y)))
+                             (< x (+ ax (/ (* (- bx ax) (- y ay)) (- by ay)))))
+                        (not in) in))))))
+
+    ;; the camera's room: the outline around its lens whose floor is highest
+    ;; below the lens
+    (define (cone-room x y z outlines)
+      (let loop ((os outlines) (best #f))
+        (if (null? os)
+            best
+            (let ((o (car os)))
+              (loop (cdr os)
+                    (if (and (<= (cadr o) z) (inside? x y (cddr o))
+                             (or (not best) (> (cadr o) (cadr best))))
+                        o best))))))
+
+    (define (cone-weight px py pz lx ly lz ax ay az cos-half range)
+      (let* ((vx (- px lx)) (vy (- py ly)) (vz (- pz lz))
+             (d (sqrt (+ (* vx vx) (* vy vy) (* vz vz)))))
+        (if (or (< d 1e-6) (> d range))
+            0.0
+            (let ((c (/ (+ (* vx ax) (* vy ay) (* vz az)) d)))
+              (if (< c cos-half)
+                  0.0
+                  (* (min 1.0 (/ (- c cos-half) (* 0.35 (- 1.0 cos-half))))   ; soft at the cone's edge
+                     (- 1.0 (* 0.7 (/ d range)))))))))                       ; fainter far off
+
+    (define (build-cone dev outlines)
+      (let* ((lx (list-ref dev 2)) (ly (list-ref dev 3)) (lz (list-ref dev 4))
+             (hd (* (list-ref dev 5) DEG))
+             (fov (list-ref dev 8)) (range (list-ref dev 9)) (pitch (* (list-ref dev 10) DEG))
+             (ax (* (cos pitch) (cos hd))) (ay (* (cos pitch) (sin hd))) (az (sin pitch))
+             (cos-half (cos (* 0.5 fov DEG)))
+             (room (cone-room lx ly lz outlines)))
+        (and room
+             (let* ((pts (cddr room)) (fz (cadr room))
+                    (xs (map car pts)) (ys (map cadr pts))
+                    (x0 (apply min xs)) (x1 (apply max xs)) (y0 (apply min ys)) (y1 (apply max ys))
+                    (nx (exact (ceiling (/ (- x1 x0) CONE-CELL)))) (ny (exact (ceiling (/ (- y1 y0) CONE-CELL))))
+                    (w (lambda (x y)
+                         (if (inside? x y pts)
+                             (cone-weight x y (+ fz CONE-HEIGHT) lx ly lz ax ay az cos-half range)
+                             0.0)))
+                    (tris '()))
+               ;; the grid's corners' weights, then two triangles per lit cell
+               (let ((grid (make-vector (* (+ nx 1) (+ ny 1)) 0.0)))
+                 (do ((j 0 (+ j 1))) ((> j ny))
+                   (do ((i 0 (+ i 1))) ((> i nx))
+                     (vector-set! grid (+ i (* j (+ nx 1)))
+                                  (w (+ x0 (* i CONE-CELL)) (+ y0 (* j CONE-CELL))))))
+                 (do ((j 0 (+ j 1))) ((= j ny))
+                   (do ((i 0 (+ i 1))) ((= i nx))
+                     (let* ((g (lambda (a b) (vector-ref grid (+ (+ i a) (* (+ j b) (+ nx 1))))))
+                            (p (lambda (a b) (list (+ x0 (* (+ i a) CONE-CELL)) (+ y0 (* (+ j b) CONE-CELL))
+                                                   (+ fz 0.02) (g a b)))))
+                       (when (> (+ (g 0 0) (g 1 0) (g 1 1) (g 0 1)) 0.0)
+                         (set! tris (cons (list (p 0 0) (p 1 0) (p 1 1) (p 0 0) (p 1 1) (p 0 1)) tris)))))))
+               (let* ((n (* 6 (length tris))) (bv (make-bytevector (* 16 n) 0)))
+                 (let loop ((ts tris) (k 0))
+                   (unless (null? ts)
+                     (let each ((vs (car ts)) (k k))
+                       (if (null? vs)
+                           (loop (cdr ts) k)
+                           (let ((v (car vs)) (o (* 16 k)))
+                             (bytevector-ieee-single-set! bv o (list-ref v 0) 'little)
+                             (bytevector-ieee-single-set! bv (+ o 4) (list-ref v 1) 'little)
+                             (bytevector-ieee-single-set! bv (+ o 8) (list-ref v 2) 'little)
+                             (bytevector-ieee-single-set! bv (+ o 12) (list-ref v 3) 'little)
+                             (each (cdr vs) (+ k 1)))))))
+                 (and (> n 0)
+                      (let ((tint (make-bytevector 16 0)))
+                        ;; idle: C-SELECTED cyan, faint, until play says otherwise
+                        (f32! tint 0 0.302) (f32! tint 1 0.949) (f32! tint 2 0.851) (f32! tint 3 0.16)
+                        (list (list-ref dev 0) (make-mesh (cone-layout) bv) n tint))))))))
+
+    (define (build-cones! info)
+      (for-each (lambda (c) (mesh-free! (cadr c))) *cones*)
+      (set! *cones* '())
+      (let ((devs (let ((d (assq 'devices info))) (if d (cdr d) '())))
+            (outlines (let ((o (assq 'outlines info))) (if o (cdr o) '()))))
+        (for-each (lambda (d)
+                    (when (and (eq? (list-ref d 1) 'camera) (>= (length d) 11) (pair? outlines))
+                      (let ((c (build-cone d outlines)))
+                        (when c (set! *cones* (cons c *cones*))))))
+                  devs)))
+
+    (define (render-cone-ids) (map car *cones*))
+    ;; the pool's colour and strength (0..1 rgb, a strength)
+    (define (render-set-cone! id r g b a)
+      (let ((c (assq id *cones*)))
+        (when c
+          (let ((t (cadddr c))) (f32! t 0 r) (f32! t 1 g) (f32! t 2 b) (f32! t 3 a)))))
+
+    (define (draw-cones!)
+      (unless (null? *cones*)
+        (f32! *eye* 3 *fog*)
+        (set-pipeline-uniform! *cone-pipe* 'view_proj *vp*)
+        (set-pipeline-uniform! *cone-pipe* 'eye *eye*)
+        (for-each (lambda (c)
+                    (set-pipeline-uniform! *cone-pipe* 'tint (cadddr c))
+                    (draw-mesh *cone-pipe* (cadr c)))
+                  *cones*)
+        (f32! *eye* 3 900.0)))
+
     ;; --- the guard's body --------------------------------------------------------
 
     (define *g-pipe* #f)
@@ -746,6 +899,7 @@ void main() {
           (set-pipeline-uniform! *opaque* 'eye *eye*)
           (unless (and (eq? *kind* 'compiled) (circuit-index 'city) (not (render-circuit-on? 'city)))
             (draw-mesh *opaque* *city*))
+          (draw-cones!)
           (when *extra-draw* (*extra-draw*))
           ;; glass last, blended over what is behind it
           (let ((glass (if (eq? *kind* 'compiled) *c-glass* *glass*)))
