@@ -119,6 +119,7 @@
     (define (game-collision) *coll*)
     ;; the runner now (for (phantom sound)'s feed, S1)
     (define (game-walker) *walker*)
+    (define *stick-sel* 0)       ; the move stick as a selector: -1 up, 1 down, 0 back near centre
     (define (allocations) (cdr (assq 'allocations (gc-stats))))
     (define (game-set-trace! on?)
       (set! *trace* on?)
@@ -383,6 +384,15 @@
         ;; play's 6th hook (P3, the device API v4 §3): what is held this
         ;; frame (the deck), before the ticks
         (when (and *play* (> (vector-length *play*) 5)) ((vector-ref *play* 5) held?))
+        ;; while play holds the runner (the terminal, P3 §3 (e)), the move
+        ;; stick selects: pushed past 0.5 it presses up or down once through
+        ;; the key hook, and must come back under 0.3 before it presses again
+        (when (and *play* (> (vector-length *play*) 4))
+          (let ((sy (vector-ref ctl 5)))
+            (cond ((< (abs sy) 0.3) (set! *stick-sel* 0))
+                  ((and (= *stick-sel* 0) (> (abs sy) 0.5) ((vector-ref *play* 0)))
+                   (set! *stick-sel* (if (< sy 0.0) -1 1))
+                   ((vector-ref *play* 4) (if (< sy 0.0) 'up 'down))))))
         ;; play (P2) sees each pressed key first: 5th hook, #t when it took it
         (for-each (lambda (k)
                     (unless (and *play* (> (vector-length *play*) 4) ((vector-ref *play* 4) k))
