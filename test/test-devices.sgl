@@ -38,7 +38,7 @@
          (dx (- (device-x d) x)) (dy (- (device-y d) y))
          (yaw (atan (- dx) dy))
          (w1 (make-walker x y 0.0 yaw))
-         (dz (- (+ (device-z d) 0.15) (walker-eye-z w1)))
+         (dz (- (+ (device-z d) (if (eq? (device-kind d) 'printer) 0.9 0.1)) (walker-eye-z w1)))
          (pitch (atan dz (sqrt (+ (* dx dx) (* dy dy))))))
     (walker-step w1 (make-input 0.0 0.0 0.0 pitch #f #f #f 0) TICK C)))
 
@@ -87,6 +87,12 @@
         (assert-true (and (pair? r) (eq? (car r) 'deny))))
       (assert-equal 'denied (deck-status (play-deck p)))
       (assert-equal 'off (devices-state (play-devices-state p) VENT))))
+  (test "the printer from 3 m with a clear view: not blocked by its own body (the shell's report)"
+    (let* ((p (fresh)) (w (walker-at-looking 23.2 15.8 PRINTER)))
+      (play-deck! p w #f)
+      (assert-equal PRINTER (deck-target (play-deck p)))
+      (assert-false (deck-blocked? (play-deck p)))
+      (assert-equal 'print (deck-command (play-deck p) (play-devices-state p)))))
   (test "through a wall: blocked, and holding does nothing"
     (let* ((p (fresh)) (w (walker-at-looking 18.5 12.4 PHONE)))
       (play-deck! p w #f)

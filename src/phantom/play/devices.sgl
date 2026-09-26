@@ -43,7 +43,13 @@
     (define DECK-HOLD 0.8)        ; s to hold (the API, §3)
     (define DECK-DONE-SHOW 1.0)   ; s the prompt shows done (or denied)
     (define AIM-BACK 0.4)         ; m the line of sight stops short of the device (its own body)
-    (define AIM-UP 0.15)          ; m above a device's base: where you aim
+    ;; Where you aim, in m above a device's point (the props' shapes): the
+    ;; printer's lid, the phone's handset, the terminal's screen, just under
+    ;; the vent's louvres; a camera's point is its lens and the blinds' the
+    ;; middle of their window. The line of sight must not end inside the
+    ;; device's own body (the printer's box hid it from a clear view).
+    (define (aim-up kind)
+      (case kind ((printer) 0.9) ((phone) 0.1) ((terminal) 0.44) ((vent) -0.05) (else 0.0)))
 
     ;; --- tiers ----------------------------------------------------------------------
 
@@ -160,7 +166,7 @@
         (let loop ((i 0) (best -1) (bc DECK-CONE))
           (if (< i (vector-length ds))
               (let* ((d (vector-ref ds i))
-                     (dx (- (device-x d) ex)) (dy (- (device-y d) ey)) (dz (- (+ (device-z d) AIM-UP) ez))
+                     (dx (- (device-x d) ex)) (dy (- (device-y d) ey)) (dz (- (+ (device-z d) (aim-up (device-kind d))) ez))
                      (len (sqrt (+ (* dx dx) (* dy dy) (* dz dz))))
                      (c (if (> len 1e-6) (/ (+ (* dx vx) (* dy vy) (* dz vz)) len) -1.0)))
                 (if (and (<= len DECK-RANGE) (> c bc))
@@ -174,7 +180,7 @@
                              (and (>= best 0)
                                   (let* ((d (vector-ref ds best))
                                          (dx (- (device-x d) ex)) (dy (- (device-y d) ey))
-                                         (dz (- (+ (device-z d) AIM-UP) ez))
+                                         (dz (- (+ (device-z d) (aim-up (device-kind d))) ez))
                                          (len (sqrt (+ (* dx dx) (* dy dy) (* dz dz))))
                                          (f (if (> len AIM-BACK) (/ (- len AIM-BACK) len) 0.0)))
                                     (not (sight-clear? coll glass ex ey ez
