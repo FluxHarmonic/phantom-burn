@@ -70,7 +70,31 @@
     ;; --- the prompt ---------------------------------------------------------
 
     (define *last-act* "")
+    (define *last-tier* #f)
+    (define *tier-at* -100.0)          ; when the tier last changed
+    (define TIER-SHOW 4.0)            ; s the prompt stays after a tier change
+
+    ;; Contextual (David, P3): nothing while nothing is aimed; aimed, the
+    ;; prompt with the command and the device, and HOLD TO RUN above it; a
+    ;; result (OK, DENIED, NO LINE) as it happens; a new tier for TIER-SHOW s.
     (define (deck-hud-draw! w h k deck)
+      (let* ((tier (list-ref deck 0)) (target (list-ref deck 1)) (cmd (list-ref deck 2))
+             (status (list-ref deck 4)) (t (now)))
+        (unless (eq? tier *last-tier*)
+          (when *last-tier* (set! *tier-at* t))
+          (set! *last-tier* tier))
+        (let ((aimed? (and target cmd))
+              (result? (memq status '(holding done denied blocked)))
+              (new-tier? (< (- t *tier-at*) TIER-SHOW)))
+          (when (or aimed? result? new-tier?)
+            (prompt-draw! w h k deck)
+            (when (and aimed? (eq? status 'ready))
+              (let ((x (+ (ox-of w k) (* 6 k))) (y (+ (oy-of h k) (* 240 k))))
+                (color! C-TEXT-DIM)
+                (draw-text "HOLD TO RUN" x y k)
+                (set-color 1.0 1.0 1.0)))))))
+
+    (define (prompt-draw! w h k deck)
       (let* ((ox (ox-of w k)) (oy (oy-of h k)) (ts k)
              (tier (list-ref deck 0)) (target (list-ref deck 1)) (cmd (list-ref deck 2))
              (prog (list-ref deck 3)) (status (list-ref deck 4))
@@ -153,8 +177,18 @@
              ((printer) (show! (car n) (eq? s 'running)))
              ((vent) (show! (car n) (eq? s 'on)))
              ((terminal) (show! (car n) #t))
-             ((camera) (show! (car n) (or (not (eq? s 'seeing)) (blink? 4.0)))
-                       (show! (cadr n) (eq? s 'alarmed)))
+             ((camera)
+              ;; the LED: steady cyan idle, blinking while it has you, off
+              ;; once alarmed (the amber alarm part instead)
+              (show! (car n) (case s ((seeing) (blink? 4.0)) ((alarmed) #f) (else #t)))
+              (show! (cadr n) (eq? s 'alarmed))
+              ;; its sight on the floor: cyan, warming to amber as it fills
+              (let ((a (if (and (pair? st) (pair? (cdr st))) (max 0.0 (min 1.0 (cadr st))) 0.0)))
+                (case s
+                  ((alarmed) (render-set-cone! id 1.0 0.62 0.1 0.5))
+                  ((seeing) (render-set-cone! id (+ 0.302 (* a 0.698)) (- 0.949 (* a 0.329)) (- 0.851 (* a 0.751))
+                                              (* (+ 0.3 (* 0.25 a)) (+ 0.85 (* 0.15 (sin (* 8.0 (now))))))))
+                  (else (render-set-cone! id 0.302 0.949 0.851 0.3)))))
              ((blinds) (show! (caddr n) (eq? s 'open))
                        (show! (cadddr n) (not (eq? s 'open)))))))
        devices))
