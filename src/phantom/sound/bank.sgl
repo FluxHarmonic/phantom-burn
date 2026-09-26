@@ -240,7 +240,14 @@
     ;; the kinds agreed with P2 (topics/phantom-sound-api); each tune is 125 rows
     ;; of 20 ms, the event at row 0, rendered for its first (event-seconds KIND) seconds
     (define EVENT-KINDS '(door-open door-close panel-on panel-off reader-ok reader-deny badge caught note
-                          camera-pip camera-alert))
+                          camera-pip camera-alert
+                          ;; robot speak (EDGE), after the rest: three variants of each mood
+                          speak-suspicious-1 speak-suspicious-2 speak-suspicious-3
+                          speak-searching-1 speak-searching-2 speak-searching-3
+                          speak-there-1 speak-there-2 speak-there-3
+                          speak-lost-1 speak-lost-2 speak-lost-3
+                          speak-settle-1 speak-settle-2 speak-settle-3
+                          speak-bored-1 speak-bored-2 speak-bored-3))
     ;; each event renders for its own length: its sound measured (the last sample
     ;; above -60 dBFS, plus ~15%; the tests hold each quiet in its last 100 ms).
     ;; The stairwell air (door-open) and the capture (caught) ring on for the
@@ -249,7 +256,14 @@
     (define EVENT-LENGTHS
       (quote ((door-open . 2.5) (door-close . 0.52) (panel-on . 0.62) (panel-off . 0.5)
               (reader-ok . 0.54) (reader-deny . 0.5) (badge . 1.06) (caught . 2.5) (note . 1.6)
-              (camera-pip . 0.3) (camera-alert . 1.0))))
+              (camera-pip . 0.3) (camera-alert . 1.0)
+              ;; robot speak: each tune whole (its rows x 60 ms: the phrase and 0.36 s of tail)
+              (speak-suspicious-1 . 0.66) (speak-suspicious-2 . 0.78) (speak-suspicious-3 . 0.72)
+              (speak-searching-1 . 0.96) (speak-searching-2 . 0.96) (speak-searching-3 . 0.96)
+              (speak-there-1 . 0.66) (speak-there-2 . 0.66) (speak-there-3 . 0.66)
+              (speak-lost-1 . 0.72) (speak-lost-2 . 0.72) (speak-lost-3 . 0.66)
+              (speak-settle-1 . 0.72) (speak-settle-2 . 0.9) (speak-settle-3 . 1.02)
+              (speak-bored-1 . 1.08) (speak-bored-2 . 1.08) (speak-bored-3 . 1.02))))
     (define (event-seconds kind) (let ((e (assq kind EVENT-LENGTHS))) (if e (cdr e) EVENT-S)))
 
     ;; --- rendering -------------------------------------------------------------------------------

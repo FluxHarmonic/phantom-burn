@@ -118,7 +118,8 @@
     ;; in per sample cost more than everything else (the S1 integration's trace);
     ;; the bed-mixer is the headless render's.
 
-    ;; guards: a vector per guard index: #(steps prev-state)
+    ;; guards: a vector per guard index: #(steps prev-state mutter-in), mutter-in the
+    ;; seconds to its next bored mutter while it is calm, #f otherwise
     (define (make-sound rate loader . opt)
       (vector rate loader (and (pair? opt) (car opt)) (make-bank rate loader) (make-mixer) (make-steps)
               '() (make-music-rule) 20260925
@@ -239,7 +240,7 @@
 
     (define (guard-entry s i)
       (let loop ((gs (vector-ref s 6)))
-        (cond ((null? gs) (let ((e (vector (make-steps) 0))) (vector-set! s 6 (append (vector-ref s 6) (list (cons i e)))) e))
+        (cond ((null? gs) (let ((e (vector (make-steps) 0 #f))) (vector-set! s 6 (append (vector-ref s 6) (list (cons i e)))) e))
               ((= (car (car gs)) i) (cdr (car gs)))
               (else (loop (cdr gs))))))
 
@@ -275,9 +276,44 @@
     (define (sound-event! s kind x y atten muffled?)
       (let* ((sp (placed s x y atten #f))
              (bank (sound-bank s))
-             (key (or (and muffled? (bank-sample bank (list 'event kind 'muffled)) (list 'event kind 'muffled))
-                      (list 'event kind))))
-        (play! s key (car sp) (cdr sp))))
+             (mood (assq kind SPEAK-MOODS)))
+        (if mood
+            ;; robot speak (API v9): one of the mood's three variants, at random
+            (play! s (speak-key s (cdr mood)) (* SPEAK-GAIN (car sp)) (cdr sp))
+            (let ((key (or (and muffled? (bank-sample bank (list 'event kind 'muffled)) (list 'event kind 'muffled))
+                           (list 'event kind))))
+              (play! s key (car sp) (cdr sp))))))
+
+    ;; --- robot speak (David picked EDGE, 2026-09-26: "go with EDGE for the robot
+    ;; voice, this is more what I had in mind") ---------------------------------------------
+    ;; The unit's state changes come as sound events (API v9); each plays one of its
+    ;; mood's three variants at random, at the unit (event speak-MOOD-K, the tunes
+    ;; the sketchbook's (sketchbook robotspeak) makes for the game: EDGE, the phrase at
+    ;; once). The bored mutter is the sound side's: a calm unit mutters every 20-40 s.
+    (define SPEAK-MOODS
+      '((robot-suspicious . suspicious) (robot-searching . searching) (robot-there . there)
+        (robot-lost . lost) (robot-back . settle)))
+    (define SPEAK-GAIN 0.9)
+    (define MUTTER-MIN-S 20.0)
+    (define MUTTER-MAX-S 40.0)
+
+    (define (speak-key s mood)
+      (list 'event (string->symbol (string-append "speak-" (symbol->string mood) "-"
+                                                  (number->string (+ 1 (min 2 (exact (floor (* 3 (rand! s)))))))))))
+
+    (define (mutter-wait s) (+ MUTTER-MIN-S (* (- MUTTER-MAX-S MUTTER-MIN-S) (rand! s))))
+
+    ;; a guard entry's mutter, once a frame: calm (state 0) counts down and mutters
+    ;; at its place; any other state clears the count (it starts again when calm)
+    (define (mutter! s e state sp dt)
+      (if (= state 0)
+          (let ((left (- (or (vector-ref e 2) (mutter-wait s)) dt)))
+            (if (> left 0.0)
+                (vector-set! e 2 left)
+                (begin
+                  (play! s (speak-key s 'bored) (* SPEAK-GAIN (car sp)) (cdr sp))
+                  (vector-set! e 2 (mutter-wait s)))))
+          (vector-set! e 2 #f)))
 
     ;; --- the cameras (P3; David: "a soft beeping ... a specific noise pattern"; he
     ;; picked pip B, the relay's double tick) ---------------------------------------------
@@ -350,6 +386,7 @@
                              (* GUARD-GAIN (car sp) (+ 0.9 (* 0.2 (rand! s)))) (cdr sp))))
                   (steps-advance! (vector-ref e 0) (* gmoved (/ 1.248 stride)) dt 'guard 'walk))
                 (when sting (play! s (list 'sting sting) (* (car sp) (if (eq? sting 'there) 1.0 0.8)) (cdr sp)))
+                (mutter! s e state sp dt)
                 (vector-set! e 1 state)
                 (loop (cdr gs) (+ i 1) (cons state states))))))
       ;; the devices sounding (P3): the cameras' pips
