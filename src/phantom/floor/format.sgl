@@ -33,7 +33,9 @@
   (export read-floor read-legend read-prop read-texture check-references
           floor? floor-path floor-level floor-intent floor-tier-in floor-tier-out
           floor-ambient floor-rooms floor-openings floor-stairs floor-circuits floor-things
-          floor-views floor-routes floor-start floor-facing floor-line
+          floor-views floor-routes floor-start floor-facing floor-line floor-look floor-lessons
+          lesson lesson? lesson-id lesson-rooms lesson-start lesson-facing lesson-goal
+          lesson-on-enter lesson-on-success lesson-on-fail lesson-line
           room room? room-name room-index room-corners room-floor room-ceiling room-over
           room-surface room-light room-edge room-crouch-only room-line
           opening opening? opening-kind opening-a opening-b opening-at opening-along
@@ -65,7 +67,17 @@
       (tier-in default: #f) (tier-out default: #f) (ambient default: '())
       (rooms default: '()) (openings default: '()) (stairs default: '())
       (circuits default: '()) (things default: '()) (views default: '()) (routes default: '())
-      (start default: #f) (facing default: 0.0) (line default: 1))
+      (start default: #f) (facing default: 0.0) (line default: 1)
+      ;; PRACTICE: the look (sim: the shell's grid-lit style) and the lessons
+      (look default: #f) (lessons default: '()))
+
+    ;; A lesson (PRACTICE, topics/phantom-burn-practice-api): its rooms, where
+    ;; you start it (the room's reset spot), its goal (a list play checks,
+    ;; e.g. (through never: suspicious)), and Crash's lines.
+    (define-struct lesson
+      (id default: #f) (rooms default: '()) (start default: #f) (facing default: 0.0)
+      (goal default: '()) (on-enter default: "") (on-success default: "") (on-fail default: "")
+      (line default: #f))
 
     (define-struct room
       (name default: #f) (index default: 0) (corners default: '())
@@ -183,6 +195,9 @@
         ((count) (if (and (integer? v) (> v 0)) (ok v) (bad "a whole number above 0")))
         ((symbol) (if (symbol? v) (ok v) (bad "a name")))
         ((string) (if (string? v) (ok v) (bad "a string")))
+        ;; a lesson's goal: a list led by its kind, kept as data
+        ((goal) (let ((xs (items-of v)))
+                  (if (and xs (pair? xs) (symbol? (car xs))) (ok (node->datum v)) (bad "a goal (kind ...)"))))
         ((bool) (if (boolean? v) (ok v) (bad "#t or #f")))
         ((point2) (let ((p (point2 v))) (if p (ok p) (bad "a point (x y)"))))
         ((place) (cond ((memq v '(start badge)) (ok v))
@@ -351,7 +366,11 @@
       '((level number #t) (intent string #f) (tier-in symbol #f) (tier-out symbol #f)
         (ambient ambient #f) (rooms nodes #t) (openings nodes #f) (stairs nodes #f)
         (lights nodes #f) (things nodes #f) (views nodes #f) (routes nodes #f) (start point2 #t)
-        (facing number #f)))
+        (facing number #f) (look symbol #f) (lessons nodes #f)))
+
+    (define LESSON-SPECS
+      '((rooms symbols #t) (start point2 #t) (facing number #f) (goal goal #t)
+        (on-enter string #f) (on-success string #f) (on-fail string #f)))
 
     (define ROOM-SPECS
       '((corners points #t) (floor number #t) (ceiling number #t) (over symbols #f)
@@ -441,6 +460,18 @@
                                        (cons (view name: name at: (get (car r) 'at) look: (get (car r) 'look)
                                                    lens: (get (car r) 'lens) line: line)
                                              (cdr r))))))
+                   (lessons (entries (get al 'lessons) path "lessons:" #t
+                                     (lambda (name items lines line)
+                                       (let ((r (fields items lines path LESSON-SPECS
+                                                        (string-append "lesson " (symbol->string name)))))
+                                         (cons (lesson id: name rooms: (get (car r) 'rooms '())
+                                                       start: (get (car r) 'start) facing: (get (car r) 'facing 0.0)
+                                                       goal: (get (car r) 'goal '())
+                                                       on-enter: (get (car r) 'on-enter "")
+                                                       on-success: (get (car r) 'on-success "")
+                                                       on-fail: (get (car r) 'on-fail "")
+                                                       line: line)
+                                               (cdr r))))))
                    (routes (entries (get al 'routes) path "routes:" #t
                                     (lambda (name items lines line)
                                       (let ((r (fields items lines path ROUTE-SPECS
@@ -458,9 +489,10 @@
                            circuits: (car circuits) things: (car things) views: (car views)
                            routes: (car routes)
                            start: (get al 'start) facing: (get al 'facing 0.0)
+                           look: (get al 'look) lessons: (car lessons)
                            line: (node-line form))
                     (append (cdr r) (cdr f) (cdr rooms) (cdr openings) (cdr stairs)
-                            (cdr circuits) (cdr things) (cdr views) (cdr routes)))))))
+                            (cdr circuits) (cdr things) (cdr views) (cdr routes) (cdr lessons)))))))
 
     (define (number-rooms rs)
       (let loop ((rs rs) (i 0) (acc '()))
