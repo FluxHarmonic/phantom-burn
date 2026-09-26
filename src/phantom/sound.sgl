@@ -34,7 +34,7 @@
 ;;;
 ;;; How it sounds, and why (David's S0 bench, 2026-09-25: each motif player costs
 ;;; ~2 ms a frame on his phone even when silent):
-;;;   - your steps, the guard's steps and the stings are SAMPLES from (phantom sound
+;;;   - your steps, the guard's steps, the events and robot speak are SAMPLES from (phantom sound
 ;;;     bank), rendered once on one player, a slice of it each frame until done,
 ;;;     and mixed by (phantom sound mix): near-free per frame, positional per event;
 ;;;   - a guard through a wall plays the muffled sample (S0's finding: a per-step
@@ -363,7 +363,9 @@
                 (gait (gait-for (list-ref you 5) (list-ref you 6))))
             (for-each (lambda (ev) (step! s (car surface) (cdr surface) gait (car ev)))
                       (steps-advance! (vector-ref s 5) (list-ref you 3) dt (car surface) gait))))
-        ;; the guards: their steps positioned, the path's gain, a wall muffling them, their stings
+        ;; the guards: their steps positioned, the path's gain, a wall muffling them, their
+        ;; mutter; no music stings (the leader, 2026-09-26: the robot's own voice, the
+        ;; v9 events, carries the "?" and THERE moments now; doubling muddied both)
         (let loop ((gs guards) (i 0) (states '()))
           (if (null? gs)
               (let ((sec (vector-ref s 15)))
@@ -377,15 +379,13 @@
                      (muffled? (and (> (length g) 5) (list-ref g 5)))
                      (path-m (and (> (length g) 6) (list-ref g 6)))
                      (sp (placed s gx gy atten path-m))
-                     (stride (if (>= state 3) GUARD-STRIDE-HUNT GUARD-STRIDE-WALK))
-                     (sting (stings-for (vector-ref e 1) state)))
+                     (stride (if (>= state 3) GUARD-STRIDE-HUNT GUARD-STRIDE-WALK)))
                 (for-each
                   (lambda (ev)
                     (when (eq? (car ev) 'heel)
                       (play! s (list 'guard (if muffled? 'muffled 'clear) (min 2 (exact (floor (* 3 (rand! s))))))
                              (* GUARD-GAIN (car sp) (+ 0.9 (* 0.2 (rand! s)))) (cdr sp))))
                   (steps-advance! (vector-ref e 0) (* gmoved (/ 1.248 stride)) dt 'guard 'walk))
-                (when sting (play! s (list 'sting sting) (* (car sp) (if (eq? sting 'there) 1.0 0.8)) (cdr sp)))
                 (mutter! s e state sp dt)
                 (vector-set! e 1 state)
                 (loop (cdr gs) (+ i 1) (cons state states))))))
