@@ -14,7 +14,6 @@
 ;;;     SURFACE: carpet tile marble grate raised (the grate's heel carries its rattle)
 ;;;   (guard clear K) (guard muffled K)  K = 0 1 2   the guard's boots, the first tile
 ;;;     patch David liked, and through a wall
-;;;   (sting ?) (sting there)                           a guard noticing, a guard hunting
 ;;; Dry (no bus reverb): David asked for dry and close.
 ;;;
 ;;; And the game's events, (event KIND) for KIND in EVENT-KINDS: each is its own
@@ -70,7 +69,7 @@
                     ((grate) 30)
                     (else (if heel? 11 9)))))
         ((guard) (if (eq? (cadr key) 'clear) 7 11))
-        (else (if (eq? (cadr key) 'there) 19 25))))
+        (else 0)))
     (define BANK-SURFACES '(carpet tile marble grate raised))
 
     ;; (surface heel-patch heel-layers toe-patch toe-layers rattle-patch heel-notes)
@@ -97,8 +96,6 @@
     (define GUARD-CLEAR-LAYERS "((chip-kick sweep: 1.2 sweep-decay: 0.008 index: 1.2 decay: 0.05 drive: 0.6 octave: 0 volume: 0.55))")
     (define GUARD-MUFFLED "(chip-noise osc-amp: 0.7 cutoff: 850 hp: 280 attack: 0.004 decay: 0.06 sustain: 0 release: 0.04)")
     (define GUARD-MUFFLED-LAYERS "((chip-kick sweep: 1.0 sweep-decay: 0.01 index: 0.6 decay: 0.07 drive: 0.3 octave: 0 volume: 0.6))")
-    (define STING-Q "(fm4-stab cutoff: 1200 decay: 0.35 index: 0.5 release: 0.2)")
-    (define STING-THERE "(fm4-stab cutoff: 1500 decay: 0.18 index: 0.9 release: 0.06)")
 
     ;; --- the plan: which instrument plays what in which slot -------------------------------
     ;; an entry: (key inst notes) where notes are (row-in-slot note vol)
@@ -121,9 +118,7 @@
                                '(0 1)))))
                     SURFACES '(0 1 2 3 4)))
         (map (lambda (k) (list (list 'guard 'clear k) 16 (list (list 0 (list-ref '("E-4" "F-4" "D-4") k) 48)))) '(0 1 2))
-        (map (lambda (k) (list (list 'guard 'muffled k) 17 (list (list 0 (list-ref '("F-4" "G-4" "F#4") k) 48)))) '(0 1 2))
-        (list (list '(sting ?) 18 '((0 "A-4" 36) (4 "C-5" 40)))
-              (list '(sting there) 19 '((0 "C-5" 48) (2 "C#5" 44) (5 "C-5" 48) (7 "C#5" 44))))))
+        (map (lambda (k) (list (list 'guard 'muffled k) 17 (list (list 0 (list-ref '("F-4" "G-4" "F#4") k) 48)))) '(0 1 2))))
 
     (define (bank-slots)
       (let loop ((es (plan)) (i 0) (acc '()))
@@ -154,12 +149,11 @@
                                 (if (list-ref s 5) (list (instrument-text (+ 3 (* 3 i)) (string-append id " rattle") (list-ref s 5) #f g)) '()))))
                     SURFACES '(0 1 2 3 4)))
         (list (instrument-text 16 "guard, clear" GUARD-CLEAR GUARD-CLEAR-LAYERS 0.75)
-              (instrument-text 17 "guard, through the wall" GUARD-MUFFLED GUARD-MUFFLED-LAYERS 0.26)
-              (instrument-text 18 "sting ?" STING-Q #f 0.8)
-              (instrument-text 19 "sting there" STING-THERE #f 0.9))))
+              (instrument-text 17 "guard, through the wall" GUARD-MUFFLED GUARD-MUFFLED-LAYERS 0.26))))
 
     ;; Channels: one per surface (carpet 1, tile 2, marble 3, grate 4 with its rattle
-    ;; on 5, raised 6), the guard 7, the stings 8: motif plays at most 8 voices a
+    ;; on 5, raised 6), the guard 7 (8 is free: the stings were dropped, the leader,
+    ;; 2026-09-26, the robot's voice carries those moments): motif plays at most 8 voices a
     ;; channel, instruments and their layers counted (the first test run, all on
     ;; one channel, was refused). Nothing rings into the next slot: each slot is
     ;; longer than its sound (slot-rows).
