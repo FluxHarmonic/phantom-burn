@@ -15,7 +15,7 @@
 //   files      every file in the manifest is served 200 byte for byte, and
 //              nothing but .html is served as html
 //   missing    a missing path is a 404 with 404.html's body, at the root and
-//              under the slug; /_headers is not served
+//              under the game; /_headers and /_redirects are not served
 //   slash      /<game> redirects (308) to /<game>/
 //   redirect   every _redirects rule answers its status and Location (the
 //              game's first path 301s to /beta/, the rest of the path kept)
@@ -23,7 +23,7 @@
 //              own sha256; the page's data-wasm names it; the old
 //              /<game>/phantom-burn.wasm is gone (a 404) (t-5b3251: in
 //              production the wasm is in R2)
-//   boots      the game at /<slug>/ and its title (?title=1) boot in headless
+//   boots      the game at /<game>/ and its title (?title=1) boot in headless
 //              Chrome through this same server with no console error, and
 //              fetched the wasm from /w/<sha16>/ and nowhere else
 // All green writes build/site.verified: the manifest's sha256, the gate
