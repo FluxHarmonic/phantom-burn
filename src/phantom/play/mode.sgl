@@ -34,13 +34,15 @@
           (phantom guard guard)
           (phantom guard body)
           (phantom play devices)
+          (phantom play practice)
           (phantom deck hud))
 
   (export play-mode-start! play-mode-active? play-mode-core
           play-mode-reset! play-mode-set-on-win!
           play-press! play-mode-set-dev! play-mode-sound-feed
           play-hold? play-after-tick! play-frame! play-hud!
-          play-held! play-mode-devices play-mode-deck play-mode-terminal)
+          play-held! play-mode-devices play-mode-deck play-mode-terminal
+          play-mode-practice? play-mode-crash play-mode-lesson play-mode-practice-done?)
 
   (begin
 
@@ -61,6 +63,18 @@
     (define *cam* #f)
 
     (define (play-mode-active?) (and *core* #t))
+
+    ;; --- PRACTICE (topics/phantom-burn-practice-api) ------------------------------
+    (define *practice* #f)
+    (define (play-mode-practice?) (and *practice* #t))
+    (define (play-mode-crash) (if *practice* (practice-crash *practice*) '()))
+    (define (play-mode-lesson) (if *practice* (practice-lesson *practice*) (list 0 0 #f 'active)))
+    (define (play-mode-practice-done?) (and *practice* (practice-done? *practice*)))
+    ;; a command the deck or the terminal ran, for the lessons
+    (define (note-command! r source)
+      (when (and *practice* (pair? r) (memq (car r) '(run lights)))
+        (practice-note-command! *practice* *core* (caddr r) source))
+      r)
     (define (play-mode-core) *core*)
 
     ;; coll: the floor's collision; info: its floor.sexp datum; text: its
@@ -73,6 +87,8 @@
         (set! *coll* coll)
         (set! *place* place?)
         (set! *core* (play-reset! (make-play coll data (cdr (assq 'circuits info)))))
+        ;; PRACTICE: the sim's lessons (play.sexp carries them)
+        (set! *practice* (and (> (lesson-count data) 0) (make-practice data)))
         (render-set-extra-draw! draw-guard!)
         (render-hide-part! 'badge #f)
         (set! *phase* 'play)
@@ -84,6 +100,7 @@
     (define (restart-walker)
       (for-each (lambda (c) (render-circuit-set! c #t)) (render-circuits))
       (play-reset! *core*)
+      (when *practice* (practice-reset! *practice*))
       (set! *attempts* (+ *attempts* 1))
       (set! *phase* 'play)
       (set! *timer* 0.0)
@@ -96,6 +113,17 @@
       (play-start-walker *core* *coll*))
 
     ;; a fade, the win card, or the terminal (you stand at it; the floor goes on)
+    ;; PRACTICE: after a capture's fade, only the lesson's room starts over
+    ;; (D38): the lights on again, the room's unit and devices as they began,
+    ;; you at the lesson's start. No attempt count, no patch note.
+    (define (practice-restart-room)
+      (for-each (lambda (c) (render-circuit-set! c #t)) (render-circuits))
+      (set! *phase* 'play)
+      (set! *timer* 0.0)
+      (set! *fade-in* FADE-IN)
+      (set! *use* #f)
+      (practice-reset-room! *practice* *core*))
+
     (define (play-hold?) (or (not (eq? *phase* 'play)) (and *core* (play-terminal-open? *core*))))
 
     ;; --- keys: use, and the light keys ------------------------------------------
@@ -252,6 +280,7 @@
     (define (play-mode-reset!)
       (for-each (lambda (c) (render-circuit-set! c #t)) (render-circuits))
       (play-reset! *core*)
+      (when *practice* (practice-reset! *practice*))
       (set! *attempts* 1)
       (set! *phase* 'play)
       (set! *timer* 0.0)
@@ -272,7 +301,7 @@
       (cond
         ((eq? *phase* 'caught)
          (guard-hold! (play-guard *core*))
-         (if (>= *timer* FADE-OUT) (restart-walker) #f))
+         (if (>= *timer* FADE-OUT) (if *practice* (practice-restart-room) (restart-walker)) #f))
         ((eq? *phase* 'won)
          (guard-hold! (play-guard *core*))
          (cond ((< *timer* WIN-HOLD) #f)
@@ -292,16 +321,20 @@
            (apply-use! (play-use! *core* w render-circuit-on?)))
          (set! *message-t* (max 0.0 (- *message-t* TICK)))
          (if (play-terminal-open? *core*)
-             (apply-deck! (play-terminal-step! *core* render-circuit-on?))
-             (apply-deck! (play-deck! *core* w *deck-held* render-circuit-on?)))
+             (apply-deck! (note-command! (play-terminal-step! *core* render-circuit-on?) 'terminal))
+             (apply-deck! (note-command! (play-deck! *core* w *deck-held* render-circuit-on?) 'deck)))
          (let ((o (if (eq? (play-outcome *core*) 'won)
                       'won
                       (play-tick! *core* w render-circuit-on? (render-night) (render-pools)))))
+           ;; PRACTICE: the lessons, after the rules; a camera's alarm in its
+           ;; lesson resets the room as a capture does
+           (when (and *practice* (eq? (practice-tick! *practice* *core*) 'caught) (not (eq? o 'caught)))
+             (set! *phase* 'caught) (set! *timer* 0.0))
            (cond ((eq? o 'caught) (set! *phase* 'caught) (set! *timer* 0.0))
                  ((eq? o 'won) (set! *phase* 'won) (set! *timer* 0.0)
                   (set! *ticks-at-win* (play-ticks *core*))
-                  ;; the patch note's ping, on the landing
-                  (play-event! *core* 'note (walker-x w) (walker-y w)))
+                  ;; the patch note's ping, on the landing (none in the sim)
+                  (unless *practice* (play-event! *core* 'note (walker-x w) (walker-y w))))
                  ((eq? o 'badge) (set! *badge-flash* 2.5)
                   ;; taken: gone from the desk (the compiler's badge part)
                   (render-hide-part! 'badge #t)))
@@ -388,6 +421,8 @@
           (draw-guard-caption! w h k ts)
           (draw-objective! w h ts)
           ;; the deck's prompt, bottom left (the shell's draw)
+          ;; Crash's lines, stacked above the deck's prompt (the shell's draw)
+          (when *practice* (crash-lines-draw! w h k (play-mode-crash)))
           (cond ((and (eq? *phase* 'play) (play-terminal-open? *core*))
                  (terminal-draw! w h k (play-mode-terminal) (play-mode-devices)))
                 ((not (play-hold?)) (deck-hud-draw! w h k (play-mode-deck))))
@@ -497,6 +532,12 @@
            (set-color 1.0 0.25 0.35 a)
            (big-centred "CAUGHT" w (* 0.45 h) (* 2 ts))
            (set-color 1.0 1.0 1.0)))
+        ;; PRACTICE: the sim ends on Crash, not Gibson (D38): no patch note,
+        ;; the frame fades while Crash's last line stays up
+        ((and (eq? *phase* 'won) *practice*)
+         (set-color 0.0 0.0 0.0 (min 0.7 (/ *timer* 3.0)))
+         (with-blend-mode 'normal (draw-filled-rect 0 0 w h))
+         (set-color 1.0 1.0 1.0))
         ((eq? *phase* 'won)
          ;; the patch note on the landing (design §5): flat system text, then
          ;; Gibson's line in violet; a clean floor gets no Gibson line
