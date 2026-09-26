@@ -355,12 +355,14 @@
               ;; devices, by their live state
               (for-each
                (lambda (d)
-                 (let ((id (list-ref d 0)) (kind (list-ref d 1)))
+                 (let* ((id (list-ref d 0)) (kind (list-ref d 1))
+                        (x (gx (list-ref d 2)))
+                        (y (- (gy (list-ref d 3)) (if (eq? kind 'lights) (nudge x (gy (list-ref d 3)) devices) 0))))
                    (color! (state-colour kind (list-ref d 5)))
-                   (glyph! kind (gx (list-ref d 2)) (gy (list-ref d 3)) ox oy k)
+                   (glyph! kind x y ox oy k)
                    (when (and (< sel (length rows)) (eq? id (car (list-ref rows sel))) (blink? 2.0))
                      (color! C-SELECTED)
-                     (draw-rect (+ ox (* k (- (gx (list-ref d 2)) 6))) (+ oy (* k (- (gy (list-ref d 3)) 6))) (* 13 k) (* 13 k)))))
+                     (draw-rect (+ ox (* k (- x 6))) (+ oy (* k (- y 6))) (* 13 k) (* 13 k)))))
                devices)
               (you! ox oy k))
             (begin
@@ -404,6 +406,17 @@
                (unless (list-ref r 3)
                  (color! C-ICE)
                  (draw-text (string-append "NEEDS " (name (list-ref r 4))) x yy k))))))))
+
+    ;; A lighting zone's glyph that would sit on another device's (the FM
+    ;; office's lights and its terminal) moves up a glyph's height.
+    (define (nudge x y devices)
+      (let loop ((ds devices))
+        (cond ((null? ds) 0)
+              ((and (not (eq? (list-ref (car ds) 1) 'lights))
+                    (< (abs (- x (gx (list-ref (car ds) 2)))) 9)
+                    (< (abs (- y (gy (list-ref (car ds) 3)))) 9))
+               11)
+              (else (loop (cdr ds))))))
 
     ;; a camera's view fan: ICE dots every 2 frame pixels inside its cone
     (define (fan! d ox oy k)
