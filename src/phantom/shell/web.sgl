@@ -278,6 +278,7 @@
     (define *tap* #f)                ; (x . y): a tap or click on the title, canvas pixels
     (define *going* #f)              ; asked the page for the other floor
     (define *want-title* #f)         ; a win's card is done: back to the title
+    (define *said-practiced* #f)     ; "practice done" printed
     (define *t-info-text* #f)
     (define *t-info* #f)
     (define *t-fetches* '())
@@ -428,6 +429,11 @@
                  ;; the sound: P2's feed for this frame (steps, events, you, the guard)
                  (sound-game-frame! dt (game-walker))
                  (sound-traced!)
+                 ;; PRACTICE finished: once, so the page remembers the player
+                 ;; has practised (localStorage phantomburn.practiced)
+                 (when (and (not *said-practiced*) (play-mode-practice-done?))
+                   (set! *said-practiced* #t)
+                   (display "phantom-burn: practice done") (newline))
                  ;; ready once the first frame is drawn (shots wait for this line)
                  (unless *said-ready*
                    (set! *said-ready* #t)
