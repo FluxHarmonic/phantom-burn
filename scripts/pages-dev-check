@@ -60,7 +60,7 @@ i=0; until grep -q 'Ready on' "$W/dev.log" 2>/dev/null; do
   kill -0 "$SRV" 2>/dev/null || { echo "pages-dev-check: SETUP-FAILED: wrangler pages dev exited; its log:"; cat "$W/dev.log"; exit 2; }
   sleep 1
 done
-grep -q 'env.WASM' "$W/dev.log" || { echo "pages-dev-check: SETUP-FAILED: the WASM binding is not in wrangler's binding list"; cat "$W/dev.log"; exit 2; }
+grep -Eq 'env\.WASM([^A-Za-z0-9_]|$)' "$W/dev.log" || { echo "pages-dev-check: SETUP-FAILED: the WASM binding is not in wrangler's binding list"; cat "$W/dev.log"; exit 2; }
 echo "pages-dev-check: $DIR in wrangler pages dev on 127.0.0.1:$PORT, the wasm in local R2 bucket $BUCKET"
 set +e
 node scripts/verify-live.mjs "http://127.0.0.1:$PORT" "$DIR" --wrangler-dev
