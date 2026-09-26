@@ -1,15 +1,17 @@
 #!/bin/sh
 # The one-time Cloudflare account changes phantomburn.net needs. DAVID RUNS
 # THIS; workers do not create projects or DNS records, and do not hold the
-# tokens that can. After Harkfell's scripts/cloudflare-setup, without the R2
-# bucket (the wasm is a plain file here, under Pages' 25 MiB cap).
+# tokens that can. After Harkfell's scripts/cloudflare-setup, R2 bucket and
+# all (t-5b3251: one deployment model for every game, the wasm in R2).
 #
 #   scripts/cloudflare-setup             report only: what exists, what each
 #                                        step would do (no writes)
 #   scripts/cloudflare-setup --create    create the Pages project `phantomburn`
-#                                        (production branch master). Nothing is
-#                                        public after this: no deployment, no
-#                                        domain
+#                                        (production branch master) and the
+#                                        private R2 bucket `phantomburn-wasm`,
+#                                        each only if missing. Nothing is public
+#                                        after this: no deployment, no domain,
+#                                        and the bucket has no public access
 #   scripts/cloudflare-setup --domain    attach phantomburn.net and
 #                                        www.phantomburn.net to the project, and
 #                                        create their proxied CNAMEs to the
@@ -23,11 +25,18 @@
 #   CLOUDFLARE_ACCOUNT_ID  the account id (wrangler whoami prints it)
 #
 # TOKEN SCOPES: ONE token for this script and scripts/publish-web (David's,
-# 2026-09-25; no R2 here, so Harkfell's split into a setup and a publish
-# token buys nothing):
-#     Account  Cloudflare Pages   Edit   create the project, attach the domains, deploy
-#     Zone     DNS                Edit   phantomburn.net only (--domain)
-#     Zone     Zone               Read   phantomburn.net only (the zone id)
+# 2026-09-25; re-minted with R2 for t-5b3251:
+#   REPLACE=1 R2_SCOPE=account ~/Ops/scripts/cloudflare-token-site.sh phantomburn phantomburn.net phantomburn-wasm):
+#     Account  Cloudflare Pages      Edit   create the project, attach the domains, deploy
+#     Account  Workers R2 Storage    Edit   create the bucket, put and read back the wasm
+#                                           (account-wide: it reaches every bucket)
+#     Zone     DNS                   Edit   phantomburn.net only (--domain)
+#     Zone     Zone                  Read   phantomburn.net only (the zone id)
+#
+# The bucket stays private: the only way to its objects is the Pages Function
+# (functions/w/[[path]].js, bound by wrangler.jsonc). Nothing here or in
+# publish-web ever deletes an object: keys are content-named and kept, so a
+# cached page always finds the wasm it was built against.
 #
 # The site is a private preview: robots.txt disallows everything, every
 # response says X-Robots-Tag: noindex, and the game lives at a path that is
@@ -46,6 +55,7 @@ SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/phantomburn-cloudflare-setup-XXXXXX")"
 trap 'rm -rf "$SCRATCH"' EXIT
 cd "$SCRATCH" || exit 1
 PROJECT="${PHANTOM_PAGES_PROJECT:-phantomburn}"
+BUCKET="${PHANTOM_WASM_BUCKET:-phantomburn-wasm}"
 ZONE_NAME=phantomburn.net
 DOMAINS="phantomburn.net www.phantomburn.net"
 MODE=report
@@ -73,7 +83,7 @@ api() {   # METHOD PATH [JSON] -> the body; exits on success:false
   fi
   printf '%s' "$out"
 }
-say "account $CLOUDFLARE_ACCOUNT_ID, project $PROJECT, mode $MODE"
+say "account $CLOUDFLARE_ACCOUNT_ID, project $PROJECT, bucket $BUCKET, mode $MODE"
 
 PROJ_JSON="$(curl -sS "$API/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$PROJECT" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")"
 TARGET=""
@@ -86,10 +96,23 @@ else
   say "Pages project $PROJECT does not exist ($(printf '%s' "$PROJ_JSON" | jq -c '.errors[0].message'))"
 fi
 
+BUCKET_JSON="$(curl -sS "$API/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/$BUCKET" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")"
+if [ "$(printf '%s' "$BUCKET_JSON" | jq -r '.success')" = true ]; then
+  HAVE_BUCKET=1
+  say "R2 bucket $BUCKET exists (created $(printf '%s' "$BUCKET_JSON" | jq -r '.result.creation_date // "?"'))"
+else
+  HAVE_BUCKET=0
+  say "R2 bucket $BUCKET does not exist ($(printf '%s' "$BUCKET_JSON" | jq -c '.errors[0].message'))"
+fi
+
 if [ "$MODE" = create ]; then
   if [ "$HAVE_PROJECT" = 0 ]; then
     wrangler pages project create "$PROJECT" --production-branch master
     say "created Pages project $PROJECT (no deployment, no custom domain: nothing is public)"
+  fi
+  if [ "$HAVE_BUCKET" = 0 ]; then
+    wrangler r2 bucket create "$BUCKET"
+    say "created R2 bucket $BUCKET (private: only the Pages Function reads it)"
   fi
   say "next: scripts/publish-web DIR \"<line>\" --preview, checked on its pages.dev URL"
   exit 0
@@ -103,7 +126,7 @@ for d in $DOMAINS; do
   say "  $d: ${recs:-none}"
 done
 if [ "$MODE" = report ]; then
-  say "report only. --create would make the project if missing; --domain would attach $DOMAINS"
+  say "report only. --create would make the project and the bucket if missing; --domain would attach $DOMAINS"
   say "to $PROJECT and create proxied CNAMEs to ${TARGET:-<its pages.dev name>} where no record exists (and refuse where one does)"
   exit 0
 fi

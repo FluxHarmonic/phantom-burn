@@ -1,8 +1,11 @@
 #!/bin/sh
 # Publish phantomburn.net to Cloudflare Pages (project phantomburn): exactly
 # the tree scripts/check-site.mjs checked, or nothing. After Harkfell's
-# scripts/publish-web, without R2 and Functions (the wasm is ~10.5 MB, under
-# Pages' 25 MiB per-file cap, so it is a plain file).
+# scripts/publish-web, R2 and all (t-5b3251): the wasm goes to the R2 bucket
+# phantomburn-wasm under its content-named key, w/<sha16>/phantom-burn.wasm
+# (never deleted, so a cached page always finds the wasm it was built
+# against; an existing key is read back and compared, never rewritten), and
+# the Pages Function functions/w/[[path]].js serves it same-origin.
 #
 #   scripts/publish-web DIR "<one line>" --preview    the preview branch only
 #                                                     (a pages.dev URL; public
@@ -18,28 +21,34 @@
 # were when the check started, and the check ran at HEAD on a clean checkout;
 # the tree was staged at HEAD; the working tree has no tracked changes.
 #
-# Then the tree is COPIED into a deploy directory this script owns (an empty
-# temp dir, no wrangler config anywhere above it: wrangler 4 reads and edits
-# the config it finds in its cwd), checked again against the manifest, and
-# `wrangler pages deploy` runs from there. Without --preview the same copy
+# Then the tree, functions/ and wrangler.jsonc are COPIED into a deploy
+# directory this script owns (an empty temp dir, no wrangler config anywhere
+# above it: wrangler 4 reads and edits the config it finds in its cwd) and
+# checked again against the manifest; wrangler.json is written there from the
+# copy (comments dropped, the output directory pointed at the copy, nothing
+# else changed). The wasm comes out of the copy and goes to R2 (--remote on
+# every r2 call: wrangler 4 defaults to a local simulator), is read back and
+# compared byte for byte; then `wrangler pages deploy` runs from there. Without --preview the same copy
 # goes to the preview branch first; scripts/verify-live.mjs checks its URL;
 # production is deployed only if that is green, and then checked the same way.
 #
 # Needs wrangler on PATH, CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (the
-# one token scripts/cloudflare-setup names), and the project that
-# `scripts/cloudflare-setup --create` makes. Never touches DNS or the
-# project's settings.
+# one token scripts/cloudflare-setup names, with R2 on phantomburn-wasm), and
+# the project and bucket that `scripts/cloudflare-setup --create` makes.
+# Never touches DNS or the project's settings, and never deletes an object.
 set -eu
 cd "$(dirname "$0")/.." || exit 1
 # Credentials: sourced from $PHANTOM_ENV_FILE (default ~/Ops/.env-phantomburn,
 # David's; this script only sources it and never prints it). ONE token covers
-# setup and publish: Pages Edit on the account, DNS Edit and Zone Read on
-# phantomburn.net.
+# setup and publish: Pages Edit and R2 on the account, DNS Edit and Zone Read
+# on phantomburn.net (re-minted with R2 for t-5b3251).
 ENV_FILE="${PHANTOM_ENV_FILE:-$HOME/Ops/.env-phantomburn}"
 if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
 
 say() { echo "publish-web: $*" >&2; }
 PROJECT="${PHANTOM_PAGES_PROJECT:-phantomburn}"
+BUCKET="$(sed -n 's/.*"bucket_name": "\([^"]*\)".*/\1/p' wrangler.jsonc)"
+[ -n "$BUCKET" ] || { say "REFUSED: wrangler.jsonc names no R2 bucket"; exit 1; }
 
 DIR=""; MESSAGE=""; DRY=0; ONLY_PREVIEW=0
 for a in "$@"; do
@@ -58,8 +67,8 @@ for f in "$DIR/index.html" "$DIR.manifest" "$DIR.verified"; do
 done
 
 WANT="$(grep -v '^#' "$DIR.manifest")"
-same() {   # dir label
-  got="$(scripts/tree-manifest "$1")" || { say "REFUSED: tree-manifest refused $2"; exit 1; }
+same() {   # dir label [root: where functions/ and wrangler.jsonc are]
+  got="$(scripts/tree-manifest "$1" "${3:-.}")" || { say "REFUSED: tree-manifest refused $2"; exit 1; }
   [ "$WANT" = "$got" ] || { say "REFUSED: $2 no longer matches $DIR.manifest; restage and recheck"; exit 1; }
 }
 same "$DIR" "$DIR"
@@ -84,7 +93,19 @@ trap 'rm -rf "$WORK"' EXIT
 D="$WORK/deploy"
 mkdir -p "$D/tree"
 cp -a "$DIR/." "$D/tree/"
-same "$D/tree" "the deploy directory's copy"
+cp -a functions "$D/functions"
+cp wrangler.jsonc "$D/wrangler.jsonc"
+same "$D/tree" "the deploy directory's copy" "$D"
+node -e '
+  const fs = require("fs");
+  const src = fs.readFileSync(process.argv[1], "utf8").split("\n").filter((l) => !/^\s*\/\//.test(l)).join("\n");
+  const cfg = JSON.parse(src);
+  const out = { ...cfg, pages_build_output_dir: "tree" };
+  const keys = (o) => Object.keys(o).sort().join(",");
+  if (keys(out) !== keys(cfg)) throw new Error("config keys changed");
+  fs.writeFileSync(process.argv[2], JSON.stringify(out, null, 2) + "\n");
+' "$D/wrangler.jsonc" "$D/wrangler.json"
+WJ_SHA="$(sha256sum "$D/wrangler.json" | cut -d' ' -f1)"
 p="$WORK"
 while :; do
   [ ! -e "$p/wrangler.json" ] && [ ! -e "$p/wrangler.jsonc" ] && [ ! -e "$p/wrangler.toml" ] && [ ! -e "$p/.wrangler/deploy/config.json" ] \
@@ -92,19 +113,49 @@ while :; do
   [ "$p" = / ] && break
   p="$(dirname "$p")"
 done
+[ ! -e "$D/.wrangler" ] || { say "REFUSED: a .wrangler directory appeared in the deploy directory"; exit 1; }
+
+# the wasm: out of the copy, to R2 below
+KEY="$(cd "$D/tree" && find . -name '*.wasm' | sed 's|^\./||')"
+[ "$(printf '%s\n' "$KEY" | grep -c .)" = 1 ] || { say "REFUSED: want exactly one wasm in the tree, found: $KEY"; exit 1; }
+SHA16="$(echo "$KEY" | sed -n 's|^w/\([0-9a-f]\{16\}\)/phantom-burn\.wasm$|\1|p')"
+[ -n "$SHA16" ] || { say "REFUSED: the wasm is at $KEY, not w/<sha16>/phantom-burn.wasm"; exit 1; }
+cp "$D/tree/$KEY" "$WORK/phantom-burn.wasm"
+[ "$(sha256sum "$WORK/phantom-burn.wasm" | cut -c1-16)" = "$SHA16" ] || { say "REFUSED: $KEY does not hash to its name"; exit 1; }
+rm -rf "$D/tree/w"
 BIG="$(cd "$D/tree" && find . -type f -size +26214400c)"
 [ -z "$BIG" ] || { say "REFUSED: over Pages' 25 MiB cap: $BIG"; exit 1; }
 NFILES="$(find "$D/tree" -type f | wc -l)"
+# the manifest without the wasm: what the deploy directory hashes to from here
+WANT_NOWASM="$(printf '%s\n' "$WANT" | grep -v "  $KEY\$")"
 
 if [ "$DRY" = 1 ]; then
-  say "dry run: would deploy $NFILES files ($(du -sh "$D/tree" | cut -f1)) from $D to Pages project $PROJECT: branch preview, verify-live on its URL$([ "$ONLY_PREVIEW" = 1 ] || echo ", then branch master and verify-live again")"
+  say "dry run: would put $KEY ($(stat -c%s "$WORK/phantom-burn.wasm") bytes) in R2 bucket $BUCKET (--remote), read it back and compare"
+  say "dry run: would deploy $NFILES files ($(du -sh "$D/tree" | cut -f1)) plus functions/ from $D to Pages project $PROJECT: branch preview, verify-live on its URL$([ "$ONLY_PREVIEW" = 1 ] || echo ", then branch master and verify-live again")"
   say "dry run: nothing left the box"
   exit 0
 fi
 command -v wrangler > /dev/null || { say "wrangler not on PATH"; exit 1; }
+# the wasm to R2: an absent key makes `get` exit non-zero, and so does an auth
+# or network failure, which then fails the put loudly; the read-back compare
+# gates both branches
+if (cd "$D" && wrangler r2 object get "$BUCKET/$KEY" --remote --file "$WORK/back.wasm") > "$WORK/r2.log" 2>&1; then
+  say "$KEY is already in $BUCKET"
+else
+  (cd "$D" && wrangler r2 object put "$BUCKET/$KEY" --remote --file "$WORK/phantom-burn.wasm" --content-type application/wasm) > "$WORK/r2.log" 2>&1 \
+    || { cat "$WORK/r2.log" >&2; say "the R2 upload failed; nothing deployed"; exit 1; }
+  (cd "$D" && wrangler r2 object get "$BUCKET/$KEY" --remote --file "$WORK/back.wasm") >> "$WORK/r2.log" 2>&1 \
+    || { cat "$WORK/r2.log" >&2; say "the R2 read-back failed; nothing deployed"; exit 1; }
+  say "put $KEY ($(stat -c%s "$WORK/phantom-burn.wasm") bytes)"
+fi
+cmp -s "$WORK/phantom-burn.wasm" "$WORK/back.wasm" || { say "REFUSED: the object at $BUCKET/$KEY is not the verified wasm; nothing deployed"; exit 1; }
+say "R2 holds the verified wasm at $KEY (read back, identical)"
+rm -rf "$D/.wrangler"   # wrangler's local state from the r2 calls, never deployed
 
 deploy() {   # branch -> the deployment URL on stdout
-  same "$D/tree" "the deploy directory (just before deploying to $1)"
+  got="$(scripts/tree-manifest "$D/tree" "$D")" || { say "REFUSED: tree-manifest refused the deploy directory"; exit 1; }
+  [ "$got" = "$WANT_NOWASM" ] || { say "REFUSED: the deploy directory changed after it was checked; nothing deployed to $1"; exit 1; }
+  [ "$(sha256sum "$D/wrangler.json" | cut -d' ' -f1)" = "$WJ_SHA" ] || { say "REFUSED: wrangler.json in the deploy directory changed; nothing deployed to $1"; exit 1; }
   set +e
   (cd "$D" && wrangler pages deploy tree --project-name "$PROJECT" --branch "$1" \
      --commit-hash "$HEAD_FULL" --commit-message "$MESSAGE") > "$WORK/deploy-$1.log" 2>&1

@@ -1,0 +1,70 @@
+#!/bin/sh
+# Run a staged phantomburn.net tree through Cloudflare's own Pages runtime on
+# this box, with the wasm in a LOCAL R2 bucket, and check it with
+# verify-live.mjs: the closest thing to a deployment that needs no Cloudflare
+# account (after Harkfell's scripts/pages-dev-check; t-5b3251).
+#
+#   scripts/pages-dev-check DIR [PORT]      (default port 8819)
+#
+# What it proves that check-site.mjs cannot: the Pages Function
+# (functions/w/[[path]].js) serves the wasm from an R2 binding named as
+# wrangler.jsonc names it, byte for byte, with CORP/COEP and an immutable
+# cache; the tree's _headers is applied by Pages' own code; a missing path
+# answers the 404 page. It does this exactly as publish-web will: a copy of DIR
+# with the wasm removed and put in R2 under the key the page names.
+#
+# What it cannot prove: the real R2 upload, the token's scopes, Cloudflare's
+# edge (compression, caching), the custom domain. verify-live.mjs against the
+# deployment's URL covers those after a publish.
+#
+# workerd, the runtime wrangler starts, is a glibc binary that expects
+# /lib64/ld-linux-x86-64.so.2, which Guix does not have; this runs it through
+# Guix's glibc loader via a wrapper named by MINIFLARE_WORKERD_PATH
+# (topics/wrangler-pages-dev-on-guix). wrangler's local state (.wrangler/)
+# goes to the scratch copy, never the repo.
+set -eu
+cd "$(dirname "$0")/.." || exit 1
+DIR="${1:-}"; DIR="${DIR%/}"; PORT="${2:-8819}"
+[ -n "$DIR" ] && [ -f "$DIR/index.html" ] && [ -f "$DIR.manifest" ] || { echo "pages-dev-check: give a staged tree (scripts/stage-web DIR)"; exit 2; }
+[ "$(scripts/tree-manifest "$DIR")" = "$(grep -v '^#' "$DIR.manifest")" ] || { echo "pages-dev-check: $DIR no longer matches $DIR.manifest; restage"; exit 1; }
+command -v wrangler > /dev/null || { echo "pages-dev-check: SETUP-FAILED: wrangler not on PATH"; exit 2; }
+WORKERD="$(dirname "$(readlink -f "$(command -v wrangler)")")/../node_modules/@cloudflare/workerd-linux-64/bin/workerd"
+[ -x "$WORKERD" ] || WORKERD="$(find "$(dirname "$(readlink -f "$(command -v wrangler)")")/.." -path '*workerd-linux-64/bin/workerd' -type f | head -1)"
+[ -x "$WORKERD" ] || { echo "pages-dev-check: SETUP-FAILED: wrangler's workerd not found"; exit 2; }
+GLIBC="$(guix build glibc 2>/dev/null | grep -v -e '-debug$' -e '-static$' | head -1)"
+[ -x "$GLIBC/lib/ld-linux-x86-64.so.2" ] || { echo "pages-dev-check: SETUP-FAILED: no glibc loader from guix"; exit 2; }
+
+W="$(mktemp -d "${TMPDIR:-/tmp}/phantomburn-pages-dev-XXXXXX")"
+SRV=""
+cleanup() { [ -n "$SRV" ] && kill -- "-$SRV" 2>/dev/null; rm -rf "$W"; }
+trap cleanup EXIT
+printf '#!/bin/sh\nexec %s --library-path %s %s "$@"\n' "$GLIBC/lib/ld-linux-x86-64.so.2" "$GLIBC/lib" "$WORKERD" > "$W/workerd"
+chmod +x "$W/workerd"
+"$W/workerd" --version > /dev/null || { echo "pages-dev-check: SETUP-FAILED: workerd does not run through the loader"; exit 2; }
+
+cp -a functions "$W/"
+sed 's|"pages_build_output_dir": "[^"]*"|"pages_build_output_dir": "tree"|' wrangler.jsonc > "$W/wrangler.jsonc"
+mkdir -p "$W/tree"; cp -a "$DIR/." "$W/tree/"
+KEY="$(cd "$W/tree" && find . -name '*.wasm' | sed 's|^\./||')"
+[ "$(printf '%s\n' "$KEY" | grep -c .)" = 1 ] || { echo "pages-dev-check: want one wasm in the tree, found: $KEY"; exit 1; }
+printf '%s\n' "$KEY" | grep -Eqx 'w/[0-9a-f]{16}/phantom-burn\.wasm' || { echo "pages-dev-check: the wasm is at $KEY, not w/<sha16>/phantom-burn.wasm"; exit 1; }
+BUCKET="$(sed -n 's/.*"bucket_name": "\([^"]*\)".*/\1/p' wrangler.jsonc)"
+mv "$W/tree/$KEY" "$W/phantom-burn.wasm"
+rm -rf "$W/tree/w"
+(cd "$W" && MINIFLARE_WORKERD_PATH="$W/workerd" wrangler r2 object put "$BUCKET/$KEY" --local --file phantom-burn.wasm --content-type application/wasm > r2.log 2>&1) \
+  || { echo "pages-dev-check: SETUP-FAILED: the local R2 put"; cat "$W/r2.log"; exit 2; }
+(cd "$W" && MINIFLARE_WORKERD_PATH="$W/workerd" exec setsid wrangler pages dev tree --port "$PORT" --ip 127.0.0.1 > dev.log 2>&1) &
+SRV=$!
+i=0; until grep -q 'Ready on' "$W/dev.log" 2>/dev/null; do
+  i=$((i+1)); [ $i -lt 60 ] || { echo "pages-dev-check: TIMED-OUT: wrangler pages dev not ready in 60 s; its log:"; cat "$W/dev.log"; exit 2; }
+  kill -0 "$SRV" 2>/dev/null || { echo "pages-dev-check: SETUP-FAILED: wrangler pages dev exited; its log:"; cat "$W/dev.log"; exit 2; }
+  sleep 1
+done
+grep -q 'env.WASM' "$W/dev.log" || { echo "pages-dev-check: SETUP-FAILED: the WASM binding is not in wrangler's binding list"; cat "$W/dev.log"; exit 2; }
+echo "pages-dev-check: $DIR in wrangler pages dev on 127.0.0.1:$PORT, the wasm in local R2 bucket $BUCKET"
+set +e
+node scripts/verify-live.mjs "http://127.0.0.1:$PORT" "$DIR" --wrangler-dev
+rc=$?
+set -e
+echo "pages-dev-check: verify-live rc=$rc"
+exit $rc

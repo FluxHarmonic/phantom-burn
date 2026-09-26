@@ -10,7 +10,15 @@
 #                     a missing path with the root page and a 200:
 #                     topics/cloudflare-pages-serves-index-for-a-missing-path)
 #   /robots.txt       disallows everything; _headers says noindex everywhere
-#   /<slug>/          the game's web build (page, wasm, bridges, assets/)
+#   /<slug>/          the game's web build (page, bridges, assets/)
+#   /w/<sha16>/phantom-burn.wasm
+#                     the game's wasm, named by its content (the first 16 hex
+#                     of its sha256), at the root so no route names the slug.
+#                     The page's data-wasm is rewritten to point there. In
+#                     production it is not a file: publish-web moves it to R2
+#                     (bucket phantomburn-wasm) and functions/w/[[path]].js
+#                     serves it same-origin (t-5b3251, Harkfell's model); here
+#                     it stays a plain file so check-site.mjs can serve it.
 #
 # THE SLUG IS NOT IN THE REPO. It is read from $PHANTOM_SITE_SLUG, else from
 # ~/.config/phantomburn/slug (mode 600), and must be `p-` and 10 base32
@@ -35,10 +43,16 @@ for f in index.html phantom-burn.wasm assets; do
 done
 [ -f "$WEB/assets/floors/14-slice/floor.sexp" ] || { say "REFUSED: $WEB has no compiled floor 14"; exit 1; }
 for f in index.html 404.html robots.txt _headers; do [ -f "site/$f" ] || { say "REFUSED: site/$f missing"; exit 1; }; done
+grep -c 'data-wasm="phantom-burn"' "$WEB/index.html" | grep -qx 1 || { say "REFUSED: $WEB/index.html does not say data-wasm=\"phantom-burn\" exactly once; the page changed shape"; exit 1; }
 
 mkdir -p "$DIR/$SLUG"
 cp site/index.html site/404.html site/robots.txt site/_headers "$DIR/"
-cp "$WEB/index.html" "$WEB/phantom-burn.wasm" "$DIR/$SLUG/"
+cp "$WEB/index.html" "$DIR/$SLUG/"
+SHA16="$(sha256sum "$WEB/phantom-burn.wasm" | cut -c1-16)"
+mkdir -p "$DIR/w/$SHA16"
+cp "$WEB/phantom-burn.wasm" "$DIR/w/$SHA16/phantom-burn.wasm"
+sed -i "s|data-wasm=\"phantom-burn\"|data-wasm=\"/w/$SHA16/phantom-burn\"|" "$DIR/$SLUG/index.html"
+grep -c "data-wasm=\"/w/$SHA16/phantom-burn\"" "$DIR/$SLUG/index.html" | grep -qx 1 || { say "REFUSED: the page's data-wasm was not rewritten"; exit 1; }
 for f in "$WEB"/sigil-wasm-bridges.*; do [ -f "$f" ] && cp "$f" "$DIR/$SLUG/"; done
 cp -r "$WEB/assets" "$DIR/$SLUG/assets"
 
@@ -47,7 +61,7 @@ BUILT="local build/web"
 {
   echo "# head $(git rev-parse HEAD)"
   echo "# built $BUILT"
-  echo "# wasm $(sha256sum "$WEB/phantom-burn.wasm" | cut -c1-16)"
+  echo "# wasm $SHA16"
   scripts/tree-manifest "$DIR"
 } > "$DIR.manifest"
-say "staged $(grep -vc '^#' "$DIR.manifest") files ($(du -sh "$DIR" | cut -f1)) to $DIR; the game at /<slug>/; manifest $DIR.manifest"
+say "staged $(grep -vc '^#' "$DIR.manifest") entries ($(du -sh "$DIR" | cut -f1)) to $DIR; the game at /<slug>/, its wasm at /w/$SHA16/phantom-burn.wasm; manifest $DIR.manifest"

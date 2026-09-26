@@ -1,0 +1,28 @@
+{
+  // Cloudflare Pages project phantomburn (phantomburn.net), in Harkfell's
+  // shape (procedures/harkfell-site-publish; t-5b3251): the wasm lives in R2,
+  // content-addressed and never deleted, and a Pages Function
+  // (functions/w/[[path]].js) serves it same-origin with CORP/COEP. The
+  // binding is declared here and `wrangler pages deploy` applies it with the
+  // deployment, so no dashboard setting is involved. The project and the
+  // bucket are created once, by David: scripts/cloudflare-setup --create.
+  //
+  // The wasm's path, /w/<sha16>/phantom-burn.wasm, is at the root on purpose:
+  // the game's page lives under a secret path that no repo file may name, so
+  // the route cannot live under it.
+  //
+  // scripts/publish-web deploys the tree check-site.mjs verified (a temporary
+  // copy, the wasm moved to R2), so the directory below is only the default
+  // for a bare `wrangler pages deploy`, which nothing here runs.
+  "name": "phantomburn",
+  "pages_build_output_dir": "build/site",
+  // 2026-07-14 is the newest date this box's wrangler (4.112.0) workerd
+  // supports; a later one makes `wrangler pages dev` refuse to start.
+  "compatibility_date": "2026-07-14",
+  "r2_buckets": [
+    {
+      "binding": "WASM",
+      "bucket_name": "phantomburn-wasm"
+    }
+  ]
+}

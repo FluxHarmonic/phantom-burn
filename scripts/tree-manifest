@@ -1,17 +1,26 @@
 #!/bin/sh
 # Print the identity of a deploy: one "sha256  path" line per file under DIR
-# (the staged tree, as `wrangler pages deploy` uploads it). After Harkfell's
-# scripts/tree-manifest, without its Functions and wrangler config (this site
-# has neither).
+# (the staged tree, as `wrangler pages deploy` uploads it), then one
+# "sha256  @path" line per file of what else the deploy carries: functions/
+# (the wasm route) and wrangler.jsonc (its R2 binding), read from ROOT
+# (default the repo). After Harkfell's scripts/tree-manifest.
 #
-#   scripts/tree-manifest DIR
+#   scripts/tree-manifest DIR [ROOT]
 #
-# REFUSES (exit 1, nothing on stdout) when DIR holds anything but regular
-# files and directories: `find -type f` skips a symlink and wrangler's upload
-# follows it, so two trees with different link targets would share a manifest.
+# REFUSES (exit 1, nothing on stdout) when DIR or functions/ holds anything
+# but regular files and directories (`find -type f` skips a symlink and
+# wrangler's upload follows it, so two trees with different link targets
+# would share a manifest), or when a Function imports anything (what it
+# imports would not be hashed here).
 set -eu
-DIR="${1:-}"
+cd "$(dirname "$0")/.." || exit 1
+DIR="${1:-}"; ROOT="${2:-.}"
 [ -n "$DIR" ] && [ -d "$DIR" ] || { echo "tree-manifest: give the staged directory" >&2; exit 2; }
-ODD="$(find "$DIR" ! -type f ! -type d | head -5)"
+[ -d "$ROOT/functions" ] || { echo "tree-manifest: $ROOT/functions missing (the wasm route)" >&2; exit 1; }
+[ -f "$ROOT/wrangler.jsonc" ] || { echo "tree-manifest: $ROOT/wrangler.jsonc missing" >&2; exit 1; }
+ODD="$(find "$DIR" "$ROOT/functions" ! -type f ! -type d | head -5)"
 [ -z "$ODD" ] || { echo "tree-manifest: REFUSED: not a regular file or directory (a symlink?): $ODD" >&2; exit 1; }
+IMP="$(grep -l -E '^[[:space:]]*import[[:space:](]|require\(|import\(' $(find "$ROOT/functions" -type f) 2>/dev/null || true)"
+[ -z "$IMP" ] || { echo "tree-manifest: REFUSED: a Function imports something this manifest does not hash: $IMP" >&2; exit 1; }
 ( cd "$DIR" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum ) | sed 's|  \./|  |'
+( cd "$ROOT" && { find functions -type f -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum; sha256sum wrangler.jsonc; } ) | sed 's|  |  @|'
