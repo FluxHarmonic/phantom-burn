@@ -28,50 +28,69 @@
 
 (define (fresh) (play-reset! (make-play C DATA CIRCUITS)))
 
-;; Walk north across the lobby at x 9, y 1 to 7: about 8.4 m from the lens,
-;; in its cone the whole way. The unit is held in the FM office, out of the
-;; way. Returns (incidents camera-state peak-awareness peak-light).
-(define (walk-past on?)
+;; A walk at the walker's walk from (x0 y) east to x1 (yaw -pi/2 faces
+;; east), with the unit held in the FM office, out of the way. Returns
+;; (incidents camera-state peak-awareness peak-light end-x p).
+(define EAST -1.5707963267948966)
+(define (first5 r) (list (list-ref r 0) (list-ref r 1) (list-ref r 2) (list-ref r 3) (list-ref r 4)))
+(define (walk-east on? y x0 x1 stop-at-alarm?)
   (let* ((p (fresh)) (g (play-guard p))
          (in (make-input 0.0 1.0 0.0 0.0 #f #f #f 0)))
-    (let loop ((i 0) (w (make-walker 9.0 1.0 0.0 0.0)) (peak 0.0) (light 0.0))
-      (if (or (>= i 900) (>= (walker-y w) 7.0))
-          (list (play-incidents p) (devices-state (play-devices-state p) CAMERA) peak light (walker-y w))
+    (let loop ((i 0) (w (make-walker x0 y 0.0 EAST)) (peak 0.0) (light 0.0))
+      (if (or (>= i 900) (>= (walker-x w) x1)
+              (and stop-at-alarm? (eq? (devices-state (play-devices-state p) CAMERA) 'alarmed)))
+          (list (play-incidents p) (devices-state (play-devices-state p) CAMERA) peak light (walker-x w) p)
           (let ((w (walker-step w in TICK C)))
-            (guard-place! g 24.0 19.5 1.0 0.0)
+            (unless stop-at-alarm? (guard-place! g 24.0 19.5 1.0 0.0))
             (play-tick! p w on? 1.0 2.0)
             (loop (+ i 1) w (max peak (play-camera-awareness p CAMERA)) (max light (play-light-01 p))))))))
 
+;; The camera by the lifts looks south-east over the window half of the
+;; lobby (P3 retune): the band walk crosses the middle of its view; the lane
+;; walk keeps to the strip under the mezzanine.
+(define (band on?) (walk-east on? 1.8 3.0 9.5 #f))
+(define (lane on?) (walk-east on? 7.5 2.0 12.5 #f))
+
 (test-group "the camera gate"
-  (test "LIT: walking through the camera's cone logs an incident, and the camera alarms"
-    (let ((r (walk-past LIT)))
-      (display (list 'lit r)) (newline)
-      (assert-true (>= (list-ref r 4) 7.0))
+  (test "LIT: walking through the camera's view logs an incident, and the camera alarms"
+    (let ((r (band LIT)))
+      (display (list 'lit (first5 r))) (newline)
+      (assert-true (>= (list-ref r 4) 9.5))
       (assert-true (assq 'camera-saw (car r)))
       (assert-equal 'alarmed (cadr r))))
   (test "DARK: the same walk with the lobby dark logs nothing"
-    (let ((r (walk-past DARK)))
-      (display (list 'dark r 'camera-dark CAMERA-DARK)) (newline)
-      (assert-true (>= (list-ref r 4) 7.0))
+    (let ((r (band DARK)))
+      (display (list 'dark (first5 r) 'camera-dark CAMERA-DARK)) (newline)
+      (assert-true (>= (list-ref r 4) 9.5))
       (assert-false (assq 'camera-saw (car r)))
       (assert-false (eq? (cadr r) 'alarmed))))
-  (test "its patch: CAMERA COVERAGE EXTENDED, and the unit is sent to look"
-    (let* ((p (fresh)) (g (play-guard p))
-           (in (make-input 0.0 1.0 0.0 0.0 #f #f #f 0)))
-      (let loop ((i 0) (w (make-walker 9.0 1.0 0.0 0.0)))
-        (when (and (< i 900) (< (walker-y w) 7.0) (not (eq? (devices-state (play-devices-state p) CAMERA) 'alarmed)))
-          (let ((w (walker-step w in TICK C)))
-            (play-tick! p w LIT 1.0 2.0)
-            (loop (+ i 1) w))))
-      (display (list 'patches (play-patches p) 'unit (guard-state g) (guard-awareness g))) (newline)
-      (assert-true (member "CAMERA COVERAGE EXTENDED" (map car (play-patches p))))
-      (assert-true (>= (guard-awareness g) 0.6))))
-  (test "out of its cone (behind it, by the lifts' wall): nothing, lit"
+  (test "THE WAY ROUND: lit, along the strip under the mezzanine, it never has you"
+    (let ((r (lane LIT)))
+      (display (list 'lane (first5 r))) (newline)
+      (assert-true (>= (list-ref r 4) 12.5))
+      (assert-false (assq 'camera-saw (car r)))
+      (assert-true (< (caddr r) 0.3))))
+  (test "it takes a moment to be sure: after 0.5 s in full view it is noticing, (seeing A) with A under 1"
     (let* ((p (fresh)) (in (make-input 0.0 1.0 0.0 0.0 #f #f #f 0)))
-      (let loop ((i 0) (w (make-walker 1.0 5.5 0.0 0.0)))
-        (when (and (< i 120) (< (walker-y w) 8.5))
+      (let loop ((i 0) (w (make-walker 3.0 1.8 0.0 EAST)))
+        (when (< i 30)
           (let ((w (walker-step w in TICK C)))
             (guard-place! (play-guard p) 24.0 19.5 1.0 0.0)
             (play-tick! p w LIT 1.0 2.0)
             (loop (+ i 1) w))))
-      (assert-false (assq 'camera-saw (play-incidents p))))))
+      (let ((st (list-ref (assq 'lift-camera (devices-list (play-devices-state p) LIT)) 5)))
+        (display (list 'noticing st)) (newline)
+        (assert-true (and (pair? st) (eq? (car st) 'seeing) (> (cadr st) 0.0) (< (cadr st) 1.0))))))
+  (test "its patch: CAMERA COVERAGE EXTENDED, and the unit is sent to look"
+    (let* ((r (walk-east LIT 1.8 3.0 9.5 #t)) (p (list-ref r 5)) (g (play-guard p)))
+      (display (list 'patches (play-patches p) 'unit (guard-state g) (guard-awareness g))) (newline)
+      (assert-true (member "CAMERA COVERAGE EXTENDED" (map car (play-patches p))))
+      (assert-true (>= (guard-awareness g) 0.6))))
+  (test "under it (the arrival spot, below its view): nothing, lit"
+    (let* ((p (fresh)) (w (play-start-walker p C)))
+      (let loop ((i 0))
+        (when (< i 180)
+          (guard-place! (play-guard p) 24.0 19.5 1.0 0.0)
+          (play-tick! p w LIT 1.0 2.0)
+          (loop (+ i 1))))
+      (assert-true (= 0.0 (play-camera-awareness p CAMERA))))))
