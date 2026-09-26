@@ -194,7 +194,7 @@
       (when (and *play-text* *info*)
         (play-mode-start! (game-collision) *info* *play-text* (not (param "view")))
         (set! *play-text* #f)
-        (game-set-play! (vector play-hold? play-after-tick! play-frame! play-hud! play-press!))
+        (game-set-play! (vector play-hold? play-after-tick! play-frame! play-hud! play-press! play-held!))
         (play-mode-set-dev! (and (param "dev") #t))
         (when (param "flow") (play-mode-set-on-win! (lambda () (set! *want-title* #t))))
         (unless (or (param "hud") (param "dev")) (game-set-hud! 0)))

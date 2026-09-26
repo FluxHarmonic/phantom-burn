@@ -36,7 +36,14 @@
            (desk    in: office     from: (corner 0 (2 5))  kind: office-desk)     ; (18 18)
            (desk    in: fm-office  from: (centre (0 0))    kind: office-desk)     ; (24 19)
            (cabinet in: office     from: (corner 0 (6.2 0.7))  kind: filing-cabinet  facing: 180)   ; (22.2 13.7), under the hatch
-           (badge   on-desk: (23.5 18.75)  tier: facilities))   ; in front of the monitor, where it can be seen (P2)
+           (badge   on-desk: (23.5 18.75)  tier: facilities)    ; in front of the monitor, where it can be seen (P2)
+           ;; P3: the devices (topics/phantom-burn-device-api); tier: who may command them
+           (phone    id: office-phone     on-desk: (17.45 17.85))                  ; STAFF: rings, pulls the unit
+           (printer  id: office-printer   at: (25.3 13.55)  facing: 180)           ; STAFF: runs
+           (vent     id: corridor-vent    in: corridor  at: (17.6 9.4))            ; FACILITIES: masks your steps
+           (blinds   id: lobby-blinds     in: lobby  along: ((1 0) (11 0)))        ; FACILITIES: the city light
+           (terminal id: fm-terminal      on-desk: (24.5 18.8))                    ; the floor map, every allowed command
+           (camera   id: lift-camera      in: lobby  at: (0 3.5)  look: (7 4 0)  fov: 70  range: 12))   ; observes the lifts
   views: ((establishing  at: (1 1 1.6)      look: (14 10 3))
           (from-the-duct at: (19 10.5 3.4)  look: (22.2 13.7 2.7))
           ;; the Blender export's three views (floor-14-export/README.txt), for floor-shot

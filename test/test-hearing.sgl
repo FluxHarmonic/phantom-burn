@@ -70,11 +70,11 @@
       (assert-true (caddr r)))))
 
 (test-group "noise"
-  (test "surfaces and gait: marble louder than carpet; a run twice a walk, a sneak half"
+  (test "surfaces and gait: marble louder than carpet; a run 2.5 times a walk, a sneak half"
     (let* ((tag (lambda (name) (let loop ((i 0)) (if (eq? (car (vector-ref (play-surface-noise DATA) i)) name) i (loop (+ i 1))))))
            (marble (tag 'marble)) (carpet (tag 'carpet)))
       (assert-true (> (step-noise DATA marble 'walk) (step-noise DATA carpet 'walk)))
-      (assert-true (near? (step-noise DATA marble 'run) (* 2.0 (step-noise DATA marble 'walk)) 1e-9))
+      (assert-true (near? (step-noise DATA marble 'run) (* 2.5 (step-noise DATA marble 'walk)) 1e-9))
       (assert-true (near? (step-noise DATA marble 'sneak) (* 0.5 (step-noise DATA marble 'walk)) 1e-9))))
   (test "distance fades: the same step 3 m away is louder than 15 m away"
     (hear-path! H (room 'lobby) 10.0 6.0 (room 'lobby) 7.0 6.0)
@@ -127,3 +127,43 @@
       (display (list 'gate-walk walk)) (newline)
       (assert-true (> (car walk) (car sneak)))
       (assert-true (< (car walk) (car run))))))
+
+;; --- P3's retune: quiet carpet (David: "really sensitive to sounds, even on
+;; carpet") ------------------------------------------------------------------------
+;; The office's carpet, in its open middle: the unit is held at (20.5 20.3)
+;; facing north, lights off; the runner comes up x 20.5 behind it at a gait
+;; and stops short of it. Returns (loudest heard?).
+(define (up-behind gait from to)
+  (let* ((p (play-reset! (make-play C DATA CIRCUITS)))
+         (g (play-guard p))
+         (in (make-input 0.0 1.0 0.0 0.0 (eq? gait 'sneak) (eq? gait 'run) #f 0)))
+    (guard-reset! g (play-guard-world p) 0)
+    (let loop ((i 0) (w (make-walker 20.5 from 0.0 0.0)) (loud 0.0) (heard #f))
+      (if (or (>= i 900) (>= (walker-y w) to))
+          (list loud heard (walker-y w))
+          (let ((w (walker-step w in TICK C)))
+            (guard-place! g 20.5 20.3 0.0 1.0)
+            (play-tick! p w DARK 1.0 2.0)
+            (loop (+ i 1) w (max loud (play-last-heard p)) (or heard (guard-heard? g))))))))
+
+(test-group "carpet (the P3 retune)"
+  (test "a walk on carpet is heard close by: ending 2 m behind the unit"
+    (let ((r (up-behind 'walk 15.3 18.3)))
+      (display (list 'carpet-walk-2m r)) (newline)
+      (assert-true (>= (caddr r) 18.3))
+      (assert-true (cadr r))))
+  (test "a walk on carpet is not heard from 5 m"
+    (let ((r (up-behind 'walk 13.8 15.3)))
+      (display (list 'carpet-walk-5m r)) (newline)
+      (assert-true (>= (caddr r) 15.3))
+      (assert-false (cadr r))))
+  (test "a sneak on carpet is near-silent: not heard even 1.5 m behind the unit"
+    (let ((r (up-behind 'sneak 15.3 18.8)))
+      (display (list 'carpet-sneak-1.5m r)) (newline)
+      (assert-true (>= (caddr r) 18.8))
+      (assert-false (cadr r))))
+  (test "a run is loud on any floor: heard on carpet from 4.5 m"
+    (let ((r (up-behind 'run 13.8 15.8)))
+      (display (list 'carpet-run-4.5m r)) (newline)
+      (assert-true (>= (caddr r) 15.8))
+      (assert-true (cadr r)))))

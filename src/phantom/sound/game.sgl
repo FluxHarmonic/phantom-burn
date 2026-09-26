@@ -26,6 +26,7 @@
 (define-library (phantom sound game)
   (import (sigil core)
           (sigil math)
+          (sigil time)
           (phantom sound)
           (phantom sound bank)
           (phantom play mode))
@@ -57,21 +58,42 @@
                                        t))
                            " steps " (number->string *steps-n*) " events " (number->string *events-n*)
                            " guards " (number->string *guards-n*)
+                           " cues " (number->string (sound-cue-plays *s*))
                            " started " (if (sound-started? *s*) "yes" "no"))))
                (set! *steps-n* 0) (set! *events-n* 0)
                line))))
 
+    ;; the bank's progress, said once each (always, not only with ?trace): the
+    ;; seconds from the sound's making to every event sound being ready, and to
+    ;; the whole bank (the hum last): "phantom-burn: sound events-ready S" and
+    ;; "phantom-burn: sound bank-ready S"
+    (define *t0* 0)
+    (define *said* '())
+    (define (say-progress!)
+      (let ((b (sound-bank *s*)))
+        (for-each
+          (lambda (m)
+            (when (and (not (memq (car m) *said*)) ((cdr m) b))
+              (set! *said* (cons (car m) *said*))
+              (display (string-append "phantom-burn: sound " (symbol->string (car m)) " "
+                                      (number->string (/ (round (/ (- (current-milliseconds) *t0*) 10.0)) 100.0))))
+              (newline)))
+          (list (cons (quote events-ready) bank-events-ready?) (cons (quote bank-ready) bank-ready?)))))
+
     (define (sound-game-init! loader)
-      (unless *s* (set! *s* (make-sound SOUND-RATE loader))))
+      (unless *s*
+        (set! *t0* (current-milliseconds))
+        (set! *s* (make-sound SOUND-RATE loader))))
 
     (define (sound-game-gesture!)
       (when *s* (sound-gesture! *s*)))
 
     (define (sound-game-idle!)
-      (when *s* (sound-prepare! *s*)))
+      (when *s* (sound-prepare! *s*) (say-progress!)))
 
     (define (sound-game-frame! dt walker)
       (when *s*
+        (say-progress!)
         (let ((feed (play-mode-sound-feed walker)))
           (set! *steps-n* (+ *steps-n* (length (caddr feed))))
           (set! *events-n* (+ *events-n* (length (cadddr feed))))

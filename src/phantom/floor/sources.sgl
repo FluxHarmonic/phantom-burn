@@ -28,7 +28,7 @@
 
   (begin
     ;; The props the compiler places without a thing naming them.
-    (define BUILTIN-PROPS '(lift exit-door light-switch badge))
+    (define BUILTIN-PROPS '(lift exit-door light-switch badge phone printer vent terminal camera blinds-closed blinds-open))
 
     (define-struct sources
       (root default: "") (floor default: #f) (legend default: #f)
@@ -120,7 +120,17 @@
                         (list 'light-switch "its circuits' panels"
                               (any circuit-panel (floor-circuits fl)))
                         (list 'badge "its badge"
-                              (any (lambda (t) (eq? (thing-kind t) 'badge)) (floor-things fl))))))
+                              (any (lambda (t) (eq? (thing-kind t) 'badge)) (floor-things fl)))
+                        ;; P3's devices: each kind's prop (the blinds, both modules)
+                        (list 'phone "its phones" (has-thing? fl 'phone))
+                        (list 'printer "its printers" (has-thing? fl 'printer))
+                        (list 'vent "its vents" (has-thing? fl 'vent))
+                        (list 'terminal "its terminals" (has-thing? fl 'terminal))
+                        (list 'camera "its cameras" (has-thing? fl 'camera))
+                        (list 'blinds-closed "its blinds" (has-thing? fl 'blinds))
+                        (list 'blinds-open "its blinds" (has-thing? fl 'blinds)))))
+
+    (define (has-thing? fl kind) (any (lambda (t) (eq? (thing-kind t) kind)) (floor-things fl)))
 
     (define (dedupe xs)
       (let loop ((xs xs) (acc '()))

@@ -51,11 +51,11 @@
           material-emits material-line
           prop prop? prop-name prop-path prop-mount prop-opening prop-parts prop-hides
           prop-lamps prop-line
-          part part? part-shape part-size part-at part-material part-radius part-height
+          part part? part-shape part-size part-at part-material part-radius part-height part-name
           part-sides part-outline part-line
           lamp lamp? lamp-at lamp-colour lamp-radius lamp-strength lamp-circuit lamp-line
           texture texture? texture-name texture-path texture-legend texture-cells texture-line
-          OPENING-KINDS THING-KINDS RESERVED-CIRCUITS hex->rgb)
+          OPENING-KINDS THING-KINDS DEVICE-KINDS DEVICE-TIERS RESERVED-CIRCUITS hex->rgb)
 
   (begin
     ;; --- records ------------------------------------------------------------
@@ -132,7 +132,10 @@
     (define-struct part
       (shape default: 'box) (size default: #f) (at default: (list 0.0 0.0 0.0))
       (material default: #f) (radius default: #f) (height default: #f)
-      (sides default: 12) (outline default: #f) (line default: #f))
+      (sides default: 12) (outline default: #f) (line default: #f)
+      ;; P3: a part named N in a device's prop is its own floor part ID-N
+      ;; (the shell shows or hides it by the device's state)
+      (name default: #f))
 
     (define-struct lamp
       (at default: #f) (colour default: "#FFFFFF") (radius default: 4.0)
@@ -144,7 +147,11 @@
       (cells default: '()) (line default: 1))
 
     (define OPENING-KINDS '(door arch glass grate hatch window exit))
-    (define THING-KINDS '(lifts guard desk cabinet badge rail prop))
+    (define THING-KINDS '(lifts guard desk cabinet badge rail prop phone printer vent terminal camera blinds))
+    ;; P3's devices (topics/phantom-burn-device-api): things with an id: and a
+    ;; tier: (who may command them), placed by the compiler like props
+    (define DEVICE-KINDS '(phone printer vent terminal camera blinds))
+    (define DEVICE-TIERS '(staff facilities security))
     ;; Circuits no floor declares: lamps in props and the compiler's rules use
     ;; them, and nothing switches them (the exit sign, screens left on, the
     ;; city through the windows).
@@ -376,7 +383,14 @@
         (cabinet (at point2 #f) (in symbol #f) (against symbol #f) (from anchor #f) (kind symbol #t) (facing number #f))
         (prop (at point2 #f) (in symbol #f) (against symbol #f) (from anchor #f) (kind symbol #t) (facing number #f) (z number #f))
         (badge (on-desk point2 #t) (tier symbol #t))
-        (rail (along segment #t) (in symbol #f))))
+        (rail (along segment #t) (in symbol #f))
+        ;; P3's devices
+        (phone (id symbol #t) (on-desk point2 #t) (tier symbol #f) (facing number #f))
+        (terminal (id symbol #t) (on-desk point2 #t) (tier symbol #f) (facing number #f))
+        (printer (id symbol #t) (at point2 #f) (in symbol #f) (against symbol #f) (from anchor #f) (facing number #f) (tier symbol #f))
+        (vent (id symbol #t) (in symbol #t) (at point2 #t) (tier symbol #f))
+        (camera (id symbol #t) (in symbol #t) (at point2 #t) (look point3 #t) (fov number #f) (range number #f) (tier symbol #f))
+        (blinds (id symbol #t) (in symbol #t) (along segment #t) (tier symbol #f))))
 
     (define (read-floor text path)
       (let* ((r (one-form text path 'floor))
@@ -585,10 +599,10 @@
       '((parts nodes #t) (hides symbol #f) (mount symbol #f) (opening size2 #f) (lamps nodes #f)))
 
     (define PART-SPECS
-      '((box (size point3 #t) (at point3 #t) (material symbol #t))
-        (wedge (size point3 #t) (at point3 #t) (material symbol #t))
-        (cylinder (radius number #t) (height number #t) (at point3 #t) (material symbol #t) (sides count #f))
-        (extrude (outline points #t) (height number #t) (at point3 #t) (material symbol #t))))
+      '((box (size point3 #t) (at point3 #t) (material symbol #t) (name symbol #f))
+        (wedge (size point3 #t) (at point3 #t) (material symbol #t) (name symbol #f))
+        (cylinder (radius number #t) (height number #t) (at point3 #t) (material symbol #t) (sides count #f) (name symbol #f))
+        (extrude (outline points #t) (height number #t) (at point3 #t) (material symbol #t) (name symbol #f))))
 
     (define LAMP-SPECS
       '((at point3 #t) (colour string #t) (radius number #f) (strength number #f) (circuit symbol #t)))
@@ -623,6 +637,7 @@
                                                          height: (get (car r) 'height)
                                                          sides: (get (car r) 'sides 12)
                                                          outline: (get (car r) 'outline)
+                                                         name: (get (car r) 'name)
                                                          line: line)
                                                    (cdr r))))))))
                    (lamps (entries (get al 'lamps) path (string-append what " lamps:") #f

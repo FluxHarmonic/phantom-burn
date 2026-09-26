@@ -23,7 +23,9 @@
           (phantom guard sense)
           (phantom guard guard)
           (phantom guard hearing)
-          (phantom sound logic))
+          (phantom sound logic)
+          (phantom play devices)
+          (phantom detmath))
 
   (export make-play play? play-reset! play-tick!
           play-data play-guard play-guard-world
@@ -32,7 +34,13 @@
           play-near-exit? GUARD-START-LEG PICKUP-REACH EXIT-REACH
           play-hearing play-take-steps! play-last-heard play-runner-room
           play-guard-path! play-set-hearing!
-          play-use! play-incidents play-patches play-take-events! play-event! USE-REACH)
+          play-use! play-incidents play-patches play-take-events! play-event! USE-REACH
+          play-devices-state play-deck play-tier play-deck! play-device-level play-device-approach
+          play-mask VENT-NOISE MASK-GAIN
+          play-camera-awareness CAMERA-GAIN CAMERA-DECAY CAMERA-DARK
+          play-terminal-open? play-terminal play-terminal-key! play-terminal-step!
+          TERMINAL-TIME TERMINAL-LIGHT
+          PHONE-NOISE PRINTER-NOISE ANSWER-REACH DEVICE-NOTICE)
 
   (begin
 
@@ -59,7 +67,25 @@
     ;;  playback, newest first: ((kind x y) ...)  28 the switchable circuits
     ;;  that were on when the attempt began (#f until its first tick): only
     ;;  a light that was on and is now off makes a dark room (design §3)
-    (define (play? p) (and (vector? p) (= (vector-length p) 29) (eq? (vector-ref p 0) 'play)))
+    ;;  P3: 29 the devices ((phantom play devices))  30 the deck
+    ;;  31 each device's approach: where a unit stands to reach it (#(x y z),
+    ;;  or #f)  32 the masking this tick: what a running vent adds to the
+    ;;  hearing threshold where the guard stands
+    ;;  33 each camera's awareness of you, 0..1 (by device index)
+    ;;  34 each camera's view, found once: #(ax ay az cos-half-fov range)
+    ;;  (a unit vector from its heading and pitch), or #f for a non-camera
+    ;;  35 the terminal: #(open? selected running-row progress status
+    ;;  status-seconds rows), rows its targets in display order, each
+    ;;  (device . INDEX) or (zone . CIRCUIT)
+    (define (play? p) (and (vector? p) (= (vector-length p) 36) (eq? (vector-ref p 0) 'play)))
+    (define (play-terminal-open? p) (vector-ref (vector-ref p 35) 0))
+    (define (play-camera-awareness p i) (vector-ref (vector-ref p 33) i))
+    (define (play-mask p) (vector-ref p 32))
+    (define (play-device-approach p i) (vector-ref (vector-ref p 31) i))
+    (define (play-devices-state p) (vector-ref p 29))
+    (define (play-deck p) (vector-ref p 30))
+    ;; the runner's tier (design §3): the facilities badge makes you FACILITIES
+    (define (play-tier p) (if (vector-ref p 7) 'facilities 'staff))
     (define USE-REACH 1.3)          ; m, horizontally: the panel, the reader
     (define (play-incidents p) (reverse (vector-ref p 24)))
     ;; the events since the last call, oldest first, and forget them
@@ -94,7 +120,10 @@
              (p (vector 'play data gw (make-guard gw GUARD-START-LEG) (make-light-state) (make-target)
                         circuits #f 'playing 0 0.0 0.0 0.0 0.0 #f
                         (make-hearing data) (make-steps) #f #f '() (hearing-threshold data) 0.0 -1 #t
-                        '() 0 -1 '() #f)))
+                        '() 0 -1 '() #f
+                        (make-devices data) (make-deck) (device-approaches data gw) 0.0
+                        (make-vector (device-count data) 0.0) (camera-views data)
+                        (vector #f 0 -1 0.0 '(idle) 0.0 (terminal-targets data)))))
         p))
 
     ;; A new attempt: the guard back at its start, the badge on the desk.
@@ -113,6 +142,11 @@
       (vector-set! p 26 -1)
       (vector-set! p 27 '())
       (vector-set! p 28 #f)
+      (devices-reset! (vector-ref p 29))
+      (deck-reset! (vector-ref p 30))
+      (vector-set! p 32 0.0)
+      (vector-fill! (vector-ref p 33) 0.0)
+      (terminal-reset! (vector-ref p 35))
       p)
 
     ;; The path from the guard to you (for playback: how much of the guard
@@ -149,7 +183,8 @@
                    (hear-path! h room x y rg (guard-x g) (guard-y g))
                    (let ((level (heard-level h (step-noise data tag gait))))
                      (vector-set! p 21 (max (vector-ref p 21) level))
-                     (when (vector-ref p 23) (guard-hear! g level (vector-ref p 20) x y z))))))
+                     ;; over the floor's threshold, raised where a vent runs
+                     (when (vector-ref p 23) (guard-hear! g level (+ (vector-ref p 20) (vector-ref p 32)) x y z))))))
              events)))))
 
     ;; The walker at the floor's arrival spot, facing as the floor says.
@@ -167,7 +202,8 @@
                  (x (walker-x w)) (y (walker-y w)) (z (walker-z w))
                  (_ (light-levels! ls (vector-ref p 6) on? night pools))
                  (light (light-at ls data x y z))
-                 (l01 (light-01 light))
+                 ;; at the terminal its screen lights you (design §3)
+                 (l01 (if (vector-ref (vector-ref p 35) 0) (max TERMINAL-LIGHT (light-01 light)) (light-01 light)))
                  (shape (* (stance-factor (walker-crouching? w)) (motion-factor (walker-speed w))))
                  (vis (* l01 shape))
                  (g (vector-ref p 3)))
@@ -177,8 +213,16 @@
             (vector-set! p 12 vis)
             (vector-set! p 13 shape)
             (target-set! (vector-ref p 5) x y z (walker-eye-z w) (walker-height w) l01 vis shape)
+            (mask! p)
             (steps! p w x y z)
             (guard-step! g (vector-ref p 2) (vector-ref p 5) TICK)
+            (devices-tick! (vector-ref p 29) TICK
+                           (lambda (i kind)
+                             (when (eq? kind 'printer)
+                               (let ((d (vector-ref (play-devices data) i)))
+                                 (event! p 'print-done (device-x d) (device-y d))))))
+            (hear-devices! p)
+            (cameras! p)
             (notice! p on?)
             (let ((outcome
                    (cond
@@ -191,6 +235,232 @@
                                           'badge)
                     ((eq? outcome 'playing) 'playing)
                     (else (event! p 'caught x y) (vector-set! p 8 outcome) outcome))))))
+
+    ;; --- devices (P3) ----------------------------------------------------------------
+
+    ;; A sounding device's noise at the source, on the steps' scale (a
+    ;; walk on tile is 0.6): a phone is heard across the floor, a printer
+    ;; through a room or two.
+    (define PHONE-NOISE 3.0)
+    (define PRINTER-NOISE 1.5)
+    (define DEVICE-NOTICE 0.65)     ; awareness a heard device raises: SEARCHING, toward it
+    (define ANSWER-REACH 1.8)       ; m: a searching unit this near a ringing phone answers it
+
+    ;; Where a unit stands to reach each device: the nearest place to it on
+    ;; its room's floor that the guard's route connects to. A device's own
+    ;; point is on a desk or up a wall, and the nearest walkable cell to it
+    ;; can be the desk's top, an island no path reaches (so a search for it
+    ;; would end where it began). Found once, when the play is made.
+    (define APPROACH-WITHIN 3.0)    ; m: farther, the device has no approach (#f)
+    (define (device-approaches data gw)
+      (let* ((nav (guard-world-nav gw))
+             (f (make-field nav))
+             (route (play-route data))
+             (_ (nav-field! nav f (vector-ref route 0) (vector-ref route 1) 0.0 #f #f #f))
+             (dist (field-dist f))
+             (rooms (play-rooms data))
+             (ds (play-devices data)))
+        (list->vector
+          (map (lambda (d)
+                 (let ((fz (room-floor (vector-ref rooms (device-room d)))))
+                   (let scan ((i 0) (best -1) (bd (* APPROACH-WITHIN APPROACH-WITHIN)))
+                     (if (< i (vector-length dist))
+                         (if (and (>= (vector-ref dist i) 0) (< (abs (- (nav-node-z nav i) fz)) 0.4))
+                             (let* ((dx (- (nav-node-x nav i) (device-x d))) (dy (- (nav-node-y nav i) (device-y d)))
+                                    (d2 (+ (* dx dx) (* dy dy))))
+                               (if (< d2 bd) (scan (+ i 1) i d2) (scan (+ i 1) best bd)))
+                             (scan (+ i 1) best bd))
+                         (and (>= best 0) (vector (nav-node-x nav best) (nav-node-y nav best) (nav-node-z nav best)))))))
+               (vector->list ds)))))
+
+    (define (device-noise kind state)
+      (case kind
+        ((phone) (if (eq? state 'ringing) PHONE-NOISE 0.0))
+        ((printer) (if (eq? state 'running) PRINTER-NOISE 0.0))
+        (else 0.0)))
+
+    ;; A running vent (design §3: "loud places hide you"): its roar where
+    ;; the guard stands, through the rooms like any noise, raises the
+    ;; threshold he hears over by MASK-GAIN times it. It changes what the
+    ;; unit hears, not what you hear. Near the vent a walk on hard floor
+    ;; goes unheard; a run still carries.
+    (define VENT-NOISE 1.5)
+    (define MASK-GAIN 0.6)
+    (define (mask! p)
+      (let* ((data (vector-ref p 1)) (dv (vector-ref p 29)) (ds (play-devices data))
+             (g (vector-ref p 3)) (h (vector-ref p 15))
+             (rg (room-at data (guard-x g) (guard-y g) (guard-z g))))
+        (let loop ((i 0) (sum 0.0))
+          (if (< i (vector-length ds))
+              (let ((d (vector-ref ds i)))
+                (if (and (eq? (device-kind d) 'vent) (eq? (devices-state dv i) 'on))
+                    (begin
+                      (hear-path! h (device-room d) (device-x d) (device-y d) rg (guard-x g) (guard-y g))
+                      (loop (+ i 1) (+ sum (heard-level h VENT-NOISE))))
+                    (loop (+ i 1) sum)))
+              (vector-set! p 32 (* MASK-GAIN sum))))))
+
+    ;; What reaches the guard of device i now (0 when it is silent).
+    (define (play-device-level p i)
+      (let* ((data (vector-ref p 1)) (dv (vector-ref p 29))
+             (d (vector-ref (play-devices data) i))
+             (noise (device-noise (device-kind d) (devices-state dv i))))
+        (if (= noise 0.0)
+            0.0
+            (let* ((g (vector-ref p 3)) (h (vector-ref p 15))
+                   (rg (room-at data (guard-x g) (guard-y g) (guard-z g))))
+              (hear-path! h (device-room d) (device-x d) (device-y d) rg (guard-x g) (guard-y g))
+              (heard-level h noise)))))
+
+    ;; The unit and the sounding devices (design §4, "the first
+    ;; distractions"): one it hears over the threshold, it goes to look at
+    ;; (SEARCHING, the device's floor as the place), and the noticing is an
+    ;; incident; a ringing phone it reaches while searching, it answers.
+    ;; It returns to its route when the search runs out (the guard's own
+    ;; rule). A hunting unit carries on hunting.
+    (define (hear-devices! p)
+      (when (vector-ref p 23)
+        (let* ((data (vector-ref p 1)) (dv (vector-ref p 29)) (g (vector-ref p 3))
+               (ds (play-devices data)))
+          (let loop ((i 0))
+            (when (< i (vector-length ds))
+              (let ((level (play-device-level p i)))
+                (when (> level (+ (vector-ref p 20) (vector-ref p 32)))
+                  (let* ((d (vector-ref ds i))
+                         (room (device-room d))
+                         (fz (room-floor (vector-ref (play-rooms data) room)))
+                         (a (vector-ref (vector-ref p 31) i)))
+                    ;; to where it can stand by it (its approach), else its point
+                    (if a
+                        (guard-notice! g DEVICE-NOTICE (vector-ref a 0) (vector-ref a 1) (vector-ref a 2))
+                        (guard-notice! g DEVICE-NOTICE (device-x d) (device-y d) fz))
+                    (incident! p (if (eq? (device-kind d) 'phone) 'phone-rang 'printer-ran) room)
+                    (when (and (eq? (device-kind d) 'phone) (= (guard-state g) SEARCHING))
+                      (let ((dx (- (guard-x g) (device-x d))) (dy (- (guard-y g) (device-y d))))
+                        (when (< (+ (* dx dx) (* dy dy)) (* ANSWER-REACH ANSWER-REACH))
+                          (devices-state-set! dv i 'idle 0.0))))))
+                ;; changed and in plain view: a vent left running, blinds
+                ;; moved, with the unit in their room (or its air volume)
+                (let* ((d (vector-ref ds i)) (s (devices-state dv i)))
+                  (when (and (or (and (eq? (device-kind d) 'vent) (eq? s 'on))
+                                 (and (eq? (device-kind d) 'blinds) (eq? s 'closed)))
+                             (same-space? data (room-at data (guard-x g) (guard-y g) (guard-z g)) (device-room d)))
+                    (incident! p (if (eq? (device-kind d) 'vent) 'vent-running 'blinds-moved) (device-room d)))))
+              (loop (+ i 1)))))))
+
+    ;; --- cameras (design §4: Gibson's other eyes; observers only on floor 14) --------
+
+    ;; A camera sees you as a unit would, weighed against the light on you,
+    ;; but it is a lens: below CAMERA-DARK it sees nothing at all (a unit
+    ;; still makes out a shape near it), and in dim light little. In its cone (the floor's fov and
+    ;; range about its heading and pitch), with a clear line from the lens to
+    ;; your chest or head, its awareness rises by CAMERA-GAIN times how
+    ;; visible you are; out of it, it decays. At 1 it has you: the camera
+    ;; alarms (its alarm part, the camera-alert sound), the incident is
+    ;; logged, and Gibson sends his unit to where it saw you. The alarm
+    ;; stays for the attempt.
+    (define CAMERA-GAIN 1.5)
+    (define CAMERA-DECAY 0.3)
+    (define CAMERA-DARK 0.12)       ; the guard's DARK-01
+    ;; a lens is poor in dim light: its gain rises from nothing at
+    ;; CAMERA-DARK to full at CAMERA-FULL (how lit you are, 0..1)
+    (define CAMERA-FULL 0.6)
+    (define (camera-light l01) (min 1.0 (max 0.0 (/ (- l01 CAMERA-DARK) (- CAMERA-FULL CAMERA-DARK)))))
+    (define CAMERA-CALL 0.65)       ; the unit's awareness a camera's alarm raises: SEARCHING there
+    (define CAMERA-EVERY 3)         ; ticks between looks (the unit's PERCEIVE-EVERY)
+    (define DEG (/ 3.141592653589793 180.0))
+
+    (define (camera-views data)
+      (list->vector
+        (map (lambda (d)
+               (and (eq? (device-kind d) 'camera)
+                    (let* ((a (device-args d))
+                           (h (* (device-facing d) DEG)) (pr (* (vector-ref a 2) DEG))
+                           (cp (dcos pr)))
+                      (vector (* cp (dcos h)) (* cp (dsin h)) (dsin pr)
+                              (dcos (* 0.5 (vector-ref a 0) DEG)) (vector-ref a 1)))))
+             (vector->list (play-devices data)))))
+
+    (define (cameras! p)
+      (when (= 0 (remainder (vector-ref p 9) CAMERA-EVERY))
+        (let* ((data (vector-ref p 1)) (dv (vector-ref p 29)) (ds (play-devices data))
+               (views (vector-ref p 34)) (aw (vector-ref p 33)) (t (vector-ref p 5))
+               (coll (vector-ref (vector-ref p 2) 1)) (glass (play-glass data))
+               (dt (* CAMERA-EVERY TICK)))
+          (let loop ((i 0))
+            (when (< i (vector-length ds))
+              (let ((v (vector-ref views i)))
+                (when v
+                  (let* ((d (vector-ref ds i))
+                         (cx (device-x d)) (cy (device-y d)) (cz (device-z d))
+                         (ax (vector-ref v 0)) (ay (vector-ref v 1)) (az (vector-ref v 2))
+                         (px (vector-ref t 0)) (py (vector-ref t 1)) (pz (vector-ref t 2))
+                         (chest (+ pz (* 0.55 (vector-ref t 4)))) (head (vector-ref t 3))
+                         (dx (- px cx)) (dy (- py cy)) (dz (- chest cz))
+                         (dist (sqrt (+ (* dx dx) (* dy dy) (* dz dz))))
+                         (c (if (> dist 1e-6) (/ (+ (* dx ax) (* dy ay) (* dz az)) dist) 1.0))
+                         ;; the lens is on the prop's front: start the line just past it
+                         (ox (+ cx (* 0.12 ax))) (oy (+ cy (* 0.12 ay))) (oz (+ cz (* 0.12 az)))
+                         (seen (and (< dist (vector-ref v 4))
+                                    (>= c (vector-ref v 3))
+                                    (>= (vector-ref t 5) CAMERA-DARK)
+                                    (or (sight-clear? coll glass ox oy oz px py chest)
+                                        (sight-clear? coll glass ox oy oz px py head))))
+                         (a (vector-ref aw i))
+                         (a (if seen
+                                (min 1.0 (+ a (* CAMERA-GAIN (vector-ref t 6) (camera-light (vector-ref t 5)) dt)))
+                                (max 0.0 (- a (* CAMERA-DECAY dt))))))
+                    (vector-set! aw i a)
+                    (cond
+                      ((eq? (devices-state dv i) 'alarmed) #f)
+                      ((>= a 1.0)
+                       (devices-state-set! dv i 'alarmed 0.0)
+                       (event! p 'camera-alert cx cy)
+                       (incident! p 'camera-saw (vector-ref p 22))
+                       (guard-notice! (vector-ref p 3) CAMERA-CALL px py pz))
+                      (else (devices-state-set! dv i (if seen 'seeing 'idle) 0.0))))))
+              (loop (+ i 1)))))))
+
+    ;; Rooms a and b are one space: the same room, or one air volume (the
+    ;; lobby and the mezzanine over it).
+    (define (same-space? data a b)
+      (and (>= a 0) (>= b 0)
+           (or (= a b)
+               (= (room-group (vector-ref (play-rooms data) a)) (room-group (vector-ref (play-rooms data) b))))))
+
+    ;; The deck, once a tick with held? its hold (the caller's input) and on?
+    ;; the circuits' state: aims from the walker's eye, steps the hold, and
+    ;; runs a completed command on a device. Returns what happened:
+    ;;   (hold) (deny INDEX) (run INDEX COMMAND) as deck-step! says
+    ;;   (lights CIRCUIT lights-off|lights-on)  a light's zone switched: the
+    ;;                                    caller switches it (the renderer
+    ;;                                    holds the state, as for a panel)
+    ;;   #f
+    (define (play-deck! p w held? on?)
+      (if (not (eq? (vector-ref p 8) 'playing))
+          #f
+          (let* ((data (vector-ref p 1)) (dv (vector-ref p 29)) (k (vector-ref p 30))
+                 (coll (vector-ref (vector-ref p 2) 1)))
+            (deck-aim! k dv coll (play-glass data) (walker-eye-x w) (walker-eye-y w) (walker-eye-z w)
+                       (walker-yaw w) (walker-pitch w))
+            (let ((r (deck-step! k dv held? (play-tier p) TICK on?)))
+              (if (pair? r)
+                  (case (car r)
+                    ((hold) (event! p 'deck-hold (walker-x w) (walker-y w)) r)
+                    ((deny) (event! p 'deck-deny (walker-x w) (walker-y w)) r)
+                    ((run)
+                     (event! p 'deck-confirm (walker-x w) (walker-y w))
+                     (let ((c (deck-circuit k dv)))
+                       (if c
+                           ;; a lighting zone: the panel's click, where you are
+                           (begin (event! p (if (eq? (caddr r) 'lights-off) 'panel-off 'panel-on) (walker-x w) (walker-y w))
+                                  (list 'lights c (caddr r)))
+                           (let* ((i (cadr r)) (d (vector-ref (play-devices data) i))
+                                  (ev (devices-run! dv i (caddr r))))
+                             (when ev (event! p ev (device-x d) (device-y d)))
+                             r))))
+                    (else r))
+                  r)))))
 
     ;; --- incidents (design §5, D19) ------------------------------------------------
 
@@ -238,7 +508,14 @@
       '((badge-seen "BADGE REVOKED: FACILITIES" "Nice badge. It isn't yours anymore.")
         (you-seen "PATROLS TIGHTENED" "Found you. Now I know what you look like.")
         (you-heard "PATROLS TIGHTENED" "You walk loudly for a ghost.")
-        (dark-room "EMERGENCY LIGHTING: ~" "You like the dark. I've fixed the dark.")))
+        ;; P3: seen by a camera ranks with being seen
+        (camera-saw "CAMERA COVERAGE EXTENDED" "Smile. You were on my camera.")
+        (dark-room "EMERGENCY LIGHTING: ~" "You like the dark. I've fixed the dark.")
+        ;; P3 (the device API, §5), drafts for David (D18)
+        (phone-rang "PHONES MUTED ON THIS FLOOR" "Nobody was calling. I know who dialled.")
+        (printer-ran "PRINTERS LOCKED" "Print jobs from nobody. Cute.")
+        (vent-running "HVAC OVERRIDES REVOKED" "Loud in here, wasn't it? Not anymore.")
+        (blinds-moved "BLINDS LOCKED" "Keeping the city out? It's my city.")))
     (define DUCT-PATCH '("DUCT GRATES BOLTED" "Crawling through my walls? I've bolted them."))
 
     (define (patch-for inc)
@@ -287,8 +564,13 @@
                                           (and (< z 0.5) (< (+ (* dx dx) (* dy dy)) (* USE-REACH USE-REACH))))))
                  (panel (let find ((ps (play-panels data)))
                           (cond ((null? ps) #f) ((reach? (cadr (car ps)) (caddr (car ps))) (car ps)) (else (find (cdr ps))))))
-                 (exit (play-exit data)))
+                 (exit (play-exit data))
+                 (term (terminal-at data x y z)))
             (cond
+              ((>= term 0)
+               (terminal-open! p term)
+               (event! p 'terminal-open (device-x (vector-ref (play-devices data) term)) (device-y (vector-ref (play-devices data) term)))
+               (list 'terminal-open))
               (panel
                (let ((c (car panel)) (needs (cadddr panel)))
                  (cond ((and needs (not (vector-ref p 7)))
@@ -308,6 +590,131 @@
                    (begin (event! p 'reader-deny (vector-ref exit 0) (vector-ref exit 1))
                           (list 'reader-deny))))
               (else '())))))
+
+    ;; --- the terminal (design §3; the device API §3) ------------------------------
+
+    ;; F at a terminal opens it; you hold still at it while the floor goes
+    ;; on. It lists every device and lighting zone with the command it would
+    ;; run, whether your tier allows it, and the tier it needs; a command
+    ;; takes TERMINAL-TIME (longer than the deck's hold, but from anywhere and
+    ;; with no line of sight) and the screen lights you (TERMINAL-LIGHT, a
+    ;; floor under how lit you are) while it is open.
+    (define TERMINAL-TIME 2.5)
+    (define TERMINAL-LIGHT 0.6)
+    (define TERMINAL-REACH 1.4)     ; m from the terminal, horizontally
+    (define TERMINAL-SHOW 1.5)      ; s the status shows done or denied
+
+    (define (terminal-targets data)
+      (let* ((ds (vector->list (play-devices data)))
+             (idx (let loop ((i 0) (l ds) (acc '()))
+                    (if (null? l) (reverse acc)
+                        (loop (+ i 1) (cdr l) (if (eq? (device-kind (car l)) 'terminal) acc (cons (cons 'device i) acc))))))
+             (circuits (let loop ((l (vector->list (play-fixtures data))) (acc '()))
+                         (cond ((null? l) (reverse acc))
+                               ((memq (vector-ref (car l) 3) acc) (loop (cdr l) acc))
+                               (else (loop (cdr l) (cons (vector-ref (car l) 3) acc)))))))
+        (list->vector (append idx (map (lambda (c) (cons 'zone c)) circuits)))))
+
+    (define (terminal-reset! tm)
+      (vector-set! tm 0 #f) (vector-set! tm 1 0) (vector-set! tm 2 -1) (vector-set! tm 3 0.0)
+      (vector-set! tm 4 '(idle)) (vector-set! tm 5 0.0))
+
+    ;; the terminal device within reach of (x y z), or -1
+    (define (terminal-at data x y z)
+      (let ((ds (play-devices data)))
+        (let loop ((i 0))
+          (cond ((>= i (vector-length ds)) -1)
+                ((and (eq? (device-kind (vector-ref ds i)) 'terminal) (< z 0.5)
+                      (let ((dx (- x (device-x (vector-ref ds i)))) (dy (- y (device-y (vector-ref ds i)))))
+                        (< (+ (* dx dx) (* dy dy)) (* TERMINAL-REACH TERMINAL-REACH))))
+                 i)
+                (else (loop (+ i 1)))))))
+
+    (define (terminal-open! p i)
+      (let ((tm (vector-ref p 35)))
+        (terminal-reset! tm)
+        (vector-set! tm 0 #t)
+        (devices-state-set! (vector-ref p 29) i 'in-use 0.0)))
+
+    (define (terminal-close! p)
+      (let* ((tm (vector-ref p 35)) (data (vector-ref p 1)) (ds (play-devices data)))
+        (terminal-reset! tm)
+        (let loop ((i 0))
+          (when (< i (vector-length ds))
+            (when (eq? (device-kind (vector-ref ds i)) 'terminal)
+              (devices-state-set! (vector-ref p 29) i 'idle 0.0)
+              (event! p 'terminal-close (device-x (vector-ref ds i)) (device-y (vector-ref ds i))))
+            (loop (+ i 1))))))
+
+    ;; A row's ID, kind, command (by on?, the circuits' state) and tier.
+    (define (row-of p target on?)
+      (let ((dv (vector-ref p 29)) (data (vector-ref p 1)))
+        (if (eq? (car target) 'device)
+            (let ((d (vector-ref (play-devices data) (cdr target))))
+              (list (device-id d) (device-kind d) (devices-command dv (cdr target)) (device-tier d)))
+            (let ((c (cdr target)))
+              (list (string->symbol (string-append "lights-" (symbol->string c))) 'lights
+                    (if (on? c) 'lights-off 'lights-on) 'facilities)))))
+
+    ;; For the shell (the API, §3): (ROWS SELECTED STATUS), each row
+    ;; (ID KIND COMMAND-OR-#f ALLOWED? TIER).
+    (define (play-terminal p on?)
+      (let* ((tm (vector-ref p 35)) (tier (play-tier p)))
+        (list (map (lambda (t)
+                     (let ((r (row-of p t on?)))
+                       (list (car r) (cadr r) (caddr r) (and (caddr r) (tier-allows? tier (cadddr r)) #t) (cadddr r))))
+                   (vector->list (vector-ref tm 6)))
+              (vector-ref tm 1)
+              (let ((st (vector-ref tm 4)))
+                (if (>= (vector-ref tm 2) 0) (list 'running (vector-ref tm 3)) st)))))
+
+    ;; A key at the open terminal: up, down, run or close. Returns #t.
+    (define (play-terminal-key! p key on?)
+      (let* ((tm (vector-ref p 35)) (n (vector-length (vector-ref tm 6))) (running (>= (vector-ref tm 2) 0)))
+        (case key
+          ((up) (unless running (vector-set! tm 1 (max 0 (- (vector-ref tm 1) 1)))))
+          ((down) (unless running (vector-set! tm 1 (min (- n 1) (+ (vector-ref tm 1) 1)))))
+          ((close) (terminal-close! p))
+          ((run)
+           (unless running
+             (let* ((sel (vector-ref tm 1)) (r (row-of p (vector-ref (vector-ref tm 6) sel) on?)))
+               (cond ((not (caddr r)) #f)
+                     ((not (tier-allows? (play-tier p) (cadddr r)))
+                      (vector-set! tm 4 (list 'denied (car r))) (vector-set! tm 5 TERMINAL-SHOW)
+                      (event! p 'deck-deny (or (vector-ref p 17) 0.0) (or (vector-ref p 18) 0.0)))
+                     (else
+                      (vector-set! tm 2 sel) (vector-set! tm 3 0.0)
+                      (event! p 'deck-hold (or (vector-ref p 17) 0.0) (or (vector-ref p 18) 0.0))))))))
+        #t))
+
+    ;; The open terminal, a tick on: a running command's progress, and at
+    ;; TERMINAL-TIME it runs. Returns (run INDEX COMMAND) for a device (run
+    ;; here), (lights CIRCUIT COMMAND) for a zone (the caller switches it),
+    ;; or #f.
+    (define (play-terminal-step! p on?)
+      (let ((tm (vector-ref p 35)))
+        (when (> (vector-ref tm 5) 0.0)
+          (vector-set! tm 5 (max 0.0 (- (vector-ref tm 5) TICK)))
+          (when (= (vector-ref tm 5) 0.0) (vector-set! tm 4 '(idle))))
+        (if (or (not (vector-ref tm 0)) (< (vector-ref tm 2) 0))
+            #f
+            (begin
+              (vector-set! tm 3 (+ (vector-ref tm 3) (/ TICK TERMINAL-TIME)))
+              (if (< (vector-ref tm 3) 1.0)
+                  #f
+                  (let* ((target (vector-ref (vector-ref tm 6) (vector-ref tm 2)))
+                         (r (row-of p target on?)) (cmd (caddr r)))
+                    (vector-set! tm 2 -1) (vector-set! tm 3 0.0)
+                    (vector-set! tm 4 (list 'done (car r) cmd)) (vector-set! tm 5 TERMINAL-SHOW)
+                    (event! p 'deck-confirm (or (vector-ref p 17) 0.0) (or (vector-ref p 18) 0.0))
+                    (cond
+                      ((not cmd) #f)
+                      ((eq? (car target) 'zone) (list 'lights (cdr target) cmd))
+                      (else
+                       (let* ((i (cdr target)) (d (vector-ref (play-devices (vector-ref p 1)) i))
+                              (ev (devices-run! (vector-ref p 29) i cmd)))
+                         (when ev (event! p ev (device-x d) (device-y d)))
+                         (list 'run i cmd))))))))))
 
     (define (near-badge? data x y z)
       (let* ((b (play-badge data))

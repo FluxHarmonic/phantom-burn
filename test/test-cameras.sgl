@@ -1,0 +1,77 @@
+;;; P3's camera at the lifts on floor 14 (design §4: Gibson's other eyes,
+;;; observers only), through (phantom play core) as the game runs it.
+;;;
+;;; The camera gate (P3, §Gates): walking through a lit camera cone logs an
+;;; incident, and the same walk in the dark doesn't. Its sabotage (the
+;;; camera ignores light) must turn the dark walk red.
+
+(import (sigil test)
+        (sigil math)
+        (sigil fs)
+        (phantom soup)
+        (phantom walker)
+        (phantom play data)
+        (phantom play devices)
+        (phantom play core)
+        (phantom guard guard))
+
+(define DIR "assets/floors/14-slice/")
+(define C (pbc1->collision (read-file-bytes (string-append DIR "collide"))))
+(define INFO (floor-info-from-string (read-file-string (string-append DIR "floor.sexp"))))
+(define DATA (play-data-from-string (read-file-string (string-append DIR "play.sexp"))))
+(define CIRCUITS (cdr (assq 'circuits INFO)))
+(define (on-set names) (lambda (c) (and (memq c names) #t)))
+(define LIT (lambda (c) #t))
+;; the lobby's lights off and its blinds closed: only the exit sign and the screens
+(define DARK (on-set '(c1 c3 emergency screens)))
+(define CAMERA (device-index DATA 'lift-camera))
+
+(define (fresh) (play-reset! (make-play C DATA CIRCUITS)))
+
+;; Walk north across the lobby at x 9, y 1 to 7: about 8.4 m from the lens,
+;; in its cone the whole way. The unit is held in the FM office, out of the
+;; way. Returns (incidents camera-state peak-awareness peak-light).
+(define (walk-past on?)
+  (let* ((p (fresh)) (g (play-guard p))
+         (in (make-input 0.0 1.0 0.0 0.0 #f #f #f 0)))
+    (let loop ((i 0) (w (make-walker 9.0 1.0 0.0 0.0)) (peak 0.0) (light 0.0))
+      (if (or (>= i 900) (>= (walker-y w) 7.0))
+          (list (play-incidents p) (devices-state (play-devices-state p) CAMERA) peak light (walker-y w))
+          (let ((w (walker-step w in TICK C)))
+            (guard-place! g 24.0 19.5 1.0 0.0)
+            (play-tick! p w on? 1.0 2.0)
+            (loop (+ i 1) w (max peak (play-camera-awareness p CAMERA)) (max light (play-light-01 p))))))))
+
+(test-group "the camera gate"
+  (test "LIT: walking through the camera's cone logs an incident, and the camera alarms"
+    (let ((r (walk-past LIT)))
+      (display (list 'lit r)) (newline)
+      (assert-true (>= (list-ref r 4) 7.0))
+      (assert-true (assq 'camera-saw (car r)))
+      (assert-equal 'alarmed (cadr r))))
+  (test "DARK: the same walk with the lobby dark logs nothing"
+    (let ((r (walk-past DARK)))
+      (display (list 'dark r 'camera-dark CAMERA-DARK)) (newline)
+      (assert-true (>= (list-ref r 4) 7.0))
+      (assert-false (assq 'camera-saw (car r)))
+      (assert-false (eq? (cadr r) 'alarmed))))
+  (test "its patch: CAMERA COVERAGE EXTENDED, and the unit is sent to look"
+    (let* ((p (fresh)) (g (play-guard p))
+           (in (make-input 0.0 1.0 0.0 0.0 #f #f #f 0)))
+      (let loop ((i 0) (w (make-walker 9.0 1.0 0.0 0.0)))
+        (when (and (< i 900) (< (walker-y w) 7.0) (not (eq? (devices-state (play-devices-state p) CAMERA) 'alarmed)))
+          (let ((w (walker-step w in TICK C)))
+            (play-tick! p w LIT 1.0 2.0)
+            (loop (+ i 1) w))))
+      (display (list 'patches (play-patches p) 'unit (guard-state g) (guard-awareness g))) (newline)
+      (assert-true (member "CAMERA COVERAGE EXTENDED" (map car (play-patches p))))
+      (assert-true (>= (guard-awareness g) 0.6))))
+  (test "out of its cone (behind it, by the lifts' wall): nothing, lit"
+    (let* ((p (fresh)) (in (make-input 0.0 1.0 0.0 0.0 #f #f #f 0)))
+      (let loop ((i 0) (w (make-walker 1.0 5.5 0.0 0.0)))
+        (when (and (< i 120) (< (walker-y w) 8.5))
+          (let ((w (walker-step w in TICK C)))
+            (guard-place! (play-guard p) 24.0 19.5 1.0 0.0)
+            (play-tick! p w LIT 1.0 2.0)
+            (loop (+ i 1) w))))
+      (assert-false (assq 'camera-saw (play-incidents p))))))
