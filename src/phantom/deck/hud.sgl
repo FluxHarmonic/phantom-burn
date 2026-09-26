@@ -56,6 +56,7 @@
     (define C-ICE (hex "#FF9F1A"))
     (define C-HOT (hex "#FF5959"))            ; C-TRACE-HOT
     (define C-TEXT (hex "#CCE6FF"))
+    (define C-LIT (hex "#FFCC33"))            ; C-LABEL-LIT: a lighting zone that is on
     (define C-TEXT-DIM (hex "#7380A6"))
     (define (color! c . a)
       (set-color (vector-ref c 0) (vector-ref c 1) (vector-ref c 2) (if (pair? a) (car a) 1.0)))
@@ -294,6 +295,8 @@
        (cons 'vent     '("#########" "#       #" "# ##### #" "#       #" "# ##### #" "#       #" "# ##### #" "#       #" "#########"))
        (cons 'blinds   '("#########" "#########" "         " "#########" "         " "#########" "         " "#########" "    #    "))
        (cons 'terminal '("#########" "#       #" "# ##    #" "#       #" "# ####  #" "#       #" "#########" "   ###   " " ####### "))
+       ;; a lighting zone (P3: one row per switchable circuit): a ceiling panel and its light
+       (cons 'lights   '("#########" "#########" "         " " #  #  # " "  # # #  " "         " " #  #  # " "  # # #  " "         "))
        ;; Crash's watcher eye (daemon-eye), widened
        (cons 'camera   '("         " "  #####  " " #     # " "#  ###  #" "#  ###  #" "#  ###  #" " #     # " "  #####  " "         "))))
     ;; each glyph as runs (row x0 len), computed once
@@ -326,6 +329,7 @@
       (let ((s (if (pair? state) (car state) state)))
         (case kind
           ((camera) (case s ((alarmed) C-HOT) ((seeing) (if (blink? 4.0) C-ICE C-BAR-C)) (else C-ICE)))
+          ((lights) (if (eq? s 'on) C-LIT C-STATIC-B))     ; steady: a zone is on or off, not ringing
           (else (case s
                   ((ringing running on in-use) (if (blink? 2.0) C-SELECTED C-STATIC-B))
                   (else C-STATIC-A))))))
