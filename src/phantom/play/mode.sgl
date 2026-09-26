@@ -510,6 +510,9 @@
     (define (draw-objective! w h ts)
       (let ((line (cond ((eq? *phase* 'won) #f)
                         ((> *message-t* 0.0) *message*)
+                        ;; PRACTICE: Crash's lines coach you; floor 14's places don't apply
+                        ((and *practice* (play-near-exit? *core*) (play-badge? *core*)) "THE READER: PRESS F (USE)")
+                        (*practice* #f)
                         ((> *badge-flash* 0.0) "FACILITIES BADGE. NOW THE STAIRWELL DOOR, UNDER THE MEZZANINE")
                         ((and (play-near-exit? *core*) (play-badge? *core*)) "THE READER: PRESS F (USE)")
                         ((play-near-exit? *core*) "THE READER WANTS A FACILITIES BADGE")
