@@ -40,7 +40,8 @@
           (phantom floor build)
           (phantom floor dress)
           (phantom floor light)
-          (phantom floor gates))
+          (phantom floor gates)
+          (phantom floor sexp))
 
   (export compile-floor LAYOUT-SPEC STRIDE
           compiled-floor? compiled-floor-name compiled-floor-path compiled-floor-problems
@@ -161,7 +162,8 @@
                      (asm (assemble c (list->vector emitters)))
                      (t4 (current-jiffy))
                      (fixture-ps (check-fixtures floor-path (vector-ref asm 0) (vector-ref asm 3) emitters circuits))
-                     (problems (append (sources-problems src) (growable->list (ctx-problems c)) lamp-ps fixture-ps)))
+                     (problems (append (sources-problems src) (growable->list (ctx-problems c)) lamp-ps fixture-ps
+                                       (check-lessons fl floor-path))))
                 (compiled-floor base
                                 problems: problems
                                 vertices: (vector-ref asm 0) indices: (vector-ref asm 1) index-type: (vector-ref asm 2)
@@ -553,6 +555,135 @@
                         (floor-openings fl))))
         (append joined hatches)))
 
+    ;; --- PRACTICE: lessons and the sim look's wire edges ------------------------------
+
+    ;; A lesson's goal kinds (play checks them: topics/phantom-burn-practice-api)
+    (define GOAL-KINDS '(dark-in through terminal-run reader))
+
+    ;; Gate 1: a lesson names rooms the floor has, starts in one of them, and
+    ;; has a goal play knows.
+    (define (check-lessons fl path)
+      (let ((rooms (floor-rooms fl)))
+        (apply append
+               (map (lambda (l)
+                      (let* ((what (string-append "lesson " (symbol->string (lesson-id l))))
+                             (bad (lambda (msg) (problem path: path line: (lesson-line l) gate: 1
+                                                         message: (string-append what ": " msg))))
+                             (named (filter-map (lambda (n) (find (lambda (r) (eq? (room-name r) n)) rooms)) (lesson-rooms l))))
+                        (append
+                          (filter-map (lambda (n) (and (not (find (lambda (r) (eq? (room-name r) n)) rooms))
+                                                       (bad (string-append "names no room " (symbol->string n)))))
+                                      (lesson-rooms l))
+                          (if (any (lambda (r) (point-in-poly? (lesson-start l) (room-corners r))) named)
+                              '()
+                              (list (bad "starts outside its rooms")))
+                          (if (memq (car (lesson-goal l)) GOAL-KINDS)
+                              '()
+                              (list (bad (string-append "has a goal play does not know: " (symbol->string (car (lesson-goal l))))))))))
+                    (floor-lessons fl)))))
+
+    ;; The sim look's wire (the shell draws it as cyan lines,
+    ;; topics/phantom-burn-practice-api v2): the rooms' floor and ceiling
+    ;; perimeters and corner verticals, the openings' frames (the holes the
+    ;; walls were cut with), and each prop part's box edges. Deduplicated to
+    ;; the millimetre; no edge between two coplanar faces: a floor or ceiling
+    ;; edge along a full-width arch between rooms of one height is left out,
+    ;; and so is a vertical where every wall meeting at a corner runs in one
+    ;; line. Arches are open walls, so they get no frame.
+    (define WIRE-BUCKETS 4096)
+    (define (floor-wire c)
+      (let* ((fl (ctx-floor c)) (rooms (floor-rooms fl))
+             (buckets (make-vector WIRE-BUCKETS '()))
+             (out '())
+             (mm (lambda (x) (exact (round (* x 1000.0)))))
+             (edge! (lambda (x0 y0 z0 x1 y1 z1)
+                      (let* ((a (list (mm x0) (mm y0) (mm z0))) (b (list (mm x1) (mm y1) (mm z1)))
+                             (key (if (or (< (car a) (car b)) (and (= (car a) (car b)) (or (< (cadr a) (cadr b)) (and (= (cadr a) (cadr b)) (<= (caddr a) (caddr b))))))
+                                      (append a b) (append b a)))
+                             (k (modulo (abs (+ (* 73856093 (car key)) (* 19349663 (cadr key)) (* 83492791 (caddr key))
+                                                (* 2654435761 (cadddr key)) (* 40503 (list-ref key 4)) (* 97 (list-ref key 5))))
+                                        WIRE-BUCKETS)))
+                        (unless (or (equal? a b) (member key (vector-ref buckets k)))
+                          (vector-set! buckets k (cons key (vector-ref buckets k)))
+                          (set! out (cons (map (lambda (v) (/ v 1000.0)) key) out))))))
+             ;; room pairs joined by a full-width arch
+             (open (filter-map (lambda (o) (and (eq? (opening-kind o) 'arch) (not (opening-width o)) (opening-b o)
+                                                (cons (opening-a o) (opening-b o))))
+                               (floor-openings fl)))
+             (room-named (lambda (n) (find (lambda (r) (eq? (room-name r) n)) rooms)))
+             (open-with (lambda (r) (append (filter-map (lambda (p) (and (eq? (car p) (room-name r)) (room-named (cdr p)))) open)
+                                            (filter-map (lambda (p) (and (eq? (cdr p) (room-name r)) (room-named (car p)))) open))))
+             (near? (lambda (p q) (and (< (abs (- (px p) (px q))) 1e-6) (< (abs (- (py p) (py q))) 1e-6))))
+             (segs (lambda (r) (let ((cs (room-corners r)))
+                                 (map (lambda (i) (cons (list-ref cs i) (list-ref cs (modulo (+ i 1) (length cs)))))
+                                      (iota (length cs))))))
+             ;; the room across seg s from r through a full-width arch (the same segment), or #f
+             (across (lambda (r s) (find (lambda (o) (any (lambda (t) (or (and (near? (car t) (car s)) (near? (cdr t) (cdr s)))
+                                                                         (and (near? (car t) (cdr s)) (near? (cdr t) (car s)))))
+                                                             (segs o)))
+                                          (open-with r))))
+             ;; a wall segment: one no full-width arch opens
+             (wall-segs (apply append (map (lambda (r) (filter (lambda (s) (not (across r s))) (segs r))) rooms))))
+        ;; the rooms' perimeters and corners
+        (for-each
+          (lambda (r)
+            (let ((z0 (room-floor r)) (z1 (room-ceiling r)))
+              (for-each (lambda (s)
+                          (let ((o (across r s)))
+                            (unless (and o (= (room-floor o) z0)) (edge! (px (car s)) (py (car s)) z0 (px (cdr s)) (py (cdr s)) z0))
+                            (unless (and o (= (room-ceiling o) z1)) (edge! (px (car s)) (py (car s)) z1 (px (cdr s)) (py (cdr s)) z1))))
+                        (segs r))
+              (for-each (lambda (p)
+                          ;; the directions of the walls meeting at p; one line of them is no corner
+                          (let* ((ds (filter-map (lambda (s) (cond ((near? (car s) p) (pt- (cdr s) (car s)))
+                                                                   ((near? (cdr s) p) (pt- (car s) (cdr s)))
+                                                                   (else #f)))
+                                                 wall-segs))
+                                 (d0 (and (pair? ds) (car ds)))
+                                 (straight (and d0 (every (lambda (d) (< (abs (- (* (px d0) (py d)) (* (py d0) (px d)))) 1e-6)) ds))))
+                            (unless straight (edge! (px p) (py p) z0 (px p) (py p) z1))))
+                        (room-corners r))))
+          rooms)
+        ;; the openings' frames: the holes cut in the walls
+        (let ((es (plan-edges (ctx-plan c))) (holes (ctx-holes c)))
+          (let loop ((i 0))
+            (when (< i (vector-length holes))
+              (for-each (lambda (h)
+                          (unless (eq? (vector-ref h 4) 'arch)
+                            (let* ((e (vector-ref es i))
+                                   (p (edge-point e (vector-ref h 0))) (q (edge-point e (vector-ref h 1)))
+                                   (z0 (vector-ref h 2)) (z1 (vector-ref h 3)))
+                              (edge! (px p) (py p) z0 (px q) (py q) z0)
+                              (edge! (px p) (py p) z1 (px q) (py q) z1)
+                              (edge! (px p) (py p) z0 (px p) (py p) z1)
+                              (edge! (px q) (py q) z0 (px q) (py q) z1))))
+                        (vector-ref holes i))
+              (loop (+ i 1)))))
+        ;; the props' parts, as boxes
+        (for-each
+          (lambda (pl)
+            (let ((xf (placed-xform pl)))
+              (for-each
+                (lambda (pt)
+                  (let* ((at (part-at pt))
+                         (h (case (part-shape pt)
+                              ((box wedge) (and (part-size pt) (map (lambda (v) (* 0.5 v)) (part-size pt))))
+                              ((cylinder) (and (part-radius pt) (part-height pt)
+                                               (list (part-radius pt) (part-radius pt) (* 0.5 (part-height pt)))))
+                              (else #f))))
+                    (when h
+                      (let* ((w (lambda (sx sy sz) (xform-point xf (v3 (+ (car at) (* sx (car h))) (+ (cadr at) (* sy (cadr h)))
+                                                                        (+ (caddr at) (* sz (caddr h)))))))
+                             (line (lambda (a b) (edge! (v3x a) (v3y a) (v3z a) (v3x b) (v3y b) (v3z b))))
+                             (c000 (w -1 -1 -1)) (c100 (w 1 -1 -1)) (c110 (w 1 1 -1)) (c010 (w -1 1 -1))
+                             (c001 (w -1 -1 1)) (c101 (w 1 -1 1)) (c111 (w 1 1 1)) (c011 (w -1 1 1)))
+                        (line c000 c100) (line c100 c110) (line c110 c010) (line c010 c000)
+                        (line c001 c101) (line c101 c111) (line c111 c011) (line c011 c001)
+                        (line c000 c001) (line c100 c101) (line c110 c111) (line c010 c011)))))
+                (prop-parts (placed-prop pl)))))
+          (growable->list (ctx-placed c)))
+        (reverse out)))
+
     (define (compiled-floor->json cf)
       (js-obj
         (list
@@ -655,4 +786,24 @@
                                       (lambda (o) (js-obj (list (cons "kind" (js-sym (car o)))
                                                                 (cons "from" (js-pt (cadr o)))
                                                                 (cons "to" (js-pt (caddr o)))))))))
+          ;; PRACTICE (topics/phantom-burn-practice-api v2): the look, the lessons,
+          ;; and the sim look's wire edges
+          (cons "look" (let ((c (compiled-floor-ctx cf))) (js-sym (and c (floor-look (ctx-floor c))))))
+          (cons "lessons" (let* ((c (compiled-floor-ctx cf)) (fl (and c (ctx-floor c))))
+                            (js-list (if fl (floor-lessons fl) '())
+                                     (lambda (l)
+                                       (js-obj (list (cons "id" (js-sym (lesson-id l)))
+                                                     (cons "rooms" (js-list (filter-map (lambda (n) (let ((r (find (lambda (r) (eq? (room-name r) n)) (floor-rooms fl))))
+                                                                                                    (and r (room-index r))))
+                                                                                        (lesson-rooms l))
+                                                                            js-num))
+                                                     (cons "start" (js-pt (lesson-start l)))
+                                                     (cons "facing" (js-num (lesson-facing l)))
+                                                     (cons "goal" (js-str (datum->string (lesson-goal l))))
+                                                     (cons "enter" (js-str (lesson-on-enter l)))
+                                                     (cons "success" (js-str (lesson-on-success l)))
+                                                     (cons "fail" (js-str (lesson-on-fail l)))))))))
+          (cons "wire" (let ((c (compiled-floor-ctx cf)))
+                         (js-list (if (and c (eq? (floor-look (ctx-floor c)) 'sim)) (floor-wire c) '())
+                                  (lambda (e) (js-list e js-num)))))
           (cons "problems" (js-list (compiled-floor-problems cf) (lambda (p) (js-str (problem->string p))))))))))

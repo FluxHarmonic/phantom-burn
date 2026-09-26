@@ -37,6 +37,7 @@
           play-use! play-incidents play-patches play-take-events! play-event! USE-REACH
           play-devices-state play-deck play-tier play-deck! play-device-level play-device-approach
           play-mask VENT-NOISE MASK-GAIN
+          play-unit-count play-active-unit play-unit-guard play-set-unit!
           play-camera-awareness play-camera-watch play-camera-alarms CAMERA-GAIN CAMERA-DECAY CAMERA-DARK
           play-terminal-open? play-terminal play-terminal-key! play-terminal-step!
           TERMINAL-TIME TERMINAL-LIGHT
@@ -79,7 +80,23 @@
     ;;  (device . INDEX) or (zone . CIRCUIT)
     ;;  36 returning: the unit gave up a search and is heading back to its
     ;;  route (robot-back fires when it reaches a route point)
-    (define (play? p) (and (vector? p) (= (vector-length p) 37) (eq? (vector-ref p 0) 'play)))
+    ;;  PRACTICE: 37 the units: a vector of #(guard-world guard), one per
+    ;;  play.sexp guard, sharing one nav; slots 2 and 3 are the active one's
+    ;;  (the only one that steps: the sim wakes the unit of the room you are
+    ;;  in)  38 the active unit's index
+    (define (play? p) (and (vector? p) (= (vector-length p) 39) (eq? (vector-ref p 0) 'play)))
+    (define (play-unit-count p) (vector-length (vector-ref p 37)))
+    (define (play-active-unit p) (vector-ref p 38))
+    (define (play-unit-guard p i) (vector-ref (vector-ref (vector-ref p 37) i) 1))
+    ;; Make unit i the active one: it steps, perceives and hears; the others
+    ;; hold where they are, as they are.
+    (define (play-set-unit! p i)
+      (let ((u (vector-ref (vector-ref p 37) i)))
+        (vector-set! p 2 (vector-ref u 0))
+        (vector-set! p 3 (vector-ref u 1))
+        (vector-set! p 38 i)
+        (vector-set! p 25 (guard-state (vector-ref u 1)))
+        p))
     (define (play-terminal-open? p) (vector-ref (vector-ref p 35) 0))
     (define (play-camera-awareness p i) (vector-ref (vector-ref p 33) i))
     ;; for the HUD's eye: the most any camera that has you in view now is
@@ -131,18 +148,37 @@
     ;; circuits: floor.sexp's (circuits ...) entries.
     (define (make-play coll data circuits)
       (let* ((gw (make-guard-world coll data))
-             (p (vector 'play data gw (make-guard gw GUARD-START-LEG) (make-light-state) (make-target)
+             (units (make-units coll data gw))
+             (p (vector 'play data gw (vector-ref (vector-ref units 0) 1) (make-light-state) (make-target)
                         circuits #f 'playing 0 0.0 0.0 0.0 0.0 #f
                         (make-hearing data) (make-steps) #f #f '() (hearing-threshold data) 0.0 -1 #t
                         '() 0 -1 '() #f
                         (make-devices data) (make-deck) (device-approaches data gw) 0.0
                         (make-vector (device-count data) 0.0) (camera-views data)
-                        (vector #f 0 -1 0.0 '(idle) 0.0 (terminal-targets data)) #f)))
+                        (vector #f 0 -1 0.0 '(idle) 0.0 (terminal-targets data)) #f
+                        units 0)))
         p))
 
-    ;; A new attempt: the guard back at its start, the badge on the desk.
+    ;; The units: the first is the one make-play's guard world was built for;
+    ;; the others share its nav.
+    (define (make-units coll data gw0)
+      (let ((n (unit-count data)))
+        (let loop ((i 0) (acc '()))
+          (if (< i n)
+              (let ((gw (if (= i 0) gw0 (make-guard-world coll data i (guard-world-nav gw0)))))
+                (loop (+ i 1) (cons (vector gw (make-guard gw (if (= i 0) GUARD-START-LEG 0))) acc)))
+              (list->vector (reverse acc))))))
+
+    ;; A new attempt: every unit back at its start, the first active; the
+    ;; badge on the desk.
     (define (play-reset! p)
-      (guard-reset! (vector-ref p 3) (vector-ref p 2) GUARD-START-LEG)
+      (let ((us (vector-ref p 37)))
+        (let loop ((i 0))
+          (when (< i (vector-length us))
+            (let ((u (vector-ref us i)))
+              (guard-reset! (vector-ref u 1) (vector-ref u 0) (if (= i 0) GUARD-START-LEG 0)))
+            (loop (+ i 1)))))
+      (play-set-unit! p 0)
       (vector-set! p 7 #f)
       (vector-set! p 8 'playing)
       (vector-set! p 9 0)
@@ -542,7 +578,7 @@
             ((= state CALM) (event! p 'robot-lost x y) (vector-set! p 36 #t))))
         ;; heading back after a search: at a route point, it is back
         (when (and (vector-ref p 36) (= state CALM))
-          (let ((r (play-route (vector-ref p 1))))
+          (let ((r (guard-world-route (vector-ref p 2))))
             (let loop ((k 0))
               (when (< k (vector-length r))
                 (let ((dx (- x (vector-ref r k))) (dy (- y (vector-ref r (+ k 1)))))

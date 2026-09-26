@@ -1,0 +1,107 @@
+;; floors/sim.floor - PRACTICE: Crash's simulation of Gibson's tower (D38 in
+;; topics/stealth-game-design; tasks/phantom-burn-practice). Eight small
+;; rooms in a line, west to east, one lesson each, joined by open doorways.
+;; It reuses floor 14's systems: units, the phone, a light zone, the vent,
+;; blinds, a camera, the terminal, the badge, the reader.
+;;
+;; Crash's whole script is in `lessons:` below (on-enter, on-success,
+;; on-fail), so it can be read and edited in one place. The on-enter lines
+;; are D38's drafts; the success and fail lines are the worker's drafts.
+;; David rules on the final wording.
+;;
+;; Lights: the light model has three switchable circuits. c1 lights the
+;; lesson rooms, c2 is the FACILITIES room's zone (the deck switches it), c3
+;; the camera room's (darken it and the camera sees nothing). The light
+;; room's alcove has no light at all.
+(floor
+  level: 0
+  intent: "Crash's sim: eight rooms, one tool each, nothing remembered"
+  tier-in: staff  tier-out: facilities
+  ambient: (hvac 0.2)
+  look: sim
+  rooms:
+  ((light         corners: ((0 0) (8 0) (8 8) (0 8))              floor: 0  ceiling: 3.0  surface: tile    light: c1)
+   (alcove        corners: ((3 8) (5 8) (5 10) (3 10))            floor: 0  ceiling: 3.0  surface: tile    light: none)
+   (sound-marble  corners: ((8 0) (10.5 0) (10.5 8) (8 8))        floor: 0  ceiling: 3.0  surface: marble  light: c1)
+   (sound-tile    corners: ((10.5 0) (13.5 0) (13.5 8) (10.5 8))  floor: 0  ceiling: 3.0  surface: tile    light: c1)
+   (sound-carpet  corners: ((13.5 0) (16 0) (16 8) (13.5 8))      floor: 0  ceiling: 3.0  surface: carpet  light: c1)
+   (booth         corners: ((10.5 8) (13.5 8) (13.5 10.5) (10.5 10.5))  floor: 0  ceiling: 3.0  surface: tile  light: c1)
+   (patrol        corners: ((16 0) (24 0) (24 8) (16 8))          floor: 0  ceiling: 3.0  surface: tile    light: c1)
+   (deck-room     corners: ((24 0) (32 0) (32 8) (24 8))          floor: 0  ceiling: 3.0  surface: carpet  light: c1)
+   (facilities    corners: ((32 0) (40 0) (40 8) (32 8))          floor: 0  ceiling: 3.0  surface: tile    light: c2)
+   (camera-room   corners: ((40 0) (48 0) (48 8) (40 8))          floor: 0  ceiling: 3.0  surface: tile    light: c3)
+   (terminal-room corners: ((48 0) (56 0) (56 8) (48 8))          floor: 0  ceiling: 3.0  surface: carpet  light: c1)
+   (exit-room     corners: ((56 0) (64 0) (64 8) (56 8))          floor: 0  ceiling: 3.0  surface: tile    light: c1))
+  openings:
+  ((arch    between: (light alcove)              at: (4 8))
+   (door    between: (light sound-marble)        at: (8 4))
+   (arch    between: (sound-marble sound-tile)   at: (10.5 4))
+   (arch    between: (sound-tile sound-carpet)   at: (13.5 4))
+   (glass   between: (sound-tile booth)          along: ((10.5 8) (13.5 8)))
+   (door    between: (sound-carpet patrol)       at: (16 4))
+   (door    between: (patrol deck-room)          at: (24 4))
+   (door    between: (deck-room facilities)      at: (32 4))
+   (door    between: (facilities camera-room)    at: (40 4))
+   (door    between: (camera-room terminal-room) at: (48 4))
+   (door    between: (terminal-room exit-room)   at: (56 4))
+   (window  in: facilities  along: ((34 0) (38 0))  sill: 0.9  head: 2.4)
+   (exit    in: exit-room  at: (64 4)  reader: facilities))
+  lights: ((c1 level: 0.7) (c2 level: 0.7) (c3 level: 0.7))
+  things: (;; 2, sound: a unit posted behind the booth's glass, listening
+           (guard   kind: patrol  route: ((12 9.4))  waits: (4))
+           ;; 3, patrol: a unit walking back and forth past the east doorway
+           (guard   kind: patrol  route: ((22 7) (22 1))  waits: (1 1))
+           ;; 4, the deck: a unit posted by the east doorway; the phone on a desk
+           (guard   kind: patrol  route: ((30.8 4))  waits: (4))
+           (desk    in: deck-room  from: (corner 3 (2 -1))  kind: office-desk)          ; (26 7)
+           (phone   id: sim-phone  on-desk: (25.45 6.85))
+           ;; 5, FACILITIES: the badge by the door, the zone, the vent, the blinds, a unit
+           (desk    in: facilities  from: (corner 0 (1.5 1.5))  kind: office-desk)      ; (33.5 1.5)
+           (badge   on-desk: (33.0 1.25)  tier: facilities)
+           (vent    id: sim-vent    in: facilities  at: (37.2 4.4))        ; clear of the ceiling lights
+           (blinds  id: sim-blinds  in: facilities  along: ((34 0) (38 0)))
+           (guard   kind: patrol  route: ((34 6.5) (38.5 6.5))  waits: (2 2))
+           ;; 6, the camera: on the north wall looking south over the room; the
+           ;; strip under it is out of its view, and c3 off blinds it
+           (camera  id: sim-camera  in: camera-room  at: (44 8)  look: (44 3.5 -0.6)  fov: 60  range: 9)
+           ;; 7, the terminal: on a desk; a unit patrols behind you
+           (desk    in: terminal-room  from: (corner 3 (4 -1))  kind: office-desk)      ; (52 7)
+           (terminal id: sim-terminal  on-desk: (52 7.1))
+           (guard   kind: patrol  route: ((49.5 2) (54.5 2))  waits: (3 3)))
+  lessons:
+  ((light     rooms: (light alcove)  start: (1 4)  facing: 0  goal: (dark-in alcove 1.0)
+              on-enter: "That eye on your deck is you, as Gibson sees you. Keep it dark."
+              on-success: "Good. In there you're nobody. Next door."
+              on-fail: "")
+   (sound     rooms: (sound-marble sound-tile sound-carpet)  start: (8.8 4)  facing: 0  goal: (through never: suspicious)
+              on-enter: "Gibson's units hear marble from a room away. Carpet, they barely hear at all. Hold Shift to sneak."
+              on-success: "Quiet as a cat. Keep your feet soft in there."
+              on-fail: "It heard you. Softer on the hard floors. Sneak, or keep to the carpet.")
+   (patrol    rooms: (patrol)  start: (16.8 4)  facing: 0  goal: (through never: hunting)
+              on-enter: "They walk the same loop every time. Watch it once, then go when its back is turned."
+              on-success: "Timing. That's all a patrol is."
+              on-fail: "Caught. Watch the loop again. It turns at the same spot every time.")
+   (deck      rooms: (deck-room)  start: (24.8 4)  facing: 0  goal: (through after: sim-phone never: hunting)
+              on-enter: "Aim at the phone and hold your deck. Units are built to answer. Go while it's busy."
+              on-success: "Nice. They always pick up."
+              on-fail: "Caught. Ring the phone first, then move while it's answering.")
+   (facilities rooms: (facilities)  start: (32.8 4)  facing: 0  goal: (through with: badge used: facilities never: hunting)
+              on-enter: "That badge upgrades your deck. Kill the lights, or run the vent to cover your steps. Gibson notices a dark room if a unit walks into it, though."
+              on-success: "FACILITIES. The building's starting to listen to you."
+              on-fail: "Caught. Take the badge, then use it: the lights, the vent, the blinds.")
+   (camera    rooms: (camera-room)  start: (40.8 4)  facing: 0  goal: (through never: alarm)
+              on-enter: "Cameras can't see in the dark, and they can't turn fast. Stay out of the cone, or darken it first."
+              on-success: "Clean. It never knew you were there."
+              on-fail: "It saw you. Hug the wall under it, or kill its lights first.")
+   (terminal  rooms: (terminal-room)  start: (48.8 4)  facing: 0  goal: (terminal-run)
+              on-enter: "A terminal runs your deck from anywhere on the map. The screen lights you up, so check your back first."
+              on-success: "Anything your badge allows, from one chair. Just don't get comfortable."
+              on-fail: "Caught at the screen. Check your back before you sit down.")
+   (exit      rooms: (exit-room)  start: (56.8 4)  facing: 0  goal: (reader)
+              on-enter: "That's everything I learned in there. The real tower remembers what you do. Good luck, Burn."
+              on-success: ""
+              on-fail: ""))
+  views: ((sim-start  at: (1 4 1.6)   look: (8 4 1.2))
+          (sim-sound  at: (8.8 4 1.6)  look: (12 9.4 1.2))
+          (sim-camera at: (40.8 4 1.6) look: (44 8 2.2)))
+  start: (1 4))

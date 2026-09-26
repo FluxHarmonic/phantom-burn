@@ -19,13 +19,15 @@
 //               the wasm its name promises. Identity is a FAIL on a deployment;
 //               under --wrangler-dev it is allowed and named (the local server
 //               need not compress).
+// redirect      every _redirects rule answers its status and Location (the
+//               game's first path 301s to /beta/, the rest of the path kept).
 // missing       a missing page, a missing file under the game, the old
-//               /<game>/phantom-burn.wasm and /_headers answer 404 with the
+//               /<game>/phantom-burn.wasm, /_headers and /_redirects answer 404 with the
 //               staged 404.html byte for byte; a missing wasm key answers the
 //               Function's own 404. Under --wrangler-dev /_headers may be 502
 //               (wrangler's local asset server).
-// The game's path is read from the tree (its one p-<10> directory) and never
-// printed. Exit 0 green, 1 red, 2 setup failed.
+// The game's path is read from the manifest's header (# game NAME).
+// Exit 0 green, 1 red, 2 setup failed.
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
@@ -38,10 +40,10 @@ if (!BASE0 || !DIR0) { console.log("usage: verify-live.mjs URL DIR [--wrangler-d
 const BASE = BASE0.replace(/\/$/, ""), DIR = path.resolve(DIR0.replace(/\/$/, ""));
 const sha = (b) => crypto.createHash("sha256").update(b).digest("hex");
 const lines = fs.readFileSync(DIR + ".manifest", "utf8").split("\n").filter((l) => l && !l.startsWith("#"));
-const entries = lines.map((l) => ({ h: l.slice(0, 64), f: l.slice(66) })).filter((e) => !e.f.startsWith("@") && e.f !== "_headers");
-const SLUG = fs.readdirSync(DIR).find((n) => /^p-[a-z2-7]{10}$/.test(n));
-if (!SLUG) { console.log("SETUP-FAILED: no p-<10> directory in the tree"); process.exit(2); }
-const hide = (s) => s.split(SLUG).join("<game>");
+const entries = lines.map((l) => ({ h: l.slice(0, 64), f: l.slice(66) })).filter((e) => !e.f.startsWith("@") && e.f !== "_headers" && e.f !== "_redirects");
+const SLUG = (fs.readFileSync(DIR + ".manifest", "utf8").match(/^# game (\S+)$/m) || [])[1];
+if (!SLUG) { console.log("SETUP-FAILED: the manifest names no game path (# game)"); process.exit(2); }
+const hide = (s) => s;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failed = 0;
 const pass = (leg, what) => console.log(`  ok   ${leg}: ${what}`);
@@ -112,15 +114,35 @@ else {
   }
 }
 
+// ---- redirect -------------------------------------------------------------------------
+{
+  const rfile = path.join(DIR, "_redirects");
+  const rules = fs.existsSync(rfile) ? fs.readFileSync(rfile, "utf8").split("\n").map((l) => l.replace(/#.*/, "").trim()).filter(Boolean)
+    .map((l) => { const [from, to, st] = l.split(/\s+/); return { from, to, status: st ? Number(st) : 302 }; }) : [];
+  const why = [];
+  for (const r of rules) {
+    const tail = r.from.endsWith("/*") ? "assets/sigil-web-app.js" : "";
+    const from = r.from.endsWith("/*") ? r.from.slice(0, -1) + tail : r.from;
+    const want = r.to.replace(":splat", tail);
+    const g = await fetch(BASE + from, { redirect: "manual" });
+    await g.arrayBuffer();
+    const loc = (g.headers.get("location") || "").replace(BASE, "");
+    if (g.status !== r.status || loc !== want) why.push(`${from}: ${g.status} -> ${loc} (want ${r.status} -> ${want})`);
+  }
+  if (!rules.length) fail("redirect", "no _redirects rules in the tree");
+  else if (why.length) fail("redirect", why.join("; "));
+  else pass("redirect", `${rules.length} rules: ${rules.map((r) => `${r.from} ${r.status} -> ${r.to}`).join(", ")}`);
+}
+
 // ---- missing --------------------------------------------------------------------------
 {
   const fourSha = sha(fs.readFileSync(path.join(DIR, "404.html")));
-  const probes = [`/no-such-page-${Date.now()}`, `/${SLUG}/no-such-file.js`, `/${SLUG}/phantom-burn.wasm`, "/_headers", `/w/${"0".repeat(16)}/phantom-burn.wasm`];
+  const probes = [`/no-such-page-${Date.now()}`, `/${SLUG}/no-such-file.js`, `/${SLUG}/phantom-burn.wasm`, "/_headers", "/_redirects", `/w/${"0".repeat(16)}/phantom-burn.wasm`];
   const why = [];
   for (const p of probes) {
     const r = await fetch(BASE + p);
     const b = Buffer.from(await r.arrayBuffer());
-    if (WDEV && p === "/_headers" && r.status === 502) continue;
+    if (WDEV && (p === "/_headers" || p === "/_redirects") && r.status === 502) continue;
     if (r.status !== 404) { why.push(`${p} ${r.status}`); continue; }
     if (!p.startsWith("/w/") && sha(b) !== fourSha) why.push(`${p} 404 but not 404.html`);
   }

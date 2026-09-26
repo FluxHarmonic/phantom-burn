@@ -1,6 +1,6 @@
 #!/bin/sh
 # Stage phantomburn.net (a private preview): the placeholder root from site/,
-# and the game under an unguessable path.
+# and the game at /beta/ (David, 2026-09-26: "a memorable address").
 #
 #   PHANTOM_WEB_DIR=build/remote-web-<sha> scripts/stage-web build/site
 #
@@ -10,7 +10,9 @@
 #                     a missing path with the root page and a 200:
 #                     topics/cloudflare-pages-serves-index-for-a-missing-path)
 #   /robots.txt       disallows everything; _headers says noindex everywhere
-#   /<slug>/          the game's web build (page, bridges, assets/)
+#   /_redirects       the game's first path, /p-<10>/*, 301s to /beta/:splat
+#                     (links shared before the move keep working)
+#   /<game>/          the game's web build (page, bridges, assets/)
 #   /w/<sha16>/phantom-burn.wasm
 #                     the game's wasm, named by its content (the first 16 hex
 #                     of its sha256), at the root so no route names the slug.
@@ -20,10 +22,9 @@
 #                     serves it same-origin (t-5b3251, Harkfell's model); here
 #                     it stays a plain file so check-site.mjs can serve it.
 #
-# THE SLUG IS NOT IN THE REPO. It is read from $PHANTOM_SITE_SLUG, else from
-# ~/.config/phantomburn/slug (mode 600), and must be `p-` and 10 base32
-# characters. Nothing this script writes into the tree names it outside its
-# own path; scripts/check-site.mjs refuses a tree whose public files do.
+# The game's path is read from $PHANTOM_SITE_SLUG, else ~/.config/phantomburn/slug,
+# else it is beta; a short lowercase name. It is written into the manifest's
+# header (# game NAME), where check-site.mjs and verify-live.mjs read it.
 #
 # PHANTOM_WEB_DIR: the game build to stage (default build/web; a runner build
 # is build/remote-web-<sha>, which carries BUILD-SHA). Writes DIR.manifest
@@ -35,18 +36,20 @@ DIR="${1:?usage: stage-web DIR}"
 DIR="${DIR%/}"
 WEB="${PHANTOM_WEB_DIR:-build/web}"
 SLUG="${PHANTOM_SITE_SLUG:-$(cat "$HOME/.config/phantomburn/slug" 2>/dev/null || true)}"
+SLUG="${SLUG:-beta}"
 say() { echo "stage-web: $*" >&2; }
-printf '%s' "$SLUG" | grep -Eqx 'p-[a-z2-7]{10}' || { say "REFUSED: no slug (PHANTOM_SITE_SLUG or ~/.config/phantomburn/slug, p- and 10 base32 characters)"; exit 1; }
+printf '%s' "$SLUG" | grep -Eqx '[a-z][a-z0-9-]{1,31}' || { say "REFUSED: the game's path '$SLUG' is not a short lowercase name"; exit 1; }
+[ "$SLUG" != w ] || { say "REFUSED: /w/ is the wasm's route"; exit 1; }
 [ ! -e "$DIR" ] || { say "REFUSED: $DIR exists; remove it to restage"; exit 1; }
 for f in index.html phantom-burn.wasm assets; do
   [ -e "$WEB/$f" ] || { say "REFUSED: $WEB/$f missing (build the web config, or point PHANTOM_WEB_DIR at a runner build)"; exit 1; }
 done
 [ -f "$WEB/assets/floors/14-slice/floor.sexp" ] || { say "REFUSED: $WEB has no compiled floor 14"; exit 1; }
-for f in index.html 404.html robots.txt _headers; do [ -f "site/$f" ] || { say "REFUSED: site/$f missing"; exit 1; }; done
+for f in index.html 404.html robots.txt _headers _redirects; do [ -f "site/$f" ] || { say "REFUSED: site/$f missing"; exit 1; }; done
 grep -c 'data-wasm="phantom-burn"' "$WEB/index.html" | grep -qx 1 || { say "REFUSED: $WEB/index.html does not say data-wasm=\"phantom-burn\" exactly once; the page changed shape"; exit 1; }
 
 mkdir -p "$DIR/$SLUG"
-cp site/index.html site/404.html site/robots.txt site/_headers "$DIR/"
+cp site/index.html site/404.html site/robots.txt site/_headers site/_redirects "$DIR/"
 cp "$WEB/index.html" "$DIR/$SLUG/"
 SHA16="$(sha256sum "$WEB/phantom-burn.wasm" | cut -c1-16)"
 mkdir -p "$DIR/w/$SHA16"
@@ -62,6 +65,7 @@ BUILT="local build/web"
   echo "# head $(git rev-parse HEAD)"
   echo "# built $BUILT"
   echo "# wasm $SHA16"
+  echo "# game $SLUG"
   scripts/tree-manifest "$DIR"
 } > "$DIR.manifest"
-say "staged $(grep -vc '^#' "$DIR.manifest") entries ($(du -sh "$DIR" | cut -f1)) to $DIR; the game at /<slug>/, its wasm at /w/$SHA16/phantom-burn.wasm; manifest $DIR.manifest"
+say "staged $(grep -vc '^#' "$DIR.manifest") entries ($(du -sh "$DIR" | cut -f1)) to $DIR; the game at /$SLUG/, its wasm at /w/$SHA16/phantom-burn.wasm; manifest $DIR.manifest"

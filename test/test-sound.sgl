@@ -394,7 +394,26 @@
   (test "renders byte-identically twice"
     (let ((b (bank-until (make-bank RATE loader) (lambda (b) #f))))
       (for-each (lambda (k) (assert-true (equal? (bank-sample BANK-E (list 'event k)) (bank-sample b (list 'event k)))))
-                EVENT-KINDS))))
+                EVENT-KINDS)))
+  (test "the order: the camera's pip and the robot's bored, ? and THERE right after the steps; every kind before the bed; the moods' other variants after it"
+    (let* ((later '(speak-suspicious-2 speak-suspicious-3 speak-searching-2 speak-searching-3 speak-there-2 speak-there-3
+                    speak-lost-2 speak-lost-3 speak-settle-2 speak-settle-3 speak-bored-2 speak-bored-3))
+           (first '(camera-pip speak-bored-1 speak-suspicious-1 speak-there-1))
+           (has? (lambda (b k) (and (bank-sample b (list 'event k)) #t)))
+           (b (make-bank RATE loader)))
+      (bank-until b bank-robot-ready?)
+      (for-each (lambda (k) (assert-true (has? b k))) first)
+      (for-each (lambda (k) (assert-false (has? b k))) '(door-open camera-alert speak-searching-1))
+      (bank-until b bank-events-ready?)
+      (for-each (lambda (k) (unless (has? b k) (display k) (display " is missing at events-ready\n"))
+                  (assert-true (has? b k)))
+                (filter (lambda (k) (not (memq k later))) EVENT-KINDS))
+      (for-each (lambda (k) (assert-false (has? b k))) later)
+      (bank-until b bank-bed-loop)
+      (for-each (lambda (k) (assert-false (has? b k))) later)
+      (assert-false (bank-ready? b))
+      (bank-until b (lambda (b) #f))
+      (for-each (lambda (k) (assert-true (has? b k))) later))))
 
 ;; --- the camera's pips (P3: David picked pip B; API v8's sounding list) --------------
 
@@ -463,6 +482,21 @@
           (for-each (lambda (e) (unless (memq (cadr (car e)) seen) (set! seen (cons (cadr (car e)) seen)))) (speak-events s))
           (loop (+ i 1))))
       (assert-true (>= (length seen) 2))))
+  (test "until a mood's other variants are rendered (after the bed), it plays its first: 30 THEREs, all sounding"
+    (let* ((s (make-sound RATE (apply only-loader SPEAK-TUNES) #t MUSIC-TUNE)) (n 0) (other 0))
+      (bank-until (sound-bank s) bank-events-ready?)
+      (assert-false (bank-sample (sound-bank s) '(event speak-there-2)))
+      (sound-start! s)
+      (let loop ((i 0))
+        (when (< i 30)
+          (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0) '())
+          (sound-event! s 'robot-there 0.0 -4.0 1.0 #f)
+          (for-each (lambda (e) (set! n (+ n 1)) (unless (eq? (cadr (car e)) 'speak-there-1) (set! other (+ other 1))))
+                    (speak-events s))
+          (loop (+ i 1))))
+      (assert-false (bank-sample (sound-bank s) '(event speak-there-2)))
+      (assert-equal 30 n)
+      (assert-equal 0 other)))
   (test "a calm unit mutters, bored, every 20-40 s: once or twice in 45 s; a searching one does not"
     (let ((count (lambda (state)
                    (let ((s (apply ready-sound (list (apply only-loader SPEAK-TUNES)))))
