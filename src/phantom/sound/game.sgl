@@ -31,7 +31,7 @@
           (phantom sound bank)
           (phantom play mode))
   (export sound-game-init! sound-game-gesture! sound-game-idle! sound-game-frame! sound-game-stop!
-          sound-game sound-game-trace SOUND-RATE SOUND-TUNES)
+          sound-game sound-game-trace sound-game-set-music-rate! SOUND-RATE SOUND-TUNES)
   (begin
     (define SOUND-RATE 44100)
 
@@ -66,7 +66,8 @@
                            " cues " (number->string (sound-cue-plays *s*))
                            " started " (if (sound-started? *s*) "yes" "no")
                            ;; the music's section now (calm aware alert, or a transition)
-                           " section " (symbol->string (sound-section *s*)))))
+                           " section " (symbol->string (sound-section *s*))
+                           " lift " (fixed (music-lift *s*)))))
                (set! *steps-n* 0) (set! *events-n* 0)
                line))))
 
@@ -93,6 +94,11 @@
       (unless *s*
         (set! *t0* (current-milliseconds))
         (set! *s* (make-sound SOUND-RATE loader))))
+
+    ;; the music's render rate in Hz (?rate=24|28|32 on the web, in kHz there): David
+    ;; A/Bs the lo-fi on his phone; 24000 by default
+    (define (sound-game-set-music-rate! hz)
+      (when *s* (sound-set-music-rate! *s* hz)))
 
     (define (sound-game-gesture!)
       (when *s* (sound-gesture! *s*)))
