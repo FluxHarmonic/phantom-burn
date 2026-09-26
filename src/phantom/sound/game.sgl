@@ -38,7 +38,7 @@
     ;; the tracks: INFILTRATE plays False Identity, PRACTICE Heat Trace (David's
     ;; split, 2026-09-26); one player at a time, so the budget is per level
     (define PRACTICE-MUSIC "music-heat-trace")
-    (define (level-music) MUSIC-TUNE)     ; PRACTICE: (if (play-mode-practice?) PRACTICE-MUSIC MUSIC-TUNE)
+    (define (level-music) (if (play-mode-practice?) PRACTICE-MUSIC MUSIC-TUNE))   ; PRACTICE: Heat Trace in the sim
 
     (define SOUND-TUNES
       (append (list MUSIC-TUNE PRACTICE-MUSIC)
