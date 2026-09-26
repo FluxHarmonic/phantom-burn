@@ -239,7 +239,8 @@
     ;; --- the events --------------------------------------------------------------------------
     ;; the kinds agreed with P2 (topics/phantom-sound-api); each tune is 125 rows
     ;; of 20 ms, the event at row 0, rendered for its first (event-seconds KIND) seconds
-    (define EVENT-KINDS '(door-open door-close panel-on panel-off reader-ok reader-deny badge caught note))
+    (define EVENT-KINDS '(door-open door-close panel-on panel-off reader-ok reader-deny badge caught note
+                          camera-pip camera-alert))
     ;; each event renders for its own length: its sound measured (the last sample
     ;; above -60 dBFS, plus ~15%; the tests hold each quiet in its last 100 ms).
     ;; The stairwell air (door-open) and the capture (caught) ring on for the
@@ -247,7 +248,8 @@
     (define EVENT-S 1.6)                  ; a kind not listed below
     (define EVENT-LENGTHS
       (quote ((door-open . 2.5) (door-close . 0.52) (panel-on . 0.62) (panel-off . 0.5)
-              (reader-ok . 0.54) (reader-deny . 0.5) (badge . 1.06) (caught . 2.5) (note . 1.6))))
+              (reader-ok . 0.54) (reader-deny . 0.5) (badge . 1.06) (caught . 2.5) (note . 1.6)
+              (camera-pip . 0.3) (camera-alert . 1.0))))
     (define (event-seconds kind) (let ((e (assq kind EVENT-LENGTHS))) (if e (cdr e) EVENT-S)))
 
     ;; --- rendering -------------------------------------------------------------------------------

@@ -19,7 +19,9 @@
 ;;;                          the audio context and the streams; not headless), the
 ;;;                          rest resume the context if the browser suspended it
 ;;;   (sound-start! s)       the start alone
-;;;   (sound-frame! s dt you guards)          once a frame
+;;;   (sound-frame! s dt you guards [sounding])   once a frame; sounding: P3's devices
+;;;       sounding ((id kind x y atten muffled? path-m level) ...): each camera pips
+;;;               there, faster as its awareness (level) rises
 ;;;       you     (x y yaw moved surface speed crouched?)   moved: metres this frame;
 ;;;               surface: the floor's surface name (a symbol)
 ;;;       guards  ((x y moved state occluded?) ...)          state: 0..3 (CALM .. HUNTING);
@@ -59,7 +61,7 @@
   (export make-sound sound-start! sound-gesture! sound-prepare! sound-frame! sound-step! sound-event! sound-stop!
           sound-render! sound-trace sound-started? sound-bank sound-mixer sound-bed-mixer sound-last-events
           sound-section sound-music-playing?
-          sound-cue-plays MUSIC-TUNE SURFACE-MAP)
+          sound-cue-plays pip-interval MUSIC-TUNE SURFACE-MAP)
   ;; On the web, one-shots play as the audio bridge's CUES: uploaded once, mixed
   ;; in the AudioWorklet (sigil-wasm-audio's load-audio-cue / play-audio-cue), so
   ;; a sounding step costs nothing per sample in Sigil (the mixer, per sample in
@@ -102,7 +104,8 @@
     ;; #(rate loader headless? bank mixer you-steps guards music-rule seed
     ;;   ctx sfx-stream music-stream bed-started? music-player bed-mixer sections
     ;;   last-events costs started? steps-handed? listener music bed-stream bed-pos
-    ;;   cues cue-plays)
+    ;;   cues cue-plays cameras)
+    ;; cameras: ((id . seconds-to-its-next-pip) ...), the cameras in the last feed
     ;; cues: ((key . cue) ...), each bank sample uploaded as a cue on its first play
     ;; (the web); cue-plays: how many one-shots went to the worklet so far
     ;; music: the track's name, or #f (no music: no player and no music stream)
@@ -122,7 +125,7 @@
               #f #f #f #f #f (make-mixer) #f
               '() (list (cons 'bank 0.0) (cons 'sfx 0.0) (cons 'music 0.0) (cons 'bed 0.0) (cons 'frames 0)) #f #f (list 0.0 0.0 0.0)
               (if (and (pair? opt) (pair? (cdr opt))) (cadr opt) MUSIC-TUNE)
-              #f 0 '() 0))
+              #f 0 '() 0 '()))
 
     (define (sound-music-playing? s) (and (vector-ref s 13) #t))
 
@@ -276,7 +279,37 @@
                       (list 'event kind))))
         (play! s key (car sp) (cdr sp))))
 
-    (define (sound-frame! s dt you guards)
+    ;; --- the cameras (P3; David: "a soft beeping ... a specific noise pattern"; he
+    ;; picked pip B, the relay's double tick) ---------------------------------------------
+    ;; Each camera in the feed's sounding list (API v8: (id camera x y atten muffled?
+    ;; path-m level), level its awareness 0..1) pips where it is, every
+    ;; (pip-interval level) seconds: 2 s while it only watches, closing in
+    ;; Geiger-style to 0.12 s as it becomes sure; camera-alert (a sound event) is
+    ;; the confirmed moment. A camera no longer in the list stops at once.
+    (define PIP-SLOW 2.0)
+    (define PIP-FAST 0.12)
+    (define PIP-GAIN 0.8)
+    (define (pip-interval level)
+      (* PIP-SLOW (expt (/ PIP-FAST PIP-SLOW) (max 0.0 (min 1.0 (or level 0.0))))))
+
+    (define (cameras! s dt sounding)
+      (let ((cams (filter (lambda (e) (eq? (list-ref e 1) 'camera)) sounding)))
+        (vector-set! s 26
+          (map (lambda (c)
+                 (let* ((id (list-ref c 0))
+                        (level (and (> (length c) 7) (list-ref c 7)))
+                        (iv (pip-interval level))
+                        (old (assoc id (vector-ref s 26)))
+                        ;; a camera first seen pips within its interval, not at once
+                        (left (- (if old (cdr old) (* iv (rand! s))) dt)))
+                   (if (> left 0.0)
+                       (cons id (min left iv))       ; a rising level shortens the wait
+                       (let ((sp (placed s (list-ref c 2) (list-ref c 3) (list-ref c 4) (list-ref c 6))))
+                         (play! s '(event camera-pip) (* PIP-GAIN (car sp)) (cdr sp))
+                         (cons id (+ left iv))))))
+               cams))))
+
+    (define (sound-frame! s dt you guards . more)
       (vector-set! s 16 '())
       ;; the bank renders ~BANK-MS a frame until it is complete (the title's
       ;; frames can do it before play); the bed's loop starts, once, when its stage is done
@@ -319,6 +352,8 @@
                 (when sting (play! s (list 'sting sting) (* (car sp) (if (eq? sting 'there) 1.0 0.8)) (cdr sp)))
                 (vector-set! e 1 state)
                 (loop (cdr gs) (+ i 1) (cons state states))))))
+      ;; the devices sounding (P3): the cameras' pips
+      (cameras! s dt (if (pair? more) (car more) '()))
       (unless (vector-ref s 2) (pump! s)))
 
     ;; --- the sinks ------------------------------------------------------------------------------

@@ -395,3 +395,40 @@
     (let ((b (bank-until (make-bank RATE loader) (lambda (b) #f))))
       (for-each (lambda (k) (assert-true (equal? (bank-sample BANK-E (list 'event k)) (bank-sample b (list 'event k)))))
                 EVENT-KINDS))))
+
+;; --- the camera's pips (P3: David picked pip B; API v8's sounding list) --------------
+
+;; frames of 1/60 s with one camera at (x, y) and awareness `level`; the count of
+;; pips it played, and the last pip's (gain pan)
+(define (camera-frames s n x y level)
+  (let loop ((i 0) (pips 0) (last #f))
+    (if (>= i n) (list pips last)
+        (begin
+          (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0) '()
+                        (list (list 'lobby-cam 'camera x y 1.0 #f #f level)))
+          (let ((p (filter (lambda (e) (equal? (car e) '(event camera-pip))) (sound-last-events s))))
+            (loop (+ i 1) (+ pips (length p)) (if (pair? p) (cdr (car p)) last)))))))
+
+(test-group "the camera's pips"
+  (test "the interval: 2 s while it only watches, 0.12 s when sure, falling between"
+    (assert-true (near? (pip-interval 0.0) 2.0 1e-9))
+    (assert-true (near? (pip-interval 1.0) 0.12 1e-9))
+    (assert-true (< (pip-interval 0.75) (pip-interval 0.5) (pip-interval 0.25)))
+    (assert-true (near? (pip-interval #f) 2.0 1e-9)))
+  (test "watching (awareness 0): a pip every 2 s, 5 in 10 s"
+    (let ((r (camera-frames (ready-sound (only-loader "event-camera-pip")) 600 0.0 -4.0 0.0)))
+      (assert-true (<= 4 (car r) 5))))
+  (test "sure (awareness 1): 0.12 s apart, about 83 in 10 s"
+    (let ((r (camera-frames (ready-sound (only-loader "event-camera-pip")) 600 0.0 -4.0 1.0)))
+      (assert-true (<= 80 (car r) 84))))
+  (test "placed: 4 m to your right, half the pip's gain, panned 0.6 right"
+    (let ((r (camera-frames (ready-sound (only-loader "event-camera-pip")) 150 0.0 -4.0 0.0)))
+      (assert-true (near? (car (cadr r)) 0.4 1e-9))
+      (assert-true (near? (cadr (cadr r)) 0.6 1e-9))))
+  (test "a camera no longer in the list stops at once"
+    (let ((s (ready-sound (only-loader "event-camera-pip"))))
+      (camera-frames s 120 0.0 -4.0 1.0)
+      (let loop ((i 0) (pips 0))
+        (if (>= i 120) (assert-equal 0 pips)
+            (begin (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0) '() '())
+                   (loop (+ i 1) (+ pips (length (filter (lambda (e) (equal? (car e) '(event camera-pip))) (sound-last-events s)))))))))))

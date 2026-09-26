@@ -102,7 +102,7 @@
                     (caddr feed))
           (for-each (lambda (e) (sound-event! *s* (list-ref e 0) (list-ref e 1) (list-ref e 2) (list-ref e 3) (list-ref e 4)))
                     (cadddr feed))
-          (sound-frame! *s* dt (car feed) (cadr feed)))))
+          (sound-frame! *s* dt (car feed) (cadr feed) (if (> (length feed) 4) (list-ref feed 4) (quote ()))))))
 
     (define (sound-game-stop!)
       (when (and *s* (sound-started? *s*)) (sound-stop! *s*)))))

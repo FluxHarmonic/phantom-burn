@@ -234,9 +234,10 @@
         app.dispatch("floor", floor);
         app.dispatch("dpr", String(window.devicePixelRatio || 1));
         window.addEventListener("resize", function () { app.dispatch("dpr", String(window.devicePixelRatio || 1)); });
-        // S1's sound: its tunes (the nine events; no music), and the gestures
+        // S1's sound: its tunes (the events and the camera's; no music), and the gestures
         if (!params.has("mute")) {
-          ["door-open", "door-close", "panel-on", "panel-off", "reader-ok", "reader-deny", "badge", "caught", "note"]
+          ["door-open", "door-close", "panel-on", "panel-off", "reader-ok", "reader-deny", "badge", "caught", "note",
+           "camera-pip", "camera-alert"]
             .forEach(function (k) {
               var name = "event-" + k;
               fetch("assets/tunes/" + name + ".cts").then(function (r) {
