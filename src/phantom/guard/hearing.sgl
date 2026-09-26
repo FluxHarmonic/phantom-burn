@@ -13,7 +13,7 @@
 ;;; through a wall but fifteen by the corridor sounds fifteen metres away.
 ;;;
 ;;; A footstep's noise is its surface's (quiet carpet to ringing grate)
-;;; times its gait (sneaking halves it, running doubles it: §3). It reaches
+;;; times its gait (sneaking halves it, running makes it 2.5 times: §3). It reaches
 ;;; a guard as noise x path gain x distance falloff, and he hears it when
 ;;; that is over the floor's ambient (the HVAC, the buzz, the city:
 ;;; loud places hide you). What he hears raises his awareness and gives him
@@ -31,11 +31,17 @@
 
   (begin
 
-    ;; noise at the source, by the surface's noise class
+    ;; noise at the source, by the surface's noise class. P3 retune (David,
+    ;; 2026-09-26: "really sensitive to sounds, even on carpet"): carpet
+    ;; (quiet) 0.35 -> 0.16, so a walk on it reaches the floor's threshold
+    ;; (0.145) only within about 3 m and a sneak on it never; the hard
+    ;; floors (tile 0.6, marble 1.0) stay the loud surfaces.
     (define SURFACE-NOISE
-      '((quiet . 0.35) (moderate . 0.6) (loud . 1.0) (ringing . 1.1) (hollow . 0.9) (duct . 0.5)))
+      '((quiet . 0.16) (moderate . 0.6) (loud . 1.0) (ringing . 1.1) (hollow . 0.9) (duct . 0.5)))
     (define OTHER-NOISE 0.6)          ; a surface with no class (a desk top, a prop)
-    (define GAIT-NOISE '((sneak . 0.5) (walk . 1.0) (run . 2.0)))
+    ;; P3 retune: a run 2.0 -> 2.5, loud on any floor (on carpet it carries
+    ;; about 7 m; on marble across the floor)
+    (define GAIT-NOISE '((sneak . 0.5) (walk . 1.0) (run . 2.5)))
     (define FALLOFF-M 3.0)            ; full within 3 m, then 3/d
     (define MUFFLE-BELOW 0.85)        ; an opening passing less than this muffles (glass, a grate)
 
