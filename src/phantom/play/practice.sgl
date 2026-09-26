@@ -1,0 +1,273 @@
+;;; (phantom play practice) - PRACTICE's lessons (D38 in
+;;; topics/stealth-game-design; topics/phantom-burn-practice-api): Crash's
+;;; sim of Gibson's tower, one lesson per room, Crash coaching on the deck.
+;;; It watches (phantom play core) from outside: the game and the gates call
+;;; practice-tick! after each rules tick.
+;;;
+;;; A lesson is the rooms it holds, where you start it, a goal and Crash's
+;;; three lines (play.sexp's lessons, from floors/sim.floor). The goals:
+;;;   (dark-in ROOM SECONDS)   stand in ROOM with the eye empty that long
+;;;   (through [never: STATE] [after: DEVICE] [with: badge] [used: facilities])
+;;;                            reach the next lesson's rooms: the room's unit
+;;;                            never reached STATE (suspicious or hunting),
+;;;                            or no camera alarmed (never: alarm); DEVICE
+;;;                            was set going; the badge in hand; a
+;;;                            FACILITIES command used
+;;;   (terminal-run)           run a command from the terminal
+;;;   (reader)                 the reader: the end of the sim
+;;; Each Crash line plays once: on-enter the first time you come into a
+;;; lesson, on-success at its first success, on-fail at its first failure (a
+;;; capture, a camera's alarm, or its unit reaching the STATE it must not).
+;;; A capture, or a camera's alarm in the camera lesson, resets only the
+;;; room (the caller fades, then practice-reset-room!): Gibson stays out of
+;;; the sim, so there is no patch note and no attempt count.
+
+(define-library (phantom play practice)
+  (import (sigil core)
+          (sigil list)
+          (phantom collide)
+          (phantom walker)
+          (phantom play data)
+          (phantom play devices)
+          (phantom play core)
+          (phantom guard guard))
+
+  (export make-practice practice? practice-reset! practice-tick! practice-note-command!
+          practice-reset-room! practice-crash practice-lesson practice-done? practice-index
+          practice-lines-said DARK-VIS CRASH-KEEP)
+
+  (begin
+
+    (define DARK-VIS 0.2)           ; the eye is empty below this (its first step, (phantom play mode))
+    (define CRASH-KEEP 3)           ; lines (play-mode-crash) gives
+
+    ;; The practice: a vector
+    ;;  0 tag  1 data  2 the lesson you are in (index, -1 before the first)
+    ;;  3 per lesson, a vector of its tracking:
+    ;;     0 entered?  1 succeeded?  2 failed?  3 the unit's worst state
+    ;;     this visit  4 its device set going?  5 a FACILITIES command used?
+    ;;     6 seconds dark (dark-in)  7 a camera alarmed?  8 the terminal ran?
+    ;;  4 Crash's lines, newest first: ((text . at) ...)  5 the clock (s)
+    ;;  6 done?  7 per lesson, its unit's index (-1: none)  8 per room, its
+    ;;  lesson (-1: none)  9 the lines said, in order: ((lesson . which) ...)
+    (define (practice? v) (and (vector? v) (= (vector-length v) 10) (eq? (vector-ref v 0) 'practice)))
+
+    (define (make-practice data)
+      (let* ((ls (play-lessons data))
+             (n (vector-length ls))
+             (by-room (make-vector (room-count data) -1)))
+        (let loop ((i 0))
+          (when (< i n)
+            (let ((rs (lesson-rooms (vector-ref ls i))))
+              (let each ((k 0))
+                (when (< k (vector-length rs))
+                  (vector-set! by-room (vector-ref rs k) i)
+                  (each (+ k 1)))))
+            (loop (+ i 1))))
+        (practice-reset!
+          (vector 'practice data -1 #f '() 0.0 #f
+                  ;; a lesson's unit: the one whose first route point is in its rooms
+                  (list->vector
+                    (map (lambda (l)
+                           (let ((us (play-units data)))
+                             (let find ((u 0))
+                               (cond ((>= u (vector-length us)) -1)
+                                     ((let* ((r (unit-route (vector-ref us u)))
+                                             (room (room-at data (vector-ref r 0) (vector-ref r 1) 0.0)))
+                                        (and (>= room 0) (= (vector-ref by-room room) (index-of ls l))))
+                                      u)
+                                     (else (find (+ u 1)))))))
+                         (vector->list ls)))
+                  by-room '()))))
+
+    (define (index-of v x) (let loop ((i 0)) (cond ((>= i (vector-length v)) -1) ((eq? (vector-ref v i) x) i) (else (loop (+ i 1))))))
+
+    (define (practice-reset! pr)
+      (let ((n (lesson-count (vector-ref pr 1))))
+        (vector-set! pr 2 -1)
+        (vector-set! pr 3 (list->vector (map (lambda (i) (vector #f #f #f CALM #f #f 0.0 #f #f)) (iota n))))
+        (vector-set! pr 4 '())
+        (vector-set! pr 5 0.0)
+        (vector-set! pr 6 #f)
+        (vector-set! pr 9 '())
+        pr))
+
+    (define (lesson pr i) (vector-ref (play-lessons (vector-ref pr 1)) i))
+    (define (track pr i) (vector-ref (vector-ref pr 3) i))
+    (define (practice-index pr) (vector-ref pr 2))
+    (define (practice-done? pr) (vector-ref pr 6))
+    ;; for the gates: the lines said, in order, ((lesson-id . enter|success|fail) ...)
+    (define (practice-lines-said pr) (reverse (vector-ref pr 9)))
+
+    ;; Crash says a line: for the deck's display, and the blip (a crash
+    ;; event at you).
+    (define (say! pr core i which text)
+      (vector-set! pr 9 (cons (cons (lesson-id (lesson pr i)) which) (vector-ref pr 9)))
+      (when (> (string-length text) 0)
+        (vector-set! pr 4 (cons (cons text (vector-ref pr 5)) (vector-ref pr 4)))
+        (play-event! core 'crash (or (play-runner-x core) 0.0) (or (play-runner-y core) 0.0))))
+
+    (define (succeed! pr core i)
+      (let ((t (track pr i)))
+        (unless (vector-ref t 1)
+          (vector-set! t 1 #t)
+          (say! pr core i 'success (lesson-on-success (lesson pr i))))))
+    (define (fail! pr core i)
+      (let ((t (track pr i)))
+        (unless (vector-ref t 2)
+          (vector-set! t 2 #t)
+          (say! pr core i 'fail (lesson-on-fail (lesson pr i))))))
+
+    ;; A goal's option: the value after key (never: after: with: used:), or #f.
+    (define (option goal key)
+      (let loop ((l (cdr goal)))
+        (cond ((or (null? l) (null? (cdr l))) #f)
+              ((and (keyword? (car l)) (eq? (keyword->symbol (car l)) key)) (cadr l))
+              (else (loop (cdr l))))))
+
+    ;; Come into lesson i: Crash's line the first time, its unit awake (or
+    ;; none stepping), its tracking for this visit fresh.
+    (define (enter! pr core i)
+      (let ((t (track pr i)) (u (vector-ref (vector-ref pr 7) i)))
+        (vector-set! pr 2 i)
+        (vector-set! t 3 CALM) (vector-set! t 4 #f) (vector-set! t 5 #f)
+        (vector-set! t 6 0.0) (vector-set! t 7 #f) (vector-set! t 8 #f)
+        (if (>= u 0)
+            (begin (play-set-unit! core u) (play-units-off! core #f))
+            (play-units-off! core #t))
+        (unless (vector-ref t 0)
+          (vector-set! t 0 #t)
+          (say! pr core i 'enter (lesson-on-enter (lesson pr i))))))
+
+    ;; Whether lesson i's through-goal is met on leaving it for the next.
+    (define (through-met? pr core i)
+      (let* ((goal (lesson-goal (lesson pr i))) (t (track pr i))
+             (never (option goal 'never)) (after (option goal 'after))
+             (with (option goal 'with)) (used (option goal 'used)))
+        (and (eq? (car goal) 'through)
+             (not (vector-ref t 2))
+             (case never
+               ((suspicious) (< (vector-ref t 3) SUSPICIOUS))
+               ((hunting) (< (vector-ref t 3) HUNTING))
+               ((alarm) (not (vector-ref t 7)))
+               (else #t))
+             (or (not after) (vector-ref t 4))
+             (or (not with) (play-badge? core))
+             (or (not used) (vector-ref t 5)))))
+
+    ;; One tick of the lessons, after play-tick!. Returns #f, or caught: a
+    ;; camera in its lesson alarmed and the room resets as for a capture
+    ;; (the caller fades, then calls practice-reset-room!).
+    (define (practice-tick! pr core)
+      (vector-set! pr 5 (+ (vector-ref pr 5) TICK))
+      (let* ((data (vector-ref pr 1))
+             (room (play-runner-room core))
+             (i (if (>= room 0) (vector-ref (vector-ref pr 8) room) -1))
+             (cur (vector-ref pr 2)))
+        ;; into another lesson: the one you left succeeds if its goal is met
+        (when (and (>= i 0) (not (= i cur)))
+          (when (and (>= cur 0) (> i cur) (through-met? pr core cur))
+            (succeed! pr core cur))
+          (enter! pr core i))
+        (let ((cur (vector-ref pr 2)))
+          (if (< cur 0)
+              #f
+              (let* ((l (lesson pr cur)) (t (track pr cur)) (goal (lesson-goal l))
+                     (g (play-guard core)) (st (guard-state g))
+                     (dv (play-devices-state core)))
+                ;; the unit's worst state this visit (the room's own unit only)
+                (when (>= (vector-ref (vector-ref pr 7) cur) 0)
+                  (vector-set! t 3 (max (vector-ref t 3) st)))
+                (case (car goal)
+                  ((dark-in)
+                   (let ((r (room-index-named data (cadr goal))))
+                     (if (and (= room r) (< (play-visibility core) DARK-VIS))
+                         (begin
+                           (vector-set! t 6 (+ (vector-ref t 6) TICK))
+                           (when (>= (vector-ref t 6) (caddr goal)) (succeed! pr core cur)))
+                         (vector-set! t 6 0.0))))
+                  ((through)
+                   (let ((never (option goal 'never)) (after (option goal 'after)))
+                     ;; the device the goal asks for, set going
+                     (when after
+                       (let ((k (device-index data after)))
+                         (when (and (>= k 0) (not (memq (devices-state dv k) '(idle off open))))
+                           (vector-set! t 4 #t))))
+                     ;; its unit reached what it must not
+                     (when (or (and (eq? never 'suspicious) (>= (vector-ref t 3) SUSPICIOUS))
+                               (and (eq? never 'hunting) (>= (vector-ref t 3) HUNTING)))
+                       (fail! pr core cur))
+                     ;; a camera in the lesson's rooms alarmed
+                     (when (eq? never 'alarm)
+                       (when (camera-alarmed? data dv (lesson-rooms l))
+                         (vector-set! t 7 #t)))))
+                  ((reader)
+                   (when (eq? (play-outcome core) 'won)
+                     (succeed! pr core cur)
+                     (vector-set! pr 6 #t)))
+                  (else #f))
+                (cond
+                  ;; a capture: the lesson fails, and the room resets
+                  ((eq? (play-outcome core) 'caught) (fail! pr core cur) #f)
+                  ;; the camera lesson's alarm: as a capture
+                  ((and (eq? (car goal) 'through) (eq? (option goal 'never) 'alarm) (vector-ref t 7))
+                   (fail! pr core cur)
+                   'caught)
+                  (else #f)))))))
+
+    (define (camera-alarmed? data dv rooms)
+      (let ((ds (play-devices data)))
+        (let loop ((k 0))
+          (and (< k (vector-length ds))
+               (or (and (eq? (device-kind (vector-ref ds k)) 'camera)
+                        (eq? (devices-state dv k) 'alarmed)
+                        (let find ((j 0)) (and (< j (vector-length rooms))
+                                               (or (= (vector-ref rooms j) (device-room (vector-ref ds k))) (find (+ j 1))))))
+                   (loop (+ k 1)))))))
+
+    ;; A command the deck or the terminal ran (the game calls this with
+    ;; what play-deck! or play-terminal-step! returned). source: deck or
+    ;; terminal.
+    (define FACILITIES-COMMANDS '(vent-on vent-off blinds-open blinds-close lights-off lights-on))
+    (define (practice-note-command! pr core cmd source)
+      (let ((cur (vector-ref pr 2)))
+        (when (>= cur 0)
+          (let ((t (track pr cur)) (goal (lesson-goal (lesson pr cur))))
+            (when (memq cmd FACILITIES-COMMANDS) (vector-set! t 5 #t))
+            (when (eq? source 'terminal)
+              (vector-set! t 8 #t)
+              (when (eq? (car goal) 'terminal-run) (succeed! pr core cur)))))))
+
+    ;; After a capture's fade: the lesson's room back as it began, and the
+    ;; runner at its start. Returns the new walker.
+    (define (practice-reset-room! pr core)
+      (let* ((cur (max 0 (vector-ref pr 2)))
+             (l (lesson pr cur))
+             (u (vector-ref (vector-ref pr 7) cur))
+             (coll (vector-ref (play-guard-world core) 1))
+             (x (lesson-x l)) (y (lesson-y l))
+             (z (or (collide-floor coll x y -1.0 1.0) 0.0)))
+        (play-reset-room! core (lesson-rooms l) u)
+        (when (>= u 0) (play-set-unit! core u))
+        ;; this visit's tracking starts over; the lines said stay said
+        (let ((t (track pr cur)))
+          (vector-set! t 3 CALM) (vector-set! t 4 #f) (vector-set! t 5 #f)
+          (vector-set! t 6 0.0) (vector-set! t 7 #f) (vector-set! t 8 #f))
+        ;; the floor file's facing is degrees anticlockwise from east; the
+        ;; walker's yaw is from north
+        (make-walker x y z (* (- (lesson-facing l) 90.0) (/ 3.141592653589793 180.0)))))
+
+    ;; For the shell (the API, §2): ((TEXT AGE SPEAKER) ...), newest first.
+    (define (practice-crash pr)
+      (let ((now (vector-ref pr 5)))
+        (let loop ((l (vector-ref pr 4)) (k 0) (acc '()))
+          (if (or (null? l) (>= k CRASH-KEEP))
+              (reverse acc)
+              (loop (cdr l) (+ k 1) (cons (list (car (car l)) (- now (cdr (car l))) 'crash) acc))))))
+
+    ;; (INDEX COUNT ID STATE), INDEX from 1; before the first lesson (0 COUNT #f active)
+    (define (practice-lesson pr)
+      (let* ((n (lesson-count (vector-ref pr 1))) (cur (vector-ref pr 2)))
+        (if (< cur 0)
+            (list 0 n #f 'active)
+            (list (+ cur 1) n (lesson-id (lesson pr cur)) (if (vector-ref (track pr cur) 1) 'done 'active)))))))

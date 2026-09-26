@@ -37,7 +37,8 @@
           play-use! play-incidents play-patches play-take-events! play-event! USE-REACH
           play-devices-state play-deck play-tier play-deck! play-device-level play-device-approach
           play-mask VENT-NOISE MASK-GAIN
-          play-unit-count play-active-unit play-unit-guard play-set-unit!
+          play-unit-count play-active-unit play-unit-guard play-set-unit! play-units-off!
+          play-reset-room! play-events play-runner-x play-runner-y
           play-camera-awareness play-camera-watch play-camera-alarms CAMERA-GAIN CAMERA-DECAY CAMERA-DARK
           play-terminal-open? play-terminal play-terminal-key! play-terminal-step!
           TERMINAL-TIME TERMINAL-LIGHT
@@ -84,7 +85,9 @@
     ;;  play.sexp guard, sharing one nav; slots 2 and 3 are the active one's
     ;;  (the only one that steps: the sim wakes the unit of the room you are
     ;;  in)  38 the active unit's index
-    (define (play? p) (and (vector? p) (= (vector-length p) 39) (eq? (vector-ref p 0) 'play)))
+    ;;  39 units off: no unit steps (the sim's rooms without one)
+    (define (play? p) (and (vector? p) (= (vector-length p) 40) (eq? (vector-ref p 0) 'play)))
+    (define (play-units-off! p off?) (vector-set! p 39 off?) p)
     (define (play-unit-count p) (vector-length (vector-ref p 37)))
     (define (play-active-unit p) (vector-ref p 38))
     (define (play-unit-guard p i) (vector-ref (vector-ref (vector-ref p 37) i) 1))
@@ -156,8 +159,40 @@
                         (make-devices data) (make-deck) (device-approaches data gw) 0.0
                         (make-vector (device-count data) 0.0) (camera-views data)
                         (vector #f 0 -1 0.0 '(idle) 0.0 (terminal-targets data)) #f
-                        units 0)))
+                        units 0 #f)))
         p))
+
+    ;; PRACTICE: a capture in the sim resets only its room (D38). The runner
+    ;; is the caller's to put back; here the attempt goes on (no outcome),
+    ;; the room's unit (index u, or -1) goes back to its start, calm, and the
+    ;; devices in rooms (a vector of room indices) go back to how the floor
+    ;; began, cameras unaware; the deck and the terminal start over.
+    (define (play-reset-room! p rooms u)
+      (let* ((data (vector-ref p 1)) (dv (vector-ref p 29)) (ds (play-devices data))
+             (in? (lambda (r) (let loop ((k 0)) (and (< k (vector-length rooms)) (or (= (vector-ref rooms k) r) (loop (+ k 1))))))))
+        (vector-set! p 8 'playing)
+        (vector-set! p 14 #f)
+        (when (>= u 0)
+          (let ((unit (vector-ref (vector-ref p 37) u)))
+            (guard-reset! (vector-ref unit 1) (vector-ref unit 0) 0)))
+        (vector-set! p 25 CALM)
+        (vector-set! p 36 #f)
+        (let loop ((i 0))
+          (when (< i (vector-length ds))
+            (when (in? (device-room (vector-ref ds i)))
+              (devices-reset-one! dv i)
+              (vector-set! (vector-ref p 33) i 0.0))
+            (loop (+ i 1))))
+        (terminal-reset! (vector-ref p 35))
+        (deck-reset! (vector-ref p 30))
+        p))
+
+    ;; where you were last tick (#f before the first)
+    (define (play-runner-x p) (vector-ref p 17))
+    (define (play-runner-y p) (vector-ref p 18))
+
+    ;; The events for playback so far, newest first, without taking them.
+    (define (play-events p) (vector-ref p 27))
 
     ;; The units: the first is the one make-play's guard world was built for;
     ;; the others share its nav.
@@ -179,6 +214,7 @@
               (guard-reset! (vector-ref u 1) (vector-ref u 0) (if (= i 0) GUARD-START-LEG 0)))
             (loop (+ i 1)))))
       (play-set-unit! p 0)
+      (vector-set! p 39 #f)
       (vector-set! p 7 #f)
       (vector-set! p 8 'playing)
       (vector-set! p 9 0)
@@ -266,7 +302,7 @@
             (target-set! (vector-ref p 5) x y z (walker-eye-z w) (walker-height w) l01 vis shape)
             (mask! p)
             (steps! p w x y z)
-            (guard-step! g (vector-ref p 2) (vector-ref p 5) TICK)
+            (unless (vector-ref p 39) (guard-step! g (vector-ref p 2) (vector-ref p 5) TICK))
             (devices-tick! (vector-ref p 29) TICK
                            (lambda (i kind)
                              (when (eq? kind 'printer)
