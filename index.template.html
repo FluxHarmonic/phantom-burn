@@ -215,11 +215,36 @@
       };
     })();
     if (params.has("trace")) {
+      // on screen too (a phone has no console; David, 2026-09-26): a small
+      // overlay, top left, with the music's section and cost, the sound's
+      // readiness and the frame time, from the same lines the host gets
+      var overlay = document.createElement("pre");
+      overlay.id = "trace";
+      overlay.style.cssText = "position:fixed;left:6px;top:6px;z-index:50;margin:0;padding:6px 8px;" +
+        "font:11px/1.35 ui-monospace,monospace;color:#cfe;background:rgba(0,0,0,0.6);" +
+        "pointer-events:none;white-space:pre;border-radius:4px";
+      overlay.textContent = "trace: waiting for the game";
+      document.body.appendChild(overlay);
+      var shown = { music: "", ready: "", frame: "" };
+      function field(line, key) { var m = line.match(new RegExp(" " + key + " (\\S+)")); return m ? m[1] : null; }
+      function redraw() { overlay.textContent = [shown.music, shown.ready, shown.frame].filter(Boolean).join("\n"); }
       var log = console.log.bind(console);
       console.log = function () {
         var line = Array.prototype.join.call(arguments, " ");
         if (/^phantom-burn: (stats|pixel|ready|sound)/.test(line)) {
           fetch("report?" + encodeURIComponent(line + " | " + navigator.userAgent)).catch(function () {});
+          if (/^phantom-burn: sound bank-ready (yes|no) /.test(line)) {
+            // "music MS ... frames N": MS of synthesis over N frames of audio at 44100
+            var ms = Number(field(line, "music")), n = Number(field(line, "frames"));
+            var perS = n > 0 ? ms / (n / 44100) : 0;
+            shown.music = "music " + (field(line, "section") || "?") + " · " + perS.toFixed(0) + " ms/s = " +
+              (perS / 60).toFixed(2) + " ms a frame · music " + ms + " frames " + n;
+          } else if (/^phantom-burn: sound (robot-ready|events-ready|bank-ready) [0-9.]+$/.test(line)) {
+            shown.ready = (shown.ready ? shown.ready + " · " : "") + line.replace("phantom-burn: sound ", "") + " s";
+          } else if (/^phantom-burn: stats /.test(line)) {
+            shown.frame = "frame " + field(line, "frame-ms") + " ms · cpu " + field(line, "cpu-ms") + " ms";
+          }
+          redraw();
         }
         log.apply(null, arguments);
       };
