@@ -44,7 +44,7 @@
           render-scene! render-make-world-mesh render-draw-world-mesh render-title-scene!
           render-draw-floor! render-floor-kind render-floor-info
           render-set-extra-draw! render-draw-object! render-hide-part! render-part-hidden?
-          render-set-cone! render-cone-ids
+          render-set-cone! render-cone-ids render-sim? render-force-sim!
           render-load-guard! render-guard-ready? render-guard-parts render-draw-guard!
           make-camera camera-set!)
 
@@ -323,7 +323,7 @@ void main() {
                                                 (list (* k (list-ref c 3)) (* k (list-ref c 4)) (* k (list-ref c 5)) on))
                                               (list 0.0 0.0 0.0 0.0))
                                           acc)))))))
-              (for-each (lambda (p) (set-pipeline-uniform! p 'cl cl)) (list *c-opaque* *c-glass*)))))))
+              (for-each (lambda (p) (set-pipeline-uniform! p 'cl cl)) (list *c-opaque* *c-glass* *sim-pipe*)))))))
     ;; The black-level lift: with it, the world fogs to black and black
     ;; then maps to C-BG; without it, the world fogs to C-BG and anything
     ;; darker than C-BG snaps to it in the dither.
@@ -452,6 +452,13 @@ void main() {
             (fs (string-append (glsl-header) WORLD-FRAGMENT)))
         (set! *c-opaque* (make-pipeline layout vs fs))
         (set! *c-glass* (make-pipeline layout vs fs '(blend normal depth-write #f cull none))))
+      (set! *sim-pipe* (make-pipeline (compiled-layout)
+                                      (string-append (glsl-header) SIM-VERTEX)
+                                      (string-append (glsl-header) SIM-FRAGMENT)))
+      (set! *wire-pipe* (make-pipeline (make-vertex-layout '((position float3)))
+                                       (string-append (glsl-header) WIRE-VERTEX)
+                                       (string-append (glsl-header) WIRE-FRAGMENT)
+                                       '(primitive lines depth-write #f cull none)))
       (set! *cone-pipe* (make-pipeline (cone-layout)
                                        (string-append (glsl-header) CONE-VERTEX)
                                        (string-append (glsl-header) CONE-FRAGMENT)
@@ -544,6 +551,8 @@ void main() {
       (set! *kind* 'compiled)
       (set! *floor-info* info)
       (build-cones! info)
+      (set! *sim* (or *force-sim* (let ((l (assq 'look info))) (and l (pair? (cdr l)) (eq? (cadr l) 'sim)))))
+      (if *sim* (build-wire! info) (begin (when *wire* (mesh-free! *wire*)) (set! *wire* #f)))
       (set! *hidden* '())
       (model-turn!)
       (set! *circuits* (cdr (assq 'circuits info)))
@@ -655,6 +664,161 @@ void main() {
       (draw-mesh-range *opaque* mesh first count)
       (set-pipeline-uniform! *opaque* 'model *model*)
       (set-pipeline-uniform! *opaque* 'ambient *ambient-now*))
+
+    ;; --- the sim's look (PRACTICE, D38; practice API v2) -----------------------
+    ;;
+    ;; A floor whose floor.sexp says (look sim) (or any floor, with
+    ;; render-force-sim!) is drawn stripped so it reads as not real: its
+    ;; surfaces as flat dark planes, shaded only by which way they face (the
+    ;; floor darkest, walls a step up, the ceiling near black) with a faint
+    ;; one-metre cyan grid on the floor, no textures and no baked light; the
+    ;; screens and LEDs still glow by their circuits; no city, no glass; and
+    ;; its edges, the compiler's (wire (X0 Y0 Z0 X1 Y1 Z1) ...), as cyan
+    ;; lines over them. Without a wire list (a floor forced into the look) the
+    ;; rooms' outlines stand in: their corners and their floor perimeters.
+    (define SIM-VERTEX
+      "uniform mat4 view_proj;
+uniform vec4 eye;
+uniform vec4 cl[8];
+uniform vec4 retro;
+in vec3 position;
+in vec2 uv;
+in vec3 normal;
+in vec4 color;
+in vec4 emission;
+in vec4 light;
+in uvec4 circuit;
+out vec2 v_uv;
+out vec3 v_uvw;
+out vec3 v_color;
+out float v_fog;
+out vec3 v_world;
+out float v_up;
+void main() {
+  vec3 n = normalize(normal);
+  vec3 base = n.z > 0.7 ? vec3(0.090, 0.071, 0.180)                  // floors: C-BAR-A
+            : (n.z < -0.7 ? vec3(0.051, 0.039, 0.102)                // ceilings: C-BG
+            : vec3(0.129, 0.090, 0.239) * (0.85 + 0.15 * abs(n.x))); // walls: #21173D, by facing
+  int tag = int(emission.a * 255.0 + 0.5);
+  float glow = tag == 0 ? 0.0 : (tag >= 255 ? 1.0 : cl[clamp(tag - 128, 0, 7)].a);
+  v_color = mix(base, emission.rgb, glow);
+  v_up = n.z > 0.7 ? 1.0 : 0.0;
+  v_world = position;
+  v_uv = uv;
+  v_fog = clamp(length(position - eye.xyz) / eye.w, 0.0, 1.0);
+  vec4 clip = view_proj * vec4(position, 1.0);
+  if (retro.x > 0.0 && clip.w > 0.0) {
+    vec2 cells = vec2(240.0, 135.0) / retro.x;
+    clip.xy = floor(clip.xy / clip.w * cells + 0.5) / cells * clip.w;
+  }
+  v_uvw = vec3(uv * clip.w, clip.w);
+  gl_Position = clip;
+}
+")
+    (define SIM-FRAGMENT
+      "uniform vec4 fog_color;
+uniform vec4 lift;
+in vec2 v_uv;
+in vec3 v_uvw;
+in vec3 v_color;
+in float v_fog;
+in vec3 v_world;
+in float v_up;
+out vec4 frag_color;
+void main() {
+  vec3 c = v_color;
+  // the floor's grid: one metre, a line a few centimetres wide, faint cyan
+  vec2 g = abs(fract(v_world.xy + 0.5) - 0.5);
+  if (v_up > 0.5 && min(g.x, g.y) < 0.025) c = mix(c, vec3(0.302, 0.949, 0.851), 0.35);
+  c = mix(c, fog_color.rgb, v_fog * v_fog);
+  if (lift.a > 0.5) c = lift.rgb + c * (vec3(1.0) - lift.rgb);
+  frag_color = vec4(c, 1.0);
+}
+")
+    (define WIRE-VERTEX
+      "uniform mat4 view_proj;
+uniform vec4 eye;
+in vec3 position;
+out float v_fog;
+void main() {
+  v_fog = clamp(length(position - eye.xyz) / eye.w, 0.0, 1.0);
+  vec4 clip = view_proj * vec4(position, 1.0);
+  clip.z -= 0.0015 * clip.w;   // over the faces it lies on
+  gl_Position = clip;
+}
+")
+    (define WIRE-FRAGMENT
+      "uniform vec4 tint;
+uniform vec4 lift;
+in float v_fog;
+out vec4 frag_color;
+void main() {
+  vec3 c = tint.rgb * (1.0 - v_fog * v_fog);
+  if (lift.a > 0.5) c = lift.rgb + c * (vec3(1.0) - lift.rgb);
+  frag_color = vec4(c, 1.0);
+}
+")
+    (define *sim-pipe* #f)
+    (define *wire-pipe* #f)
+    (define *wire* #f)               ; the edges' line mesh, or #f
+    (define *sim* #f)                ; this floor is drawn in the sim's look
+    (define *force-sim* #f)
+    (define *wire-tint* (make-bytevector 16 0))
+    (define (render-sim?) *sim*)
+    (define (render-force-sim! on?) (set! *force-sim* on?))
+
+    (define (wire-edges info)          ; -> ((x0 y0 z0 x1 y1 z1) ...)
+      (let ((w (assq 'wire info)))
+        (if (and w (pair? (cdr w)))
+            (cdr w)
+            ;; a stand-in from the outlines: the corners and the floor perimeters
+            (let ((os (let ((o (assq 'outlines info))) (if o (cdr o) '()))))
+              (apply append
+                     (map (lambda (o)
+                            (let* ((z (cadr o)) (pts (cddr o)) (ring (append pts (list (car pts)))))
+                              (append
+                               (map (lambda (p) (list (car p) (cadr p) z (car p) (cadr p) (+ z 2.8))) pts)
+                               (let loop ((r ring) (acc '()))
+                                 (if (null? (cdr r)) acc
+                                     (loop (cdr r) (cons (list (car (car r)) (cadr (car r)) z (car (cadr r)) (cadr (cadr r)) z) acc)))))))
+                          os))))))
+    (define (build-wire! info)
+      (when *wire* (mesh-free! *wire*))
+      (set! *wire* #f)
+      (let* ((es (wire-edges info)) (n (* 2 (length es))))
+        (when (> n 0)
+          (let ((bv (make-bytevector (* 12 n) 0)))
+            (let loop ((es es) (k 0))
+              (unless (null? es)
+                (let ((e (car es)))
+                  (do ((j 0 (+ j 1))) ((= j 6))
+                    (bytevector-ieee-single-set! bv (+ (* 12 k) (* 4 j)) (* 1.0 (list-ref e j)) 'little))
+                  (loop (cdr es) (+ k 2)))))
+            (set! *wire* (make-mesh (make-vertex-layout '((position float3))) bv))))))
+
+    (define (draw-sim!)
+      (f32! *eye* 3 *fog*)
+      (f32! *g-fog* 0 (if *lift* 0.0 BG-R)) (f32! *g-fog* 1 (if *lift* 0.0 BG-G))
+      (f32! *g-fog* 2 (if *lift* 0.0 BG-B)) (f32! *g-fog* 3 1.0)
+      (f32! *g-lift* 0 BG-R) (f32! *g-lift* 1 BG-G) (f32! *g-lift* 2 BG-B) (f32! *g-lift* 3 (if *lift* 1.0 0.0))
+      (set-pipeline-uniform! *sim-pipe* 'view_proj *vp*)
+      (set-pipeline-uniform! *sim-pipe* 'eye *eye*)
+      (set-pipeline-uniform! *sim-pipe* 'retro *retro*)
+      (set-pipeline-uniform! *sim-pipe* 'fog_color *g-fog*)
+      (set-pipeline-uniform! *sim-pipe* 'lift *g-lift*)
+      (for-each (lambda (d)
+                  (unless (or (cadddr d) (draw-hidden? d))
+                    (draw-mesh-range *sim-pipe* *floor* (car d) (cadr d))))
+                *draws*)
+      (draw-cones!)
+      (when *extra-draw* (*extra-draw*))
+      (when *wire*
+        (f32! *wire-tint* 0 0.302) (f32! *wire-tint* 1 0.949) (f32! *wire-tint* 2 0.851) (f32! *wire-tint* 3 1.0)
+        (set-pipeline-uniform! *wire-pipe* 'view_proj *vp*)
+        (set-pipeline-uniform! *wire-pipe* 'eye *eye*)
+        (set-pipeline-uniform! *wire-pipe* 'tint *wire-tint*)
+        (set-pipeline-uniform! *wire-pipe* 'lift *g-lift*)
+        (draw-mesh *wire-pipe* *wire*)))
 
     ;; --- the cameras' sight on the floor (P3, David: "I can't tell where it is
     ;; looking") -------------------------------------------------------------------
@@ -893,6 +1057,10 @@ void main() {
     ;; The loaded floor, inside a 3D pass whose camera! has run: its opaque
     ;; parts, the city, the extra draw (P1's things that move), the glass.
     (define (render-draw-floor!)
+      (if (and *sim* (eq? *kind* 'compiled))
+          (draw-sim!)
+          (render-draw-floor*!)))
+    (define (render-draw-floor*!)
           (f32! *eye* 3 *fog*)
           (let ((opaque (if (eq? *kind* 'compiled) *c-opaque* *opaque*)))
             (set-pipeline-uniform! opaque 'eye *eye*)
