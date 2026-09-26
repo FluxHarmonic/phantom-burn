@@ -1,27 +1,40 @@
-;;; (phantom sound sections) - A track's calm/fill/tense sections on a live player
+;;; (phantom sound sections) - A track's named states on a live player
 ;;;
-;;; COPIED from Phantom Burn's sketchbook (sketchbook/src/sketchbook/sections.sgl,
-;;; 2026-09-25), unchanged but for its name: copy now, centralize later.
+;;; The game's music controller (S1). A track has three steady states, calm,
+;;; aware and alert, each a region of its order that loops on its own, and
+;;; composed transitions between them, each a region whose last pattern's Bxx
+;;; lands on its destination state. The route table is the track's (its
+;;; composer's handoff: docs/music/INTEGRATION.md for False Identity,
+;;; docs/music/HEAT-TRACE-TRAINING.md for Heat Trace): which mark to jump to,
+;;; from which steady state, for which wanted state. Heat Trace has separate
+;;; transition marks where False Identity has one `release`, so no fixed table
+;;; fits both.
 ;;;
-;;; The model of Crash's (crash music live), cut to what a stealth floor needs
-;;; (design §6: "a floor's calm section is an ambient bed with no drums... the
-;;; way back to calm ... needs building"): a tune with marks calm, fill and
-;;; tense plays its calm region on a loop; asked for TENSE it jumps to the fill
-;;; at the next bar and lets the fill run on into tense, which then loops;
-;;; asked for CALM it jumps back to calm at the next bar with a short dip
-;;; (player-dip!: every channel down to 0.35 and back). Asking again for the
-;;; section already asked for does nothing, so a caller can ask every frame.
-;;;
-;;;   (make-sections player)        starts looping calm; #f if the tune has no calm/fill/tense marks
-;;;   (sections-want! s 'calm|'tense)
-;;;   (sections-tick! s)            once a frame (or a pull): keeps the region right
-;;;   (sections-playing s)          'calm | 'fill | 'tense, from the walk's position
+;;;   (make-sections player routes)  starts looping calm; #f if the tune lacks a
+;;;                                  state or transition mark the routes name
+;;;   (sections-want! s 'calm|'aware|'alert)   cheap to call every frame
+;;;   (sections-tick! s)             once a frame (or a pull): lands jumps, keeps
+;;;                                  the region right, and re-routes
+;;;   (sections-playing s)           the section the walk is in (a state or a transition)
 ;;;   (sections-wanted s)
+;;;   (desire-from-states states)    the guards' state integers -> the wanted state
+;;;   (track-routes name)            the route table for a track's name, or #f
 ;;;
-;;; motif's player-jump-to-mark! sets the region to the mark's own when it
-;;; lands, which for the fill would loop the fill; the tick widens it to run
-;;; from the fill to tense's end until the walk is in tense, then narrows it to
-;;; tense's region (the reason Crash re-applies its region every frame).
+;;; The rules (both handoffs):
+;;; - A jump waits for the next bar (motif's player-jump-to-mark!); a second
+;;;   ask replaces the first. A queued jump owns the region until it lands.
+;;; - Landed in a transition: the region is cleared, so its Bxx finishes it at
+;;;   its destination. Landed in a state: that state's region.
+;;; - The route is chosen from where the walk is headed: a state, or a
+;;;   transition's destination. So a return interrupted by new suspicion
+;;;   replaces the return, and a detection pickup is never restarted while
+;;;   alert is still wanted.
+;;; - When the wanted state is already where the walk is headed but another
+;;;   jump is queued (the want changed and changed back), the queued jump is
+;;;   replaced by one to where the walk is headed. motif has no cancel, so a
+;;;   state restarts its loop at that bar; rare, and on the grid.
+;;; - No music timer: the wanted state is the guards' own (the AI's search
+;;;   expiry ends aware, not a clock here).
 
 (define-library (phantom sound sections)
   (import (sigil core)
@@ -29,53 +42,108 @@
           (motif tune)
           (motif tune player))
   (export make-sections sections-want! sections-tick! sections-playing sections-wanted
-          sections-player DIP-MS)
+          sections-player sections-routes desire-from-states track-routes routes-mark
+          routes-destination STATES)
   (begin
-    (define DIP-MS 700)
+    (define STATES '(calm aware alert))
+
+    ;; routes: #(destinations table): destinations ((transition . state) ...);
+    ;; table (((from . want) . mark) ...), from a state
+    (define (routes dests table) (vector dests table))
+    (define (routes-destination r sec) (let ((e (assq sec (vector-ref r 0)))) (and e (cdr e))))
+    (define (routes-mark r from want)
+      (let ((e (assoc (cons from want) (vector-ref r 1)))) (and e (cdr e))))
+
+    (define FALSE-IDENTITY
+      (routes '((detected . alert) (release . calm))
+              '(((calm . aware) . aware) ((calm . alert) . detected)
+                ((aware . alert) . detected) ((aware . calm) . release)
+                ((alert . aware) . aware) ((alert . calm) . release))))
+
+    (define HEAT-TRACE
+      (routes '((investigate . aware) (detected . alert) (settle-aware . calm)
+                (settle-alert . calm) (search-again . aware))
+              '(((calm . aware) . investigate) ((calm . alert) . detected)
+                ((aware . alert) . detected) ((aware . calm) . settle-aware)
+                ((alert . aware) . search-again) ((alert . calm) . settle-alert))))
+
+    (define (track-routes name)
+      (cond ((member name '("music-false-identity" "false-identity")) FALSE-IDENTITY)
+            ((member name '("music-heat-trace" "heat-trace")) HEAT-TRACE)
+            (else #f)))
+
+    ;; the guards' states (0 CALM, 1 SUSPICIOUS, 2 SEARCHING, 3 HUNTING): the
+    ;; most aware one wins; one unit going calm never lowers the music while
+    ;; another still searches or hunts
+    (define (desire-from-states states)
+      (let ((top (let loop ((ss states) (m 0)) (if (null? ss) m (loop (cdr ss) (max m (car ss)))))))
+        (cond ((>= top 3) 'alert) ((>= top 1) 'aware) (else 'calm))))
 
     (define-struct sections
       (player)
-      (calm) (fill) (tense)          ; (from . to) order positions
-      (wanted mutable: #t))
+      (routes)
+      (regions)                      ; ((name from . to) ...), the tune's
+      (wanted mutable: #t)
+      (installed mutable: #t))       ; the section whose region the tick last set
 
-    (define (region t name)
-      (let ((r (assq name (tune-mark-regions t)))) (and r (cdr r))))
+    (define (region s name) (let ((r (assq name (sections-regions s)))) (and r (cdr r))))
 
-    (define (make-sections p)
+    (define (make-sections p routes)
       (let* ((t (player-tune p))
-             (c (region t 'calm)) (f (region t 'fill)) (n (region t 'tense)))
-        (and c f n
-             (begin
-               (player-set-region! p (car c) (cdr c))
-               (sections player: p calm: c fill: f tense: n wanted: 'calm)))))
+             (regions (tune-mark-regions t))
+             (need (append STATES (map car (vector-ref routes 0)))))
+        (and (let all ((ns need)) (or (null? ns) (and (assq (car ns) regions) (all (cdr ns)))))
+             (let ((s (sections player: p routes: routes regions: regions wanted: 'calm installed: 'calm)))
+               (let ((c (region s 'calm))) (player-set-region! p (car c) (cdr c)))
+               s))))
 
-    (define (sections-want! s section)
-      (unless (eq? section (sections-wanted s))
-        (set-sections-wanted! s section)
-        (let ((p (sections-player s)))
-          (case section
-            ((tense) (player-jump-to-mark! p 'fill))
-            ((calm) (player-jump-to-mark! p 'calm) (player-dip! p DIP-MS))
-            (else (error "sections-want!: calm or tense" section))))))
-
+    ;; the walker's newest scheduled position, not the render position: motif lands a
+    ;; queued jump (and clears player-pending-mark) when the WALKER reaches the bar,
+    ;; a lookahead before the render position gets there. Read from the render
+    ;; position, the old section looked current with nothing queued, and the route
+    ;; was asked again (Heat Trace played settle-aware twice: the first test run)
     (define (walk-pos s)
-      (let ((pp (player-position (sections-player s) 0))) (and pp (car pp))))
+      (let ((tl (player-timeline (sections-player s)))) (and (pair? tl) (vector-ref (car tl) 0))))
 
-    (define (sections-tick! s)
-      (let ((p (sections-player s)) (pos (walk-pos s)))
-        ;; a jump waiting for its bar row owns the region until it lands
-        (when (and pos (not (player-pending-mark p)))
-          (case (sections-wanted s)
-            ((tense)
-             (if (>= pos (car (sections-tense s)))
-                 (player-set-region! p (car (sections-tense s)) (cdr (sections-tense s)))
-                 (player-set-region! p (car (sections-fill s)) (cdr (sections-tense s)))))
-            (else
-             (player-set-region! p (car (sections-calm s)) (cdr (sections-calm s))))))))
-
+    ;; the section the walk is in: the region holding its order position
     (define (sections-playing s)
       (let ((pos (walk-pos s)))
-        (cond ((not pos) 'calm)
-              ((>= pos (car (sections-tense s))) 'tense)
-              ((>= pos (car (sections-fill s))) 'fill)
-              (else 'calm))))))
+        (if (not pos) 'calm
+            (let loop ((rs (sections-regions s)))
+              (cond ((null? rs) 'calm)
+                    ((and (>= pos (cadr (car rs))) (< pos (cddr (car rs)))) (car (car rs)))
+                    (else (loop (cdr rs))))))))
+
+    ;; where the walk is headed: a state, or a transition's destination
+    (define (headed s sec)
+      (if (memq sec STATES) sec (or (routes-destination (sections-routes s) sec) 'calm)))
+
+    ;; ask for the mark the route gives, unless it is already queued
+    (define (route! s)
+      (let* ((p (sections-player s))
+             (sec (sections-playing s))
+             (to (headed s sec))
+             (mark (or (routes-mark (sections-routes s) to (sections-wanted s))
+                       ;; nothing to do, unless a stale jump is queued: replace it
+                       (let ((q (player-pending-mark p))) (and q (not (eq? (car q) to)) to))))
+             (queued (player-pending-mark p)))
+        (when (and mark (not (and queued (eq? (car queued) mark))))
+          (player-jump-to-mark! p mark))))
+
+    (define (sections-want! s state)
+      (unless (eq? state (sections-wanted s))
+        (unless (memq state STATES) (error "sections-want!: calm, aware or alert" state))
+        (set-sections-wanted! s state)
+        (route! s)))
+
+    (define (sections-tick! s)
+      (let ((p (sections-player s)))
+        (when (and (walk-pos s) (not (player-pending-mark p)))
+          (let ((sec (sections-playing s)))
+            (unless (eq? sec (sections-installed s))
+              (set-sections-installed! s sec)
+              (if (memq sec STATES)
+                  (let ((r (region s sec))) (player-set-region! p (car r) (cdr r)))
+                  (player-set-region! p #f #f)))))
+        ;; a landed transition, or a state reached, may need the next jump
+        (route! s)))))
