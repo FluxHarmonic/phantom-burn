@@ -199,7 +199,7 @@ deploy() {   # branch -> the deployment URL on stdout
 URL="$(deploy preview)"
 say "preview deployed to $URL; checking it against $DIR.manifest"
 node scripts/verify-live.mjs "$URL" "$DIR" || { say "the preview FAILED verify-live; production NOT deployed"; exit 1; }
-if [ "$ONLY_PREVIEW" = 1 ]; then say "preview only: $URL (verify-live green); the game is at $URL/<slug>/"; exit 0; fi
+if [ "$ONLY_PREVIEW" = 1 ]; then say "preview only: $URL (verify-live green); the game is at $URL/$(sed -n "s/^# game //p" "$DIR.manifest")/"; exit 0; fi
 URL="$(deploy master)"
 say "production deployed to $URL; checking it against $DIR.manifest"
 node scripts/verify-live.mjs "$URL" "$DIR"
