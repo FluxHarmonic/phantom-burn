@@ -19,13 +19,14 @@
 ;;; And the game's events, (event KIND) for KIND in EVENT-KINDS: each is its own
 ;;; tune, assets/tunes/event-KIND.cts, COPIED byte for byte from the sketchbook
 ;;; (David approved them as heard there, 2026-09-25: "Phantom sounds are
-;;; good"), rendered for (event-seconds KIND) on a player of its own, one after another,
-;;; after the bed. They are longer than a slot and carry the sketchbook's small
+;;; good"), rendered for (event-seconds KIND) on a player of its own, one after another
+;;; in BANK-ORDER. They are longer than a slot and carry the sketchbook's small
 ;;; reverb, so they are not slots.
 ;;;
-;;; Stages, one player at a time: the slots, then each event, then the bed. A sample
-;;; is usable as soon as its own stage is done (the steps wait for nothing, the
-;;; events only for the steps; the bed, a quiet drone, comes last).
+;;; Stages, one player at a time: the slots, then the events and the bed in
+;;; BANK-ORDER (the camera's pip and the robot's bored, ? and THERE first; the bed,
+;;; a quiet drone, after every kind has a sound; the robot's other variants last).
+;;; A sample is usable as soon as its own stage is done.
 ;;;
 ;;;   (bank-tune-text)       the bank's tune, as text
 ;;;   (bank-slots)           ((key . slot) ...)
@@ -36,6 +37,8 @@
 ;;;   (bank-sample b key)    the key's stereo f32 bytevector, or #f until rendered
 ;;;   (bank-render-for! b ms) the same, for about ms milliseconds of work (the frame budget)
 ;;;   (bank-bed-loop b)      the hum and room air as a seamless stereo loop (BED-LOOP-S s), once ready
+;;;   (bank-robot-ready? b)  the camera's pip and the robot's bored, ? and THERE are in
+;;;   (bank-events-ready? b) every kind has its sound (a mood its first variant)
 ;;;   (bank-ready? b)
 
 (define-library (phantom sound bank)
@@ -47,7 +50,7 @@
           (motif tune)
           (motif tune player))
   (export bank-tune-text bank-slots make-bank bank-render! bank-render-for! bank-sample bank-ready? bank-rate
-          bank-events-ready?
+          bank-events-ready? bank-robot-ready? BANK-ORDER
           bank-bed-loop crossfade-loop BED-TUNE-TEXT BED-LOOP-S
           SLOT-S BANK-SURFACES EVENT-KINDS EVENT-S event-seconds)
   (begin
@@ -260,9 +263,26 @@
               (speak-bored-1 . 1.08) (speak-bored-2 . 1.08) (speak-bored-3 . 1.02))))
     (define (event-seconds kind) (let ((e (assq kind EVENT-LENGTHS))) (if e (cdr e) EVENT-S)))
 
+    ;; The order the bank renders them in, the most needed first (the leader, after
+    ;; P3's staging measured events-ready at 48 s with robot speak in): right after
+    ;; the steps, the camera's pip and the robot's bored mutter, ? and THERE (their
+    ;; first variant); then the other events and the first variant of each rarer
+    ;; mood; then the hum (bed); then every mood's other two variants. Until those
+    ;; are rendered, a mood plays its first variant (speak-key).
+    (define ROBOT-FIRST '(camera-pip speak-bored-1 speak-suspicious-1 speak-there-1))
+    (define (later-variant? k)
+      (let* ((s (symbol->string k)) (n (string-length s)))
+        (and (> n 6) (string=? (substring s 0 6) "speak-")
+             (not (string=? (substring s (- n 2) n) "-1")))))
+    (define BANK-ORDER
+      (append ROBOT-FIRST
+              (filter (lambda (k) (not (or (later-variant? k) (memq k ROBOT-FIRST)))) EVENT-KINDS)
+              '(bed)
+              (filter later-variant? EVENT-KINDS)))
+
     ;; --- rendering -------------------------------------------------------------------------------
     ;; Stages, each one player opened once, in the order the game needs them: the
-    ;; slots (your steps, the guard's), then each event, then the bed (it is a
+    ;; slots (your steps, the guard's), then the events and the bed in BANK-ORDER (the bed is a
     ;; quiet drone now; nothing waits on it). Every sample is STEREO f32, the
     ;; player's own output copied natively: folding it to mono sample by sample
     ;; in Sigil cost more than motif's render (10 s of the slots' tune: 5.2 s to
@@ -280,12 +300,19 @@
                           (slot-layout)))
              (total (rows->frames (slot-total-rows) rate)))
         (vector (open-tune-player t rate) rate (make-bytevector (* 8 total) 0) 0 total '() layout 'slots #f #f
-                (if (pair? opt) (car opt) (lambda (name) #f)) EVENT-KINDS)))
+                (if (pair? opt) (car opt) (lambda (name) #f)) BANK-ORDER)))
 
     (define (bank-rate b) (vector-ref b 1))
     (define (bank-ready? b) (eq? (vector-ref b 7) 'ready))
-    ;; every event rendered (or skipped): the bed's stage or later
-    (define (bank-events-ready? b) (and (memq (vector-ref b 7) '(bed ready)) #t))
+    ;; every kind the game fires has its sound (a robot mood its first variant,
+    ;; or skipped): the bed's stage or later
+    (define (bank-events-ready? b) (and (or (eq? (vector-ref b 7) 'bed) (vector-ref b 8)) #t))
+    ;; the camera's pip and the robot's bored, ? and THERE (rendered or skipped)
+    (define (bank-robot-ready? b)
+      (let ((left (vector-ref b 11)))
+        (and (not (eq? (vector-ref b 7) 'slots))
+             (not (member (vector-ref b 7) (map (lambda (k) (list (quote event) k)) ROBOT-FIRST)))
+             (let none ((ks ROBOT-FIRST)) (or (null? ks) (and (not (memq (car ks) left)) (none (cdr ks))))))))
     (define (bank-bed-loop b) (vector-ref b 8))
 
     (define BLOCK 1024)
@@ -335,12 +362,20 @@
         (open-stage! b (open-tune-player (read-tune-string BED-TUNE-TEXT) rate loop: #t)
                      (exact (round (* (+ BED-WARM-S BED-LOOP-S BED-XFADE-S) rate))) 'bed)))
 
-    ;; the next event the loader has a tune for, or the bed when none is left
+    ;; the next stage in BANK-ORDER: an event the loader has a tune for, or the
+    ;; bed; ready when none is left (the slots' buffer back where it was)
     (define (next-event! b)
       (let loop ()
         (let ((left (vector-ref b 11)))
-          (if (null? left)
-              (open-bed! b)
+          (cond
+            ((null? left)
+             (vector-set! b 0 #f)
+             (vector-set! b 2 (vector-ref b 9))
+             (vector-set! b 7 'ready))
+            ((eq? (car left) 'bed)
+             (vector-set! b 11 (cdr left))
+             (open-bed! b))
+            (else
               (let* ((kind (car left))
                      (text ((vector-ref b 10) (string-append "event-" (symbol->string kind)))))
                 (vector-set! b 11 (cdr left))
@@ -348,7 +383,7 @@
                     (let ((rate (vector-ref b 1)))
                       (open-stage! b (open-tune-player (read-tune-string text) rate)
                                    (exact (round (* (event-seconds kind) rate))) (list (quote event) kind)))
-                    (loop)))))))
+                    (loop))))))))
 
     ;; the stage's buffer is full: move on
     (define (next-stage! b)
@@ -364,9 +399,7 @@
                                             (exact (round (* BED-LOOP-S rate)))
                                             (exact (round (* BED-XFADE-S rate)))
                                             2))
-           (vector-set! b 0 #f)
-           (vector-set! b 2 (vector-ref b 9))                      ; the slots' buffer, as before
-           (vector-set! b 7 'ready))
+           (next-event! b))                                        ; the later variants, then ready
           (else                                                    ; (event KIND): the whole render is the sample
            (vector-set! b 5 (cons (cons stage (vector-ref b 2)) (vector-ref b 5)))
            (next-event! b)))))
