@@ -432,3 +432,47 @@
         (if (>= i 120) (assert-equal 0 pips)
             (begin (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0) '() '())
                    (loop (+ i 1) (+ pips (length (filter (lambda (e) (equal? (car e) '(event camera-pip))) (sound-last-events s)))))))))))
+
+;; --- robot speak (David picked EDGE; the v9 events, the mutter timed here) --------------
+
+(define (prefix? p s) (and (>= (string-length s) (string-length p)) (string=? (substring s 0 (string-length p)) p)))
+
+(define SPEAK-TUNES
+  (apply append (map (lambda (m) (map (lambda (k) (string-append "event-speak-" m "-" (number->string k))) '(1 2 3)))
+                     '("there" "bored"))))
+
+(define (speak-events s)
+  (filter (lambda (e) (let ((k (car e))) (and (eq? (car k) 'event) (prefix? "speak-" (symbol->string (cadr k))))))
+          (sound-last-events s)))
+
+(test-group "robot speak"
+  (test "a unit's THERE plays one of the three there variants, placed: 4 m right, 0.9 x 0.5, panned 0.6"
+    (let ((s (apply ready-sound (list (apply only-loader SPEAK-TUNES)))))
+      (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0) '())
+      (sound-event! s 'robot-there 0.0 -4.0 1.0 #f)
+      (let ((e (car (speak-events s))))
+        (assert-true (memq (cadr (car e)) '(speak-there-1 speak-there-2 speak-there-3)))
+        (assert-true (near? (cadr e) 0.45 1e-9))
+        (assert-true (near? (caddr e) 0.6 1e-9)))))
+  (test "the variants are picked at random: 30 THEREs use more than one"
+    (let ((s (apply ready-sound (list (apply only-loader SPEAK-TUNES)))) (seen '()))
+      (let loop ((i 0))
+        (when (< i 30)
+          (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0) '())
+          (sound-event! s 'robot-there 0.0 -4.0 1.0 #f)
+          (for-each (lambda (e) (unless (memq (cadr (car e)) seen) (set! seen (cons (cadr (car e)) seen)))) (speak-events s))
+          (loop (+ i 1))))
+      (assert-true (>= (length seen) 2))))
+  (test "a calm unit mutters, bored, every 20-40 s: once or twice in 45 s; a searching one does not"
+    (let ((count (lambda (state)
+                   (let ((s (apply ready-sound (list (apply only-loader SPEAK-TUNES)))))
+                     (let loop ((i 0) (n 0))
+                       (if (>= i 2700) n
+                           (begin
+                             (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0) (list (list 0.0 -4.0 0.0 state 1.0 #f)))
+                             (loop (+ i 1) (+ n (length (filter (lambda (e) (prefix? "speak-bored" (symbol->string (cadr (car e)))))
+                                                                (speak-events s))))))))))))
+      (let ((calm (count 0)) (searching (count 2)))
+        (unless (<= 1 calm 2) (display "calm mutters: ") (display calm) (newline))
+        (assert-true (<= 1 calm 2))
+        (assert-equal 0 searching)))))
