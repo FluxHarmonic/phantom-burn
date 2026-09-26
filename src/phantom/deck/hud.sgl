@@ -68,13 +68,18 @@
 
     ;; --- the prompt ---------------------------------------------------------
 
+    (define *last-act* "")
     (define (deck-hud-draw! w h k deck)
       (let* ((ox (ox-of w k)) (oy (oy-of h k)) (ts k)
              (tier (list-ref deck 0)) (target (list-ref deck 1)) (cmd (list-ref deck 2))
              (prog (list-ref deck 3)) (status (list-ref deck 4))
              (x (+ ox (* 6 k))) (y (+ oy (* 252 k)))
              (lead (string-append (name tier) " $"))
-             (act (if (and target cmd) (string-append " " (name cmd) " " (name target)) ""))
+             (act (cond ((and target cmd) (string-append " " (name cmd) " " (name target)))
+                        ;; play clears the target once it is done: say what was done
+                        ((eq? status 'done) *last-act*)
+                        (else "")))
+             (_ (when (and target cmd) (set! *last-act* act)))
              (tail (case status
                      ((done) " OK")
                      ((denied) " DENIED")
