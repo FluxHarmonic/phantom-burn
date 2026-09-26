@@ -29,7 +29,7 @@
 
   (export make-devices devices? devices-reset! devices-tick!
           devices-state devices-timer devices-state-set! devices-command devices-run!
-          devices-list devices-zones tier-allows? tier-rank
+          devices-list devices-zones devices-reset-one! tier-allows? tier-rank
           make-deck deck? deck-reset! deck-aim! deck-step!
           deck-target deck-blocked? deck-command deck-circuit deck-progress deck-status deck-list
           RING-TIME PRINT-TIME VENT-TIME DECK-RANGE DECK-CONE DECK-HOLD DECK-DONE-SHOW)
@@ -104,6 +104,10 @@
         dv))
 
     (define (devices-state dv i) (vector-ref (vector-ref dv 2) i))
+    ;; device i back to how the floor began (PRACTICE: a room's reset)
+    (define (devices-reset-one! dv i)
+      (vector-set! (vector-ref dv 2) i (initial-state (device-kind (device-of dv i))))
+      (vector-set! (vector-ref dv 3) i 0.0))
     (define (devices-timer dv i) (vector-ref (vector-ref dv 3) i))
     (define (devices-state-set! dv i s t)
       (vector-set! (vector-ref dv 2) i s)

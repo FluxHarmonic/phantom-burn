@@ -32,7 +32,9 @@
           play-devices device-count device-id device-kind device-x device-y device-z device-facing device-tier
           device-room device-args device-index
           play-fixtures fixture-count
-          play-nav-bounds play-units unit-count unit-route unit-waits)
+          play-nav-bounds play-units unit-count unit-route unit-waits
+          play-lessons lesson-count lesson-id lesson-rooms lesson-x lesson-y lesson-facing lesson-goal
+          lesson-on-enter lesson-on-success lesson-on-fail room-index-named)
 
   (begin
 
@@ -57,7 +59,28 @@
     ;;  PRACTICE: 25 the guards' nav bounds #(x0 y0 x1 y1) (floor 14's when
     ;;  play.sexp has none)  26 the units: a vector of #(route waits), each as
     ;;  slots 1 and 2 hold the first (the sim has one in several rooms)
-    (define (play-data? d) (and (vector? d) (= (vector-length d) 27) (eq? (vector-ref d 0) 'play-data)))
+    ;;  27 the lessons (PRACTICE; empty on a real floor): a vector of
+    ;;  #(id rooms x y facing goal on-enter on-success on-fail), rooms a
+    ;;  vector of room indices, goal the floor file's list
+    (define (play-data? d) (and (vector? d) (= (vector-length d) 28) (eq? (vector-ref d 0) 'play-data)))
+    (define (play-lessons d) (vector-ref d 27))
+    (define (lesson-count d) (vector-length (vector-ref d 27)))
+    (define (lesson-id l) (vector-ref l 0))
+    (define (lesson-rooms l) (vector-ref l 1))
+    (define (lesson-x l) (vector-ref l 2))
+    (define (lesson-y l) (vector-ref l 3))
+    (define (lesson-facing l) (vector-ref l 4))
+    (define (lesson-goal l) (vector-ref l 5))
+    (define (lesson-on-enter l) (vector-ref l 6))
+    (define (lesson-on-success l) (vector-ref l 7))
+    (define (lesson-on-fail l) (vector-ref l 8))
+    ;; the index of the room named name, or -1
+    (define (room-index-named d name)
+      (let ((rs (vector-ref d 15)))
+        (let loop ((i 0))
+          (cond ((>= i (vector-length rs)) -1)
+                ((eq? (room-name (vector-ref rs i)) name) i)
+                (else (loop (+ i 1)))))))
     (define (play-nav-bounds d) (vector-ref d 25))
     (define (play-units d) (vector-ref d 26))
     (define (unit-count d) (vector-length (vector-ref d 26)))
@@ -240,7 +263,13 @@
                            (error "play.sexp: a guard is not a patrol with a wait per point"))
                          (vector (list->vector (apply append (map (lambda (p) (list (flo (car p)) (flo (cadr p)))) (cadr g))))
                                  (list->vector (map flo (caddr g)))))
-                       (entry datum 'guards))))))
+                       (entry datum 'guards)))
+                (let ((e (assq 'lessons datum)))
+                  (list->vector
+                    (map (lambda (l)
+                           (vector (car l) (list->vector (cadr l)) (flo (list-ref l 2)) (flo (list-ref l 3))
+                                   (flo (list-ref l 4)) (list-ref l 5) (list-ref l 6) (list-ref l 7) (list-ref l 8)))
+                         (if e (cdr e) '())))))))
 
     ;; The room grid: (roomgrid N k z room ...) on the light grid's cells,
     ;; as (starts . layers).
