@@ -70,8 +70,8 @@
     (from-git url: sigil-repo package: "sigil-browser" version: ">=0.22.8" configs: (quote (web)))
     ;; S1 sound: the tune player and the render (motif), the sink (sigil-audio; the
     ;; WebAudio bridge on the web, with sigil-wasm-audio)
-    (from-git url: "codeberg:sigil/motif" version: "^0.7.0")
-    (from-git url: "codeberg:sigil/sigil-audio" version: "^0.12.2")
+    (from-git url: "codeberg:sigil/motif" version: "^0.8.0")
+    (from-git url: "codeberg:sigil/sigil-audio" version: "^0.13.0")
     (from-git url: sigil-repo package: "sigil-wasm-audio" version: ">=0.22.8" configs: (quote (web))))
 
   dev-dependencies: (list

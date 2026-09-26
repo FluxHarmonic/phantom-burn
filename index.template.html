@@ -133,8 +133,8 @@
   //   S1's sound: the tunes it renders (assets/tunes/NAME.cts, the game's
   //     SOUND-TUNES) as ("tune", "NAME\nTEXT"); every user gesture as
   //     ("gesture", TYPE), since a browser starts audio only inside one; the
-  //     AudioContext at 44100 Hz (the game renders at that rate and the bridge
-  //     does not resample). ?mute=1: no sound.
+  //     AudioContext at 44100 Hz (the game renders its one-shots at that rate;
+  //     the music renders at 24 kHz and the sink upsamples it). ?mute=1: no sound.
   //   window.phantomDispatch("replay", SCRIPT): gate 5's driver hands the game
   //     a replay script ((phantom floor replay)'s text form); the game prints
   //     "phantom-burn: replay LINE" per tick, then "phantom-burn: replay-done N".
@@ -251,16 +251,18 @@
         app.dispatch("floor", floor);
         app.dispatch("dpr", String(window.devicePixelRatio || 1));
         window.addEventListener("resize", function () { app.dispatch("dpr", String(window.devicePixelRatio || 1)); });
-        // S1's sound: its tunes (the events, the camera's, robot speak; no music), and the gestures
+        // S1's sound: its tunes (the music, the events, the camera's, robot speak), and the gestures
         if (!params.has("mute")) {
+          // the music: INFILTRATE's False Identity, PRACTICE's Heat Trace (Codex's scores)
+          ["music-false-identity", "music-heat-trace"].concat(
           ["door-open", "door-close", "panel-on", "panel-off", "reader-ok", "reader-deny", "badge", "caught", "note",
            "camera-pip", "camera-alert"]
             // robot speak (EDGE): three variants of each mood
             .concat(["bored", "suspicious", "searching", "there", "lost", "settle"].reduce(function (acc, m) {
               return acc.concat(["speak-" + m + "-1", "speak-" + m + "-2", "speak-" + m + "-3"]);
             }, []))
-            .forEach(function (k) {
-              var name = "event-" + k;
+            .map(function (k) { return "event-" + k; }))
+            .forEach(function (name) {
               fetch("assets/tunes/" + name + ".cts").then(function (r) {
                 if (!r.ok) throw new Error(String(r.status));
                 return r.text();

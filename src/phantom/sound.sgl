@@ -6,13 +6,12 @@
 ;;;                                          or #f ("event-KIND", and the music's name);
 ;;;                                          headless: no sink, sound-render! mixes
 ;;;                                          everything instead; music: a track's name,
-;;;                                          default MUSIC-TUNE, which is #f: NO MUSIC.
-;;;                                          David rejected Low Embers (2026-09-25: "a
-;;;                                          kind of clone of one of the other Crash
-;;;                                          songs ... it feels sloppy"); a Phantom track
-;;;                                          gets its own brief. The music's hooks (one
-;;;                                          player, its sections following the guards)
-;;;                                          stay, tested with Low Embers as a fixture.
+;;;                                          default MUSIC-TUNE, False Identity (David
+;;;                                          approved it for the game, 2026-09-26: "False
+;;;                                          Identity is great"; the score is Codex's,
+;;;                                          docs/music/false-identity-game.cts). #f: no music.
+;;;   (sound-set-music! s name)  another track (or #f): the old player is closed first,
+;;;                          never two at once; PRACTICE plays Heat Trace (David's split)
 ;;;   (sound-prepare! s)     a frame's slice (~BANK-IDLE-MS) of the bank's rendering, and nothing
 ;;;                          else (the title's frames, before play)
 ;;;   (sound-gesture! s)     every user gesture: the first starts the sound (opens
@@ -40,8 +39,9 @@
 ;;;   - a guard through a wall plays the muffled sample (S0's finding: a per-step
 ;;;     choice is enough for footsteps). Released motif (0.7.0) cannot move a
 ;;;     sounding voice's cutoff; this needs nothing from it;
-;;;   - at most ONE motif player, for a music track (none today, see make-sound),
-;;;     its sections from the guards by (phantom sound logic); the hum and the room
+;;;   - at most ONE motif player, for the music track, rendered at MUSIC-RATE (the
+;;;     sink upsamples: sigil-audio 0.13's rate:), its states (calm, aware, alert)
+;;;     from the guards through (phantom sound sections); the hum and the room
 ;;;     air are a seamless 10 s loop rendered into the bank and played by the mixer
 ;;;     (1.86 ms a frame as a player).
 ;;; Floor 14's duct has no S0 sound: it plays the grate's metal at half gain
@@ -60,7 +60,7 @@
           (phantom sound sections))
   (export make-sound sound-start! sound-gesture! sound-prepare! sound-frame! sound-step! sound-event! sound-stop!
           sound-render! sound-trace sound-started? sound-bank sound-mixer sound-bed-mixer sound-last-events
-          sound-section sound-music-playing?
+          sound-section sound-music-playing? sound-set-music! MUSIC-RATE
           sound-cue-plays pip-interval MUSIC-TUNE SURFACE-MAP)
   ;; On the web, one-shots play as the audio bridge's CUES: uploaded once, mixed
   ;; in the AudioWorklet (sigil-wasm-audio's load-audio-cue / play-audio-cue), so
@@ -80,7 +80,11 @@
             (define (cue-load bv) #f)
             (define (cue-play c v p) #f))))
   (begin
-    (define MUSIC-TUNE #f)                ; no track: Low Embers was rejected (see make-sound)
+    (define MUSIC-TUNE "music-false-identity")   ; INFILTRATE's track (see make-sound)
+    ;; the music renders at this rate and the sink upsamples (the phone budget:
+    ;; False Identity costs ~0.8x at 24 kHz what it does at 32; David's ?trace
+    ;; decides the final rate). Headless, it renders at the sound's own rate.
+    (define MUSIC-RATE 24000)
     (define BANK-MS 3)                    ; the bank renders ~3 ms a frame of play until complete
     (define BANK-IDLE-MS 8)               ; and ~8 ms a frame before play (the title: nothing else runs)
     (define SFX-DEPTH-S 0.1)              ; the steps' sink stays shallow: heard ~0.1 s late
@@ -151,16 +155,38 @@
     ;; --- start and stop -------------------------------------------------------------------
     ;; the music's player, once its text has arrived (on the web the page
     ;; fetches the tunes, so it may come after the start); none without a track
+    (define (music-rate s) (if (vector-ref s 2) (s-rate s) MUSIC-RATE))
+
     (define (open-players! s)
       (let* ((name (vector-ref s 21))
              (text (and name (not (vector-ref s 13)) ((vector-ref s 1) name))))
         (when text
-          (let ((p (open-tune-player (read-tune-string text) (s-rate s) loop: #t)))
+          (let ((p (open-tune-player (read-tune-string text) (music-rate s) loop: #t))
+                (routes (track-routes name)))
             (vector-set! s 13 p)
-            (vector-set! s 15 (make-sections p))))))
+            (vector-set! s 15 (and routes (make-sections p routes)))))))
+
+    (define (close-players! s)
+      (let ((p (vector-ref s 13))) (when p (player-close! p)))
+      (vector-set! s 13 #f)
+      (vector-set! s 15 #f))
+
+    ;; another track, or #f: the old player closed first (never two), the new
+    ;; one opened now if the sound has started (else at the start), in calm
+    (define (sound-set-music! s name)
+      (unless (equal? name (vector-ref s 21))
+        (close-players! s)
+        (vector-set! s 21 name)
+        (when (sound-started? s)
+          (open-players! s)
+          (unless (vector-ref s 2)
+            (when (and name (not (vector-ref s 11)))
+              (vector-set! s 11 (open-music-stream)))))))
 
     (define (open-stream)
       (guard (e (#t #f)) (open-audio-stream channels: 2 buffer-frames: BUFFER)))
+    (define (open-music-stream)
+      (guard (e (#t #f)) (open-audio-stream channels: 2 buffer-frames: BUFFER volume: MUSIC-GAIN rate: MUSIC-RATE)))
 
     (define (sound-start! s)
       (unless (sound-started? s)
@@ -174,8 +200,7 @@
           (vector-set! s 10 (open-stream))
           (vector-set! s 22 (guard (e (#t #f)) (open-audio-stream channels: 2 buffer-frames: BUFFER volume: BED-GAIN)))
           (when (vector-ref s 21)
-            (vector-set! s 11 (open-stream))
-            (when (vector-ref s 11) (set-audio-stream-volume! (vector-ref s 11) MUSIC-GAIN))))
+            (vector-set! s 11 (open-music-stream))))
         (vector-set! s 18 #t)))
 
     ;; a user gesture: start, or resume a context the browser suspended
@@ -375,8 +400,9 @@
         (let loop ((gs guards) (i 0) (states '()))
           (if (null? gs)
               (let ((sec (vector-ref s 15)))
+                ;; the music: the most aware guard's state, no timer of our own
                 (when sec
-                  (sections-want! sec (music-rule-want! (vector-ref s 7) states dt))
+                  (sections-want! sec (desire-from-states states))
                   (sections-tick! sec)))
               (let* ((g (car gs)) (e (guard-entry s i))
                      (gx (list-ref g 0)) (gy (list-ref g 1)) (gmoved (list-ref g 2))
@@ -402,11 +428,11 @@
     ;; --- the sinks ------------------------------------------------------------------------------
     (define *buf* (make-bytevector (* 8 PUSH) 0))
 
-    (define (pump-stream! s st depth-s fill part)
+    (define (pump-stream! s st depth-s fill part . rate)
       (when st
         (let loop ()
           (let* ((depth (audio-stream-depth st))
-                 (want (exact (floor (* depth-s (s-rate s)))))
+                 (want (exact (floor (* depth-s (if (pair? rate) (car rate) (s-rate s))))))
                  (n (min PUSH (audio-stream-room st) (- want depth))))
             (when (> n 0)
               (let ((t0 (current-milliseconds)))
@@ -445,7 +471,8 @@
       (when (bank-bed-loop (sound-bank s))
         (pump-stream! s (vector-ref s 22) SFX-DEPTH-S (lambda (b n) (bed-fill! s b n)) 'bed))
       (let ((mp (vector-ref s 13)))
-        (when mp (pump-stream! s (vector-ref s 11) MUSIC-DEPTH-S (lambda (b n) (player-pull! mp b 0 n)) 'music))))
+        (when mp (pump-stream! s (vector-ref s 11) MUSIC-DEPTH-S (lambda (b n) (player-pull! mp b 0 n)) 'music
+                               (music-rate s)))))
 
     ;; headless: n frames of everything mixed (the music at its stream gain)
     (define (sound-render! s out n)

@@ -35,8 +35,13 @@
   (begin
     (define SOUND-RATE 44100)
 
+    ;; the tracks: INFILTRATE plays False Identity, PRACTICE Heat Trace (David's
+    ;; split, 2026-09-26); one player at a time, so the budget is per level
+    (define PRACTICE-MUSIC "music-heat-trace")
+    (define (level-music) MUSIC-TUNE)     ; PRACTICE: (if (play-mode-practice?) PRACTICE-MUSIC MUSIC-TUNE)
+
     (define SOUND-TUNES
-      (append (if MUSIC-TUNE (list MUSIC-TUNE) '())
+      (append (list MUSIC-TUNE PRACTICE-MUSIC)
               (map (lambda (k) (string-append "event-" (symbol->string k))) EVENT-KINDS)))
 
     (define *s* #f)
@@ -96,6 +101,7 @@
     (define (sound-game-frame! dt walker)
       (when *s*
         (say-progress!)
+        (sound-set-music! *s* (level-music))  ; the level's track (a no-op unless it changes)
         (let ((feed (play-mode-sound-feed walker)))
           (set! *steps-n* (+ *steps-n* (length (caddr feed))))
           (set! *events-n* (+ *events-n* (length (cadddr feed))))

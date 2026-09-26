@@ -59,14 +59,14 @@
            version: "0.22.8")
   (package name: "motif"
            url: "codeberg:sigil/motif"
-           ref: "^0.7.0"
-           sha: "a452be1e950a5a216e586a1b079ab638cfae4d9a"
-           version: "0.7.0")
+           ref: "^0.8.0"
+           sha: "a197380f3afcbb80142b41817c053957043ae8d6"
+           version: "0.8.0")
   (package name: "sigil-audio"
            url: "codeberg:sigil/sigil-audio"
-           ref: "^0.12.2"
-           sha: "7413b674b8681f501b2b28c405d183ab4324a022"
-           version: "0.12.2")
+           ref: "^0.13.0"
+           sha: "02183f9cdbd9f68167a09dd97cfcfa654f7bb7e1"
+           version: "0.13.0")
   (package name: "sigil-wasm-audio"
            url: "codeberg:sigil/sigil"
            ref: ">=0.22.8"
