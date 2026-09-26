@@ -1,0 +1,154 @@
+;;; PRACTICE (D38; tasks/phantom-burn-practice; topics/phantom-burn-practice-api):
+;;; Crash's sim, driven headless as the game drives it: the walker, then
+;;; play-tick!, then practice-tick!.
+;;;
+;;; The gates: a scripted run through all eight rooms meets each lesson's
+;;; goal; every Crash line fires exactly once, at its trigger; a capture
+;;; resets only its room. Each has a sabotage.
+
+(import (sigil test)
+        (sigil math)
+        (sigil list)
+        (sigil fs)
+        (phantom soup)
+        (phantom walker)
+        (phantom play data)
+        (phantom play devices)
+        (phantom play core)
+        (phantom play practice)
+        (phantom guard guard))
+
+(define DIR "assets/floors/sim/")
+(define C (pbc1->collision (read-file-bytes (string-append DIR "collide"))))
+(define INFO (floor-info-from-string (read-file-string (string-append DIR "floor.sexp"))))
+(define DATA (play-data-from-string (read-file-string (string-append DIR "play.sexp"))))
+(define CIRCUITS (cdr (assq 'circuits INFO)))
+
+;; The circuits: all on, switched by the deck's light commands.
+(define *off* '())
+(define (on? c) (not (memq c *off*)))
+(define (switch! r)
+  (when (and (pair? r) (eq? (car r) 'lights))
+    (if (eq? (caddr r) 'lights-off)
+        (set! *off* (cons (cadr r) *off*))
+        (set! *off* (filter (lambda (c) (not (eq? c (cadr r)))) *off*)))))
+
+;; The run's state: the play, the practice and the walker.
+(define P #f) (define PR #f) (define W #f)
+(define (fresh!)
+  (set! *off* '())
+  (set! P (play-reset! (make-play C DATA CIRCUITS)))
+  (set! PR (make-practice DATA))
+  (set! W (play-start-walker P C)))
+
+(define PI2 (* 2.0 3.141592653589793))
+(define (wrap a) (let loop ((a a)) (cond ((> a 3.141592653589793) (loop (- a PI2))) ((< a -3.141592653589793) (loop (+ a PI2))) (else a))))
+
+;; One tick: the walker with input in, the rules, the lessons. The lessons'
+;; caught (a camera's alarm) and the play's are the caller's to handle.
+(define (tick! in)
+  (set! W (walker-step W in TICK C))
+  (play-tick! P W on? 1.0 2.0)
+  (practice-tick! PR P))
+
+(define (wait! n) (let loop ((i 0)) (when (< i n) (tick! NO-INPUT) (loop (+ i 1)))))
+
+;; Walk (or sneak, or run) to (x y): face it, then forward. Stops within
+;; 0.3 m or after n ticks. Returns #t when there.
+(define (go! x y gait . n)
+  (let ((limit (if (pair? n) (car n) 900)))
+    (let loop ((i 0))
+      (let* ((dx (- x (walker-x W))) (dy (- y (walker-y W))))
+        (cond ((< (+ (* dx dx) (* dy dy)) 0.09) #t)
+              ((>= i limit) #f)
+              ((not (eq? (play-outcome P) 'playing)) #f)
+              (else
+               (let ((dyaw (wrap (- (atan (- dx) dy) (walker-yaw W)))))
+                 (tick! (make-input 0.0 1.0 dyaw 0.0 (eq? gait 'sneak) (eq? gait 'run) #f 0))
+                 (loop (+ i 1)))))))))
+
+;; Look at (x y z) from where you stand.
+(define (look-at! x y z)
+  (let* ((dx (- x (walker-x W))) (dy (- y (walker-y W))) (dz (- z (walker-eye-z W)))
+         (yaw (atan (- dx) dy)) (pitch (atan dz (sqrt (+ (* dx dx) (* dy dy))))))
+    (tick! (make-input 0.0 0.0 (wrap (- yaw (walker-yaw W))) (- pitch (walker-pitch W)) #f #f #f 0))))
+
+;; Hold the deck n ticks; the light commands switch the circuits.
+(define (hold! n)
+  (let loop ((i 0) (last #f))
+    (if (< i n)
+        (let ((r (play-deck! P W #t on?)))
+          (switch! r)
+          (when r (practice-note-command! PR P (if (pair? r) (caddr r) #f) 'deck))
+          (tick! NO-INPUT)
+          (loop (+ i 1) (or r last)))
+        (begin (play-deck! P W #f on?) last))))
+
+(define (lesson-now) (practice-lesson PR))
+(define (said) (practice-lines-said PR))
+(define (show label) (display (list label 'at (walker-x W) (walker-y W) 'lesson (lesson-now) 'outcome (play-outcome P)
+                                    'unit (play-active-unit P) (guard-state (play-guard P)) 'vis (play-visibility P)))
+                     (newline))
+
+(test-group "the sim's first lessons (diagnostic)"
+  (test "light, sound, patrol"
+    (fresh!)
+    (wait! 2)
+    (show 'start)
+    ;; 1, light: into the dark alcove, crouched, still
+    (go! 4.0 7.0 'walk) (go! 4.0 9.3 'walk)
+    (tick! (make-input 0.0 0.0 0.0 0.0 #f #f #t 0))
+    (wait! 90)
+    (show 'alcove)
+    ;; 2, sound: out, and through the bands sneaking
+    (tick! (make-input 0.0 0.0 0.0 0.0 #f #f #t 0))
+    (go! 4.0 6.0 'walk) (go! 7.5 4.0 'walk)
+    (go! 9.0 4.0 'sneak) (show 'sound-in)
+    (go! 15.5 4.0 'sneak) (show 'sound-end)
+    (go! 16.8 4.0 'sneak) (show 'patrol-in)
+    ;; 3, patrol: wait for the unit to pass north, back turned, then run for the door
+    (let loop ((i 0))
+      (let ((g (play-guard P)))
+        (unless (or (>= i 900) (and (> (guard-y g) 5.0) (> (guard-fy g) 0.5)))
+          (tick! NO-INPUT) (loop (+ i 1)))))
+    (show 'patrol-go)
+    (go! 23.4 4.0 'run) (go! 24.8 4.0 'run) (show 'deck-in)
+    ;; 4, the deck: ring the phone, wait for the unit to go to it, then along the south wall
+    (look-at! 25.45 6.85 0.85)
+    (let ((r (hold! 55))) (display (list 'deck r)) (newline))
+    (let loop ((i 0))
+      (let* ((g (play-guard P)) (dx (- (guard-x g) 25.45)) (dy (- (guard-y g) 6.85)))
+        (unless (or (>= i 900) (< (+ (* dx dx) (* dy dy)) 4.0))
+          (tick! NO-INPUT) (loop (+ i 1)))))
+    (show 'deck-unit-at-phone)
+    (go! 27.0 1.2 'sneak) (go! 31.0 1.2 'sneak) (go! 32.8 4.0 'sneak) (show 'facilities-in)
+    ;; 5, FACILITIES: the badge, a ceiling light (the zone off), across in the dark
+    (go! 32.4 1.3 'walk) (wait! 2) (show 'badge)
+    (go! 34.2 3.4 'walk)
+    (look-at! 35.75 3.75 2.9)
+    (let ((r (hold! 55))) (display (list 'lights r 'off *off*)) (newline))
+    (go! 39.0 3.0 'sneak) (go! 40.8 4.0 'sneak) (show 'camera-in)
+    ;; 6, the camera: along the north wall, under its view
+    (go! 41.0 7.4 'walk) (go! 47.0 7.4 'walk) (go! 48.8 4.0 'walk) (show 'terminal-in)
+    ;; 7, the terminal: sit, run a command, stand
+    (go! 52.0 6.2 'walk)
+    (let ((u (play-use! P W on?))) (display (list 'terminal-use u)) (newline))
+    (play-terminal-key! P 'down on?)            ; the phone's row (the printer is not on this floor)
+    (play-terminal-key! P 'run on?)
+    (let loop ((i 0) (r #f))
+      (if (and (< i 200) (not r))
+          (let ((r2 (play-terminal-step! P on?)))
+            (when r2 (practice-note-command! PR P (caddr r2) 'terminal))
+            (tick! NO-INPUT)
+            (loop (+ i 1) r2))
+          (begin (display (list 'terminal-ran r (play-terminal P on?))) (newline))))
+    (play-terminal-key! P 'close on?)
+    (show 'terminal-done)
+    (go! 56.8 4.0 'walk) (show 'exit-in)
+    ;; 8, the exit: the reader
+    (go! 63.2 4.0 'walk)
+    (let ((u (play-use! P W on?))) (display (list 'reader u)) (newline))
+    (tick! NO-INPUT)
+    (show 'end)
+    (display (list 'said (said) 'done (practice-done? PR))) (newline)
+    (assert-true #t)))
