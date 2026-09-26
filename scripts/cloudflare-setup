@@ -20,18 +20,23 @@
 #                                        production deployment, and where a name
 #                                        already points somewhere else
 #
-# Environment (every mode), from ~/Ops/.env-phantomburn unless set:
+# Environment (every mode): eval "$(~/Ops/scripts/cf-env phantomburn)" first,
+# or set PHANTOM_ENV_FILE to a file to source:
 #   CLOUDFLARE_API_TOKEN   the token (scopes below)
 #   CLOUDFLARE_ACCOUNT_ID  the account id (wrangler whoami prints it)
 #
-# TOKEN SCOPES: ONE token for this script and scripts/publish-web (David's,
-# 2026-09-25; re-minted with R2 for t-5b3251:
-#   REPLACE=1 R2_SCOPE=account ~/Ops/scripts/cloudflare-token-site.sh phantomburn phantomburn.net phantomburn-wasm):
+# TOKEN SCOPES: ONE token for this script and scripts/publish-web, bucket-scoped
+# since 2026-09-26 (pass cloudflare/phantomburn-site):
+#   REPLACE=1 ~/Ops/scripts/cloudflare-token-site.sh phantomburn phantomburn.net phantomburn-wasm
 #     Account  Cloudflare Pages      Edit   create the project, attach the domains, deploy
-#     Account  Workers R2 Storage    Edit   create the bucket, put and read back the wasm
-#                                           (account-wide: it reaches every bucket)
+#     R2 bucket phantomburn-wasm ONLY: Bucket Item Read and Write
+#                                           put and read back the wasm, through R2's
+#                                           S3 API (scripts/r2-s3; wrangler's
+#                                           `r2 object` REST path refuses this scope)
 #     Zone     DNS                   Edit   phantomburn.net only (--domain)
 #     Zone     Zone                  Read   phantomburn.net only (the zone id)
+# This token cannot see or create buckets. The bucket exists (2026-09-25); to
+# create one again, use an account-wide R2 Storage Edit token for --create only.
 #
 # The bucket stays private: the only way to its objects is the Pages Function
 # (functions/w/[[path]].js, bound by wrangler.jsonc). Nothing here or in
@@ -43,12 +48,11 @@
 # not in the repo (~/.config/phantomburn/slug). A pages.dev preview URL is
 # public too, so the same rules hold there.
 set -eu
-# Credentials: sourced from $PHANTOM_ENV_FILE (default ~/Ops/.env-phantomburn,
-# David's; this script only sources it and never prints it). ONE token covers
-# setup and publish: Pages Edit on the account, DNS Edit and Zone Read on
-# phantomburn.net.
-ENV_FILE="${PHANTOM_ENV_FILE:-$HOME/Ops/.env-phantomburn}"
-if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
+# Credentials: from the environment, or sourced from $PHANTOM_ENV_FILE when
+# that is set (the old default ~/Ops/.env-phantomburn is gone: tokens live in
+# pass since 2026-09-26). This script never prints them.
+ENV_FILE="${PHANTOM_ENV_FILE:-}"
+if [ -n "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
 # every wrangler call runs from an empty scratch directory: wrangler 4 edits
 # the wrangler config it finds in its cwd (Harkfell's setup, 2026-09-24)
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/phantomburn-cloudflare-setup-XXXXXX")"
@@ -96,13 +100,19 @@ else
   say "Pages project $PROJECT does not exist ($(printf '%s' "$PROJ_JSON" | jq -c '.errors[0].message'))"
 fi
 
-BUCKET_JSON="$(curl -sS "$API/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/$BUCKET" -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")"
-if [ "$(printf '%s' "$BUCKET_JSON" | jq -r '.success')" = true ]; then
+# the token reaches curl on stdin (-K -), not on its command line
+BUCKET_JSON="$(printf 'header = "Authorization: Bearer %s"\n' "$CLOUDFLARE_API_TOKEN" | curl -sS -K - "$API/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/$BUCKET")" || BUCKET_JSON='{}'
+# three answers, not two: the bucket-scoped token cannot see buckets at all,
+# and "the token can't tell" must not read as "missing, create it"
+if [ "$(printf '%s' "$BUCKET_JSON" | jq -r '.success' 2>/dev/null)" = true ]; then
   HAVE_BUCKET=1
   say "R2 bucket $BUCKET exists (created $(printf '%s' "$BUCKET_JSON" | jq -r '.result.creation_date // "?"'))"
-else
+elif printf '%s' "$BUCKET_JSON" | jq -e '[.errors[]?.code] | index(10006)' > /dev/null 2>&1; then
   HAVE_BUCKET=0
   say "R2 bucket $BUCKET does not exist ($(printf '%s' "$BUCKET_JSON" | jq -c '.errors[0].message'))"
+else
+  HAVE_BUCKET=unknown
+  say "R2 bucket $BUCKET: unknown to this token ($(printf '%s' "$BUCKET_JSON" | jq -c '.errors[0]' 2>/dev/null || echo 'no JSON reply')); a bucket-scoped token cannot see buckets"
 fi
 
 if [ "$MODE" = create ]; then
@@ -113,6 +123,8 @@ if [ "$MODE" = create ]; then
   if [ "$HAVE_BUCKET" = 0 ]; then
     wrangler r2 bucket create "$BUCKET"
     say "created R2 bucket $BUCKET (private: only the Pages Function reads it)"
+  elif [ "$HAVE_BUCKET" = unknown ]; then
+    say "NOT creating R2 bucket $BUCKET: this token cannot tell whether it exists. Creating a bucket needs an account-wide R2 Storage Edit token"
   fi
   say "next: scripts/publish-web DIR \"<line>\" --preview, checked on its pages.dev URL"
   exit 0

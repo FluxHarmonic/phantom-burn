@@ -26,24 +26,31 @@
 # above it: wrangler 4 reads and edits the config it finds in its cwd) and
 # checked again against the manifest; wrangler.json is written there from the
 # copy (comments dropped, the output directory pointed at the copy, nothing
-# else changed). The wasm comes out of the copy and goes to R2 (--remote on
-# every r2 call: wrangler 4 defaults to a local simulator), is read back and
-# compared byte for byte; then `wrangler pages deploy` runs from there. Without --preview the same copy
+# else changed). The wasm comes out of the copy and goes to R2 through its S3
+# API (scripts/r2-s3), is read back and compared byte for byte; then `wrangler pages deploy` runs from there. Without --preview the same copy
 # goes to the preview branch first; scripts/verify-live.mjs checks its URL;
 # production is deployed only if that is green, and then checked the same way.
 #
-# Needs wrangler on PATH, CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID (the
-# one token scripts/cloudflare-setup names, with R2 on phantomburn-wasm), and
-# the project and bucket that `scripts/cloudflare-setup --create` makes.
-# Never touches DNS or the project's settings, and never deletes an object.
+# Needs wrangler, curl and jq on PATH, CLOUDFLARE_API_TOKEN and
+# CLOUDFLARE_ACCOUNT_ID (eval "$(~/Ops/scripts/cf-env phantomburn)": the one
+# token scripts/cloudflare-setup names, with Bucket Item Read/Write on
+# phantomburn-wasm only), and the project and bucket that
+# `scripts/cloudflare-setup --create` makes. Never touches DNS or the project's
+# settings, and never deletes an object.
+#
+# --dry-run leaves nothing on Cloudflare. With the credentials set it makes ONE
+# read-only request, a HEAD of the wasm's key, to show the token reaches the
+# bucket (present or absent, either is fine; a refusal fails the dry run).
 set -eu
 cd "$(dirname "$0")/.." || exit 1
-# Credentials: sourced from $PHANTOM_ENV_FILE (default ~/Ops/.env-phantomburn,
-# David's; this script only sources it and never prints it). ONE token covers
-# setup and publish: Pages Edit and R2 on the account, DNS Edit and Zone Read
-# on phantomburn.net (re-minted with R2 for t-5b3251).
-ENV_FILE="${PHANTOM_ENV_FILE:-$HOME/Ops/.env-phantomburn}"
-if [ -f "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
+# Credentials: from the environment (cf-env phantomburn reads pass
+# cloudflare/phantomburn-site; the old ~/Ops/.env-phantomburn is gone since
+# 2026-09-26), or sourced from $PHANTOM_ENV_FILE when that is set. This script
+# never prints them. ONE token covers setup and publish: Pages Edit on the
+# account, Bucket Item Read/Write on phantomburn-wasm only, DNS Edit and Zone
+# Read on phantomburn.net.
+ENV_FILE="${PHANTOM_ENV_FILE:-}"
+if [ -n "$ENV_FILE" ]; then set -a; . "$ENV_FILE"; set +a; fi
 
 say() { echo "publish-web: $*" >&2; }
 PROJECT="${PHANTOM_PAGES_PROJECT:-phantomburn}"
@@ -130,27 +137,42 @@ NFILES="$(find "$D/tree" -type f | wc -l)"
 WANT_NOWASM="$(printf '%s\n' "$WANT" | grep -v "  $KEY\$")"
 
 if [ "$DRY" = 1 ]; then
-  say "dry run: would put $KEY ($(stat -c%s "$WORK/phantom-burn.wasm") bytes) in R2 bucket $BUCKET (--remote), read it back and compare"
+  if [ -n "${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+    set +e; scripts/r2-s3 head "$BUCKET" "$KEY" 2> "$WORK/r2.log"; hrc=$?; set -e
+    case "$hrc" in
+      0) say "dry run: R2 read-only check: $BUCKET/$KEY is already there (the token reads the bucket)" ;;
+      3) say "dry run: R2 read-only check: $BUCKET/$KEY is absent (the token reads the bucket)" ;;
+      *) cat "$WORK/r2.log" >&2; say "dry run: REFUSED: the token cannot read $BUCKET (r2-s3 rc $hrc); a publish would fail"; exit 1 ;;
+    esac
+  else
+    say "dry run: CLOUDFLARE_API_TOKEN/CLOUDFLARE_ACCOUNT_ID not set, so R2 was not checked"
+  fi
+  say "dry run: would put $KEY ($(stat -c%s "$WORK/phantom-burn.wasm") bytes) in R2 bucket $BUCKET (scripts/r2-s3), read it back and compare"
   say "dry run: would deploy $NFILES files ($(du -sh "$D/tree" | cut -f1)) plus functions/ from $D to Pages project $PROJECT: branch preview, verify-live on its URL$([ "$ONLY_PREVIEW" = 1 ] || echo ", then branch master and verify-live again")"
-  say "dry run: nothing left the box"
+  say "dry run: nothing was written anywhere"
   exit 0
 fi
 command -v wrangler > /dev/null || { say "wrangler not on PATH"; exit 1; }
-# the wasm to R2: an absent key makes `get` exit non-zero, and so does an auth
-# or network failure, which then fails the put loudly; the read-back compare
-# gates both branches
-if (cd "$D" && wrangler r2 object get "$BUCKET/$KEY" --remote --file "$WORK/back.wasm") > "$WORK/r2.log" 2>&1; then
+[ -n "${CLOUDFLARE_API_TOKEN:-}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] || { say "CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID must be set (eval \"\$(~/Ops/scripts/cf-env phantomburn)\")"; exit 1; }
+# the wasm to R2, through R2's S3 API (scripts/r2-s3): the token holds Bucket
+# Item Read/Write on this bucket only, and wrangler's `r2 object` REST path
+# refuses such a token. r2-s3 exits 3 only for an absent key, so a refused or
+# failed read is never taken as "absent, put it". The read-back compare gates
+# both branches; nothing is ever deleted or overwritten.
+r2_get() { set +e; scripts/r2-s3 get "$BUCKET" "$KEY" "$WORK/back.wasm" 2>> "$WORK/r2.log"; rc=$?; set -e; return $rc; }
+: > "$WORK/r2.log"
+if r2_get; then
   say "$KEY is already in $BUCKET"
-else
-  (cd "$D" && wrangler r2 object put "$BUCKET/$KEY" --remote --file "$WORK/phantom-burn.wasm" --content-type application/wasm) > "$WORK/r2.log" 2>&1 \
+elif [ "$rc" = 3 ]; then
+  scripts/r2-s3 put "$BUCKET" "$KEY" "$WORK/phantom-burn.wasm" application/wasm 2>> "$WORK/r2.log" \
     || { cat "$WORK/r2.log" >&2; say "the R2 upload failed; nothing deployed"; exit 1; }
-  (cd "$D" && wrangler r2 object get "$BUCKET/$KEY" --remote --file "$WORK/back.wasm") >> "$WORK/r2.log" 2>&1 \
-    || { cat "$WORK/r2.log" >&2; say "the R2 read-back failed; nothing deployed"; exit 1; }
+  r2_get || { cat "$WORK/r2.log" >&2; say "the R2 read-back failed (r2-s3 rc $rc); nothing deployed"; exit 1; }
   say "put $KEY ($(stat -c%s "$WORK/phantom-burn.wasm") bytes)"
+else
+  cat "$WORK/r2.log" >&2; say "REFUSED: could not read $BUCKET/$KEY (r2-s3 rc $rc: refused or failed, not absent); nothing deployed"; exit 1
 fi
 cmp -s "$WORK/phantom-burn.wasm" "$WORK/back.wasm" || { say "REFUSED: the object at $BUCKET/$KEY is not the verified wasm; nothing deployed"; exit 1; }
 say "R2 holds the verified wasm at $KEY (read back, identical)"
-rm -rf "$D/.wrangler"   # wrangler's local state from the r2 calls, never deployed
 
 deploy() {   # branch -> the deployment URL on stdout
   got="$(scripts/tree-manifest "$D/tree" "$D")" || { say "REFUSED: tree-manifest refused the deploy directory"; exit 1; }
@@ -163,7 +185,13 @@ deploy() {   # branch -> the deployment URL on stdout
   set -e
   cat "$WORK/deploy-$1.log" >&2
   [ "$drc" = 0 ] || { say "wrangler pages deploy to $1 failed (rc=$drc)"; exit 1; }
-  url="$(grep -o 'https://[a-z0-9.-]*\.pages\.dev' "$WORK/deploy-$1.log" | tail -1)"
+  # The FIRST pages.dev URL wrangler prints is this deployment's own
+  # (https://<id>.phantomburn.pages.dev); the last is the branch alias
+  # (preview.phantomburn.pages.dev), whose edge cache can still serve an
+  # older deployment's immutable files (P3's first preview: P2's
+  # /<slug>/phantom-burn.wasm, cf-cache-status HIT, a false fail on the
+  # missing leg). Verify the deployment itself.
+  url="$(grep -o 'https://[a-z0-9.-]*\.pages\.dev' "$WORK/deploy-$1.log" | head -1)"
   [ -n "$url" ] || { say "the deploy to $1 printed no pages.dev URL; check it by hand: node scripts/verify-live.mjs <url> $DIR"; exit 1; }
   echo "$url"
 }
