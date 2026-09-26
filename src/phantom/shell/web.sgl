@@ -137,6 +137,7 @@
             ((string=? k "Shift") 'shift)
             ((string=? k "Control") 'control)
             ((string=? k "deck") 'deck)
+            ((string=? k "Enter") 'enter)
             ((string=? k " ") 'space)
             ((= (string-length k) 1) (string->symbol (string (char-downcase (string-ref k 0)))))
             (else #f)))
@@ -267,7 +268,15 @@
 
     ;; --- the flow: title, then play, then the title --------------------------
 
-    (define *mode* 'title)           ; the flow's: title or game
+    (define *mode* 'title)           ; the flow's: title or game (?go= starts in game)
+    ;; The menu (PRACTICE, D38): PRACTICE is floor sim, INFILTRATE floor 14.
+    ;; The page loads one floor behind the title (sim for a first-timer, else
+    ;; 14); picking the other says "go FLOOR" and the page reloads with ?go=.
+    (define MENU-ITEMS '("PRACTICE" "INFILTRATE"))
+    (define MENU-FLOORS '("sim" "14-slice"))
+    (define *menu-sel* 1)
+    (define *tap* #f)                ; (x . y): a tap or click on the title, canvas pixels
+    (define *going* #f)              ; asked the page for the other floor
     (define *want-title* #f)         ; a win's card is done: back to the title
     (define *t-info-text* #f)
     (define *t-info* #f)
@@ -303,6 +312,9 @@
           (title-init!))
       (apply-params!)
       (set! *pressed* '())
+      (set! *tap* #f)
+      (set! *menu-sel* (if (string=? *floor* "sim") 0 1))
+      (title-set-menu! MENU-ITEMS *menu-sel* (if (param "practiced") #f "NEW HERE? START WITH PRACTICE"))
       (set! *t-time* 0.0)
       (set! *mode* 'title)
       (display "phantom-burn: mode title") (newline))
@@ -324,6 +336,26 @@
         (apply-params!)
         (play-mode-reset!))
       (display "phantom-burn: mode game") (newline))
+
+    (define (menu-input!)
+      (let ((go? #f))
+        (for-each (lambda (p)
+                    (case p
+                      ((up w) (set! *menu-sel* (max 0 (- *menu-sel* 1))))
+                      ((down s) (set! *menu-sel* (min (- (length MENU-ITEMS) 1) (+ *menu-sel* 1))))
+                      ((tap) #f)
+                      (else (set! go? #t))))
+                  (reverse *pressed*))
+        (when *tap*
+          (let ((hit (title-menu-hit (gles3-canvas-width) (gles3-canvas-height) (car *tap*) (cdr *tap*))))
+            (when hit (set! *menu-sel* hit) (set! go? #t))))
+        (title-set-menu! MENU-ITEMS *menu-sel* (if (param "practiced") #f "NEW HERE? START WITH PRACTICE"))
+        (when go?
+          (let ((want (list-ref MENU-FLOORS *menu-sel*)))
+            (cond ((string=? want *floor*) (flow-to-game!))
+                  ((not *going*)
+                   (set! *going* #t)
+                   (display (string-append "phantom-burn: go " want)) (newline)))))))
 
     (define (flow-title-tick payload)
       (let ((dt (frame-dt payload)))
@@ -349,11 +381,12 @@
               (unless *said-ready*
                 (set! *said-ready* #t)
                 (display "phantom-burn: ready title") (newline))
-              ;; any key, click or tap starts, after a moment (a press that
-              ;; ended the last game does not skip the title)
-              (if (and (pair? *pressed*) (> *t-time* 0.8))
-                  (flow-to-game!)
-                  (set! *pressed* '())))
+              ;; the menu, after a moment (a press that ended the last game
+              ;; does not skip the title): up/down (or W/S) move, any other
+              ;; key starts the choice, a tap starts the item under it
+              (when (> *t-time* 0.8) (menu-input!))
+              (set! *pressed* '())
+              (set! *tap* #f))
             (begin
               (set! *pressed* '())
               (begin-frame)
@@ -476,9 +509,14 @@
             ((string=? type "press")
              (set! *pressed* (cons (string->symbol payload) *pressed*))
              0)
+            ((string=? type "tap")
+             (let ((p (split-pair payload))) (set! *tap* p))
+             0)
             ((string=? type "params")
              (set! *params* (split-query payload))
              (set! *params-seen* #t)
+             ;; ?go=FLOOR (the menu's other floor, after a reload): straight to it
+             (when (and (param "flow") (param "go")) (set! *mode* 'game) (display "phantom-burn: mode game") (newline))
              (when (param "floor") (set! *floor* (param "floor")))
              (unless (param "mute") (sound-game-init! tune-loader))
              0)

@@ -285,6 +285,8 @@
       (lambda ()
         (gfx-setup)
         (title-init! load-mesh* load-texture* (load-info))
+        ;; --menu: the flow's menu, for shots (the desktop has no flow yet)
+        (when (member "--menu" args) (title-set-menu! (list "PRACTICE" "INFILTRATE") (if (member "--practiced" args) 1 0) (if (member "--practiced" args) #f "NEW HERE? START WITH PRACTICE")))
         (apply-settings! args)
         (let ((freeze? (member "--freeze" args))
               (t0 (or (string->number (arg-value args "--title-at" "none")) 0.0)))

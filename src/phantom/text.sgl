@@ -77,7 +77,13 @@
     (define *atlas* #f)
     (define *index* #f)   ; vector: char code -> cell index, or #f
 
+    ;; Once: the title (its menu) and the game both call it.
+    (define *text-ready* #f)
     (define (text-init!)
+      (unless *text-ready*
+        (set! *text-ready* #t)
+        (text-init*!)))
+    (define (text-init*!)
       (let* ((n (length GLYPHS))
              (w (* n CELL-W))
              (px (make-bytevector (* w CELL-H 4) 0))
