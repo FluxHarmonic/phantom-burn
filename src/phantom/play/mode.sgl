@@ -40,7 +40,7 @@
           play-mode-reset! play-mode-set-on-win!
           play-press! play-mode-set-dev! play-mode-sound-feed
           play-hold? play-after-tick! play-frame! play-hud!
-          play-held! play-mode-devices play-mode-deck)
+          play-held! play-mode-devices play-mode-deck play-mode-terminal)
 
   (begin
 
@@ -95,7 +95,8 @@
       (render-hide-part! 'badge #f)
       (play-start-walker *core* *coll*))
 
-    (define (play-hold?) (not (eq? *phase* 'play)))
+    ;; a fade, the win card, or the terminal (you stand at it; the floor goes on)
+    (define (play-hold?) (or (not (eq? *phase* 'play)) (and *core* (play-terminal-open? *core*))))
 
     ;; --- keys: use, and the light keys ------------------------------------------
 
@@ -110,6 +111,14 @@
     (define (play-mode-set-dev! on?) (set! *dev* on?))
     (define (play-press! k)
       (cond ((not *core*) #f)
+            ;; at the terminal: W/S or up/down select, F (USE) runs, C closes
+            ((and (eq? *phase* 'play) (play-terminal-open? *core*))
+             (case k
+               ((w up) (play-terminal-key! *core* 'up render-circuit-on?))
+               ((s down) (play-terminal-key! *core* 'down render-circuit-on?))
+               ((f use) (play-terminal-key! *core* 'run render-circuit-on?))
+               ((c) (play-terminal-key! *core* 'close render-circuit-on?))
+               (else #f)))
             ((memq k '(f use)) (unless (play-hold?) (set! *use* #t)) #t)
             ((and (not *dev*) (memq k LIGHT-KEYS)) #t)
             (else #f)))
@@ -129,6 +138,8 @@
     ;; For the shell: the devices' states and the deck's prompt (§2).
     (define (play-mode-devices)
       (if *core* (devices-list (play-devices-state *core*) render-circuit-on?) '()))
+    (define (play-mode-terminal)
+      (if *core* (play-terminal *core* render-circuit-on?) (list '() 0 '(idle))))
     (define (play-mode-deck)
       (if *core*
           (deck-list (play-deck *core*) (play-devices-state *core*) (play-tier *core*) render-circuit-on?)
@@ -168,6 +179,7 @@
              (say! (if (eq? (car r) 'panel-on) "LIGHTS ON" "LIGHTS OFF")))
             ((eq? (car r) 'panel-deny) (say! "THE PANEL WANTS A FACILITIES BADGE"))
             ((eq? (car r) 'reader-deny) (say! "THE READER WANTS A FACILITIES BADGE"))
+            ((eq? (car r) 'terminal-open) #f)
             (else #f)))
 
     ;; --- the sound feed ((phantom sound), topics/phantom-sound-api) ------------
@@ -274,7 +286,9 @@
            (set! *use* #f)
            (apply-use! (play-use! *core* w render-circuit-on?)))
          (set! *message-t* (max 0.0 (- *message-t* TICK)))
-         (apply-deck! (play-deck! *core* w *deck-held* render-circuit-on?))
+         (if (play-terminal-open? *core*)
+             (apply-deck! (play-terminal-step! *core* render-circuit-on?))
+             (apply-deck! (play-deck! *core* w *deck-held* render-circuit-on?)))
          (let ((o (if (eq? (play-outcome *core*) 'won)
                       'won
                       (play-tick! *core* w render-circuit-on? (render-night) (render-pools)))))
@@ -369,7 +383,9 @@
           (draw-guard-caption! w h k ts)
           (draw-objective! w h ts)
           ;; the deck's prompt, bottom left (the shell's draw)
-          (unless (play-hold?) (deck-hud-draw! w h k (play-mode-deck)))
+          (cond ((and (eq? *phase* 'play) (play-terminal-open? *core*))
+                 (terminal-draw! w h k (play-mode-terminal) (play-mode-devices)))
+                ((not (play-hold?)) (deck-hud-draw! w h k (play-mode-deck))))
           (draw-fades! w h ts))))
 
     ;; The eye (design §3): one glyph that opens in five steps with how

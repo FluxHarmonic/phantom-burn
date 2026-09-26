@@ -29,7 +29,7 @@
 
   (export make-devices devices? devices-reset! devices-tick!
           devices-state devices-timer devices-state-set! devices-command devices-run!
-          devices-list tier-allows? tier-rank
+          devices-list devices-zones tier-allows? tier-rank
           make-deck deck? deck-reset! deck-aim! deck-step!
           deck-target deck-blocked? deck-command deck-circuit deck-progress deck-status deck-list
           RING-TIME PRINT-TIME VENT-TIME DECK-RANGE DECK-CONE DECK-HOLD DECK-DONE-SHOW)
@@ -83,6 +83,7 @@
                    (vector (string->symbol (string-append "lights-" (symbol->string c))) c
                            (/ (sum 0) n) (/ (sum 1) n) (/ (sum 2) n))))
                circuits))))
+    (define (devices-zones dv) (vector-ref dv 4))
     (define (zone-id dv c)
       (let ((zs (vector-ref dv 4)))
         (let loop ((i 0))
