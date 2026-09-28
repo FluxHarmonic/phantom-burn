@@ -61,7 +61,7 @@
   (export make-sound sound-start! sound-gesture! sound-prepare! sound-frame! sound-step! sound-event! sound-stop!
           sound-render! sound-trace sound-started? sound-bank sound-mixer sound-bed-mixer sound-last-events
           sound-section sound-music-playing? sound-set-music! sound-set-music-rate! music-lift MUSIC-RATE
-          sound-set-bed! sound-bed sound-bed-loop
+          sound-set-bed! sound-bed sound-bed-loop sound-device-loops LOOP-S
           sound-cue-plays pip-interval MUSIC-TUNE SURFACE-MAP)
   ;; On the web, one-shots play as the audio bridge's CUES: uploaded once, mixed
   ;; in the AudioWorklet (sigil-wasm-audio's load-audio-cue / play-audio-cue), so
@@ -133,7 +133,7 @@
               #f #f #f #f #f (make-mixer) #f
               '() (list (cons 'bank 0.0) (cons 'sfx 0.0) (cons 'music 0.0) (cons 'bed 0.0) (cons 'frames 0)) #f #f (list 0.0 0.0 0.0)
               (if (and (pair? opt) (pair? (cdr opt))) (cadr opt) MUSIC-TUNE)
-              #f 0 '() 0 '() 1.0 MUSIC-RATE 'floor))
+              #f 0 '() 0 '() 1.0 MUSIC-RATE 'floor '()))
 
     ;; Which bed plays (slot 29): floor, the building's hum and air, or sim,
     ;; PRACTICE's air (the bank's bed-sim, once rendered; the hum until then).
@@ -404,6 +404,37 @@
                          (cons id (+ left iv))))))
                cams))))
 
+    ;; The devices' loops (Phantom 0.1): a phone ringing, the printer running,
+    ;; the vent on, each in the feed's sounding list (API v8) while it sounds.
+    ;; A loop is one LOOP-S cycle banked as an event (s0's sketchbook loops),
+    ;; played as a placed one-shot at once and again every LOOP-S while its
+    ;; device stays in the list: the web's cues and the native mixer play it like
+    ;; any one-shot, so a loop costs no more than a step. A device that leaves the
+    ;; list is not played again (its cycle already playing finishes). Slot 30:
+    ;; ((id . seconds-to-its-next-cycle) ...).
+    (define LOOP-S 3.0)
+    (define DEVICE-GAIN 1.0)
+    (define (device-loop-key kind)
+      (case kind
+        ((phone) '(event device-phone-ring))
+        ((printer) '(event device-printer))
+        ((vent) '(event device-vent))
+        (else #f)))
+    (define (devices! s dt sounding)
+      (let ((ds (filter (lambda (e) (device-loop-key (list-ref e 1))) sounding)))
+        (vector-set! s 30
+          (map (lambda (d)
+                 (let* ((id (list-ref d 0))
+                        (old (assoc id (vector-ref s 30)))
+                        (left (- (if old (cdr old) 0.0) dt)))
+                   (if (> left 0.0)
+                       (cons id left)
+                       (let ((sp (placed s (list-ref d 2) (list-ref d 3) (list-ref d 4) (list-ref d 6))))
+                         (play! s (device-loop-key (list-ref d 1)) (* DEVICE-GAIN (car sp)) (cdr sp))
+                         (cons id (+ left LOOP-S))))))
+               ds))))
+    (define (sound-device-loops s) (vector-ref s 30))
+
     (define (sound-frame! s dt you guards . more)
       (vector-set! s 16 '())
       ;; the bank renders ~BANK-MS a frame until it is complete (the title's
@@ -452,6 +483,7 @@
                 (loop (cdr gs) (+ i 1) (cons state states))))))
       ;; the devices sounding (P3): the cameras' pips
       (cameras! s dt (if (pair? more) (car more) '()))
+      (devices! s dt (if (pair? more) (car more) '()))
       (unless (vector-ref s 2) (pump! s)))
 
     ;; --- the sinks ------------------------------------------------------------------------------

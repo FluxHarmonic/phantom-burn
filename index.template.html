@@ -285,7 +285,9 @@
            "camera-pip", "camera-alert",
            // P3's devices, and PRACTICE's Crash-line blip (Phantom 0.1)
            "deck-hold", "deck-confirm", "deck-deny", "print-done", "blinds-open", "blinds-close",
-           "terminal-open", "terminal-close", "crash"]
+           "terminal-open", "terminal-close", "crash",
+           // the devices' loops: one 3 s cycle each, replayed while a device sounds
+           "device-phone-ring", "device-printer", "device-vent"]
             // robot speak (EDGE): three variants of each mood
             .concat(["bored", "suspicious", "searching", "there", "lost", "settle"].reduce(function (acc, m) {
               return acc.concat(["speak-" + m + "-1", "speak-" + m + "-2", "speak-" + m + "-3"]);

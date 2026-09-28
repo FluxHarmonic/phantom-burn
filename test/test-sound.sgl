@@ -333,7 +333,8 @@
       (assert-true (equal? a b)))))
 
 ;; --- Phantom 0.1: the device and PRACTICE sounds, banked -------------------------------
-(define NEW-KINDS '(deck-hold deck-confirm deck-deny print-done blinds-open blinds-close terminal-open terminal-close crash))
+(define NEW-KINDS '(deck-hold deck-confirm deck-deny print-done blinds-open blinds-close terminal-open terminal-close crash
+                    device-phone-ring device-printer device-vent))
 (test-group "the device and PRACTICE sounds (Phantom 0.1)"
   (test "each device one-shot and the Crash-line blip is a kind, and renders a sample that sounds (above -50 dBFS)"
     (let* ((names (map (lambda (k) (string-append "event-" (symbol->string k))) NEW-KINDS))
@@ -357,6 +358,24 @@
         (assert-true (eq? (sound-bed-loop s) sim-l))
         (sound-set-bed! s 'floor)
         (assert-true (eq? (sound-bed-loop s) floor-l)))))
+  (test "a ringing phone in the feed plays its cycle at once and every LOOP-S while it rings, then no more"
+    (let* ((s (ready-sound (only-loader "event-device-phone-ring")))
+           (you (list 0.0 0.0 0.0 0.0 'tile 0.0 #f))
+           (phone (list (list 'desk-phone 'phone 2.0 0.0 1.0 #f 2.0 #f)))
+           (plays (lambda (frames sounding)
+                    (let loop ((i 0) (n 0))
+                      (if (>= i frames) n
+                          (begin
+                            (sound-frame! s (/ 1 60.0) you '() sounding)
+                            (loop (+ i 1) (+ n (length (filter (lambda (e) (equal? (car e) '(event device-phone-ring)))
+                                                                 (sound-last-events s)))))))))))
+      ;; 7 s ringing: at 0, 3 and 6 s
+      (let ((n (plays 420 phone)))
+        (display (list 'ring-plays n)) (newline)
+        (assert-equal 3 n))
+      ;; answered: out of the feed, 4 s more, nothing
+      (assert-equal 0 (plays 240 '()))
+      (assert-true (null? (sound-device-loops s)))))
   (test "without a bed-sim tune there is no sim loop, and set to sim the hum plays on"
     (let ((s (ready-sound (only-loader))))
       (assert-false (bank-sim-bed-loop (sound-bank s)))
@@ -486,7 +505,9 @@
     (for-each (lambda (k)
                 (let ((name (string-append "event-" (symbol->string k))))
                   (assert-true (equal? (bank-sample BANK-E (list 'event k))
-                                       (stereo-render (loader name) (exact (round (* (event-seconds k) RATE))))))))
+                                       (let ((r (stereo-render (loader name) (exact (round (* (event-seconds k) RATE))))))
+                                         ;; a loop's render with its tail's fade
+                                         (if (memq k LOOP-KINDS) (fade-tail! r RATE) r))))))
               EVENT-KINDS))
   (test "each has faded out by its end (its last 100 ms is under -60 dBFS)"
     (for-each (lambda (k)
@@ -496,7 +517,23 @@
                   (bytevector-copy! tail 0 s (* 8 (- n (quotient RATE 10))) (* 8 n))
                   (unless (< (rms tail) 0.001) (display k) (display " still sounds at its end\n"))
                   (assert-true (< (rms tail) 0.001))))
-              EVENT-KINDS))
+              ;; the loops run on by design; their own test is below
+              (filter (lambda (k) (not (memq k LOOP-KINDS))) EVENT-KINDS)))
+  (test "each loop fades to silence at its cycle's end (the next cycle's overlap), down from its level before the fade"
+    (for-each (lambda (k)
+                (let* ((s (bank-sample BANK-E (list 'event k)))
+                       (n (quotient (bytevector-length s) 8))
+                       (window (lambda (from frames)
+                                 (let ((w (make-bytevector (* 8 frames) 0)))
+                                   (bytevector-copy! w 0 s (* 8 from) (* 8 (+ from frames))) w)))
+                       (fade (exact (round (* LOOP-FADE-S RATE))))
+                       (last5 (window (- n (quotient RATE 200)) (quotient RATE 200)))
+                       (before (window (- n fade (quotient RATE 10)) (quotient RATE 10)))
+                       (late (window (- n (quotient fade 4)) (quotient fade 8))))
+                  (display (list k 'before (rms before) 'late (rms late) 'last-5ms (rms last5))) (newline)
+                  (assert-true (< (rms last5) 0.001))
+                  (assert-true (< (rms late) (rms before)))))
+              LOOP-KINDS))
   (test "the steps are usable before the events, and the events before the bed"
     (let ((b (make-bank RATE (only-loader "event-note"))))
       (bank-until b (lambda (b) (bank-sample b '(step tile heel 0))))

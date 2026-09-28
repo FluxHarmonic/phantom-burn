@@ -52,7 +52,7 @@
   (export bank-tune-text bank-slots make-bank bank-render! bank-render-for! bank-sample bank-ready? bank-rate
           bank-events-ready? bank-robot-ready? BANK-ORDER
           bank-bed-loop bank-sim-bed-loop crossfade-loop BED-TUNE-TEXT BED-LOOP-S
-          SLOT-S BANK-SURFACES EVENT-KINDS EVENT-S event-seconds)
+          SLOT-S BANK-SURFACES EVENT-KINDS EVENT-S event-seconds LOOP-KINDS LOOP-FADE-S fade-tail!)
   (begin
     (define SLOT-S 0.6)                   ; the longest slot (the grate rings through it)
     (define ROW-S 0.02)                   ; tempo 125, speed 1: a row is 20 ms
@@ -243,6 +243,9 @@
                           ;; good"; s0's drafts 9c48c56 and 29fe7ab, copied byte for byte)
                           deck-hold deck-confirm deck-deny print-done blinds-open blinds-close
                           terminal-open terminal-close crash
+                          ;; the devices' loops, one 3 s cycle each, retriggered while a
+                          ;; device sounds ((phantom sound) devices!)
+                          device-phone-ring device-printer device-vent
                           ;; robot speak (EDGE), after the rest: three variants of each mood
                           speak-suspicious-1 speak-suspicious-2 speak-suspicious-3
                           speak-searching-1 speak-searching-2 speak-searching-3
@@ -264,6 +267,9 @@
               (blinds-open . 1.16) (blinds-close . 1.16) (terminal-open . 0.62) (terminal-close . 0.56)
               ;; the blip: its longest variant (A 0.7, B 0.32, C 0.16), since ?blip swaps them
               (crash . 0.7)
+              ;; a loop's cycle is 3.0 s (150 rows); rendered 3.4 so its release
+              ;; overlaps the next cycle's start instead of dipping at the seam
+              (device-phone-ring . 3.4) (device-printer . 3.4) (device-vent . 3.4)
               ;; robot speak: each tune whole (its rows x 60 ms: the phrase and 0.36 s of tail)
               (speak-suspicious-1 . 0.66) (speak-suspicious-2 . 0.78) (speak-suspicious-3 . 0.72)
               (speak-searching-1 . 0.96) (speak-searching-2 . 0.96) (speak-searching-3 . 0.96)
@@ -272,6 +278,23 @@
               (speak-settle-1 . 0.72) (speak-settle-2 . 0.9) (speak-settle-3 . 1.02)
               (speak-bored-1 . 1.08) (speak-bored-2 . 1.08) (speak-bored-3 . 1.02))))
     (define (event-seconds kind) (let ((e (assq kind EVENT-LENGTHS))) (if e (cdr e) EVENT-S)))
+    ;; The loops: sounds that run on (the printer's motor, the vent's roar), so a
+    ;; cycle's render ends while they still sound. Its last LOOP-FADE-S fades out
+    ;; to silence (a quarter cosine), the stretch the next cycle overlaps: each
+    ;; seam is a crossfade, not a cut.
+    (define LOOP-KINDS '(device-phone-ring device-printer device-vent))
+    (define LOOP-FADE-S 0.4)
+    (define (fade-tail! bv rate)
+      (let* ((n (quotient (bytevector-length bv) 8))
+             (k (min n (exact (round (* LOOP-FADE-S rate))))))
+        (let loop ((i 0))
+          (when (< i k)
+            (let* ((j (+ (- n k) i))
+                   (g (cos (* 1.5707963267948966 (/ (+ i 1) (* 1.0 k))))))
+              (bytevector-ieee-single-set! bv (* 8 j) (* g (bytevector-ieee-single-ref bv (* 8 j) 'little)) 'little)
+              (bytevector-ieee-single-set! bv (+ 4 (* 8 j)) (* g (bytevector-ieee-single-ref bv (+ 4 (* 8 j)) 'little)) 'little))
+            (loop (+ i 1))))
+        bv))
 
     ;; The order the bank renders them in, the most needed first (the leader, after
     ;; P3's staging measured events-ready at 48 s with robot speak in): right after
@@ -422,6 +445,7 @@
                                             2))
            (next-event! b))                                        ; the later variants, then ready
           (else                                                    ; (event KIND): the whole render is the sample
+           (when (memq (cadr stage) LOOP-KINDS) (fade-tail! (vector-ref b 2) rate))
            (vector-set! b 5 (cons (cons stage (vector-ref b 2)) (vector-ref b 5)))
            (next-event! b)))))
 
