@@ -82,7 +82,7 @@
               on-enter: "That eye on your deck is you, as Gibson sees you. Keep it dark."
               on-success: "Good. In there you're nobody. Next door."
               on-fail: "")
-   (sound     rooms: (sound-marble sound-tile sound-carpet)  start: (8.8 4)  facing: 0  goal: (through never: suspicious)
+   (sound     rooms: (sound-marble sound-tile sound-carpet booth)  start: (8.8 4)  facing: 0  goal: (through never: suspicious)
               on-enter: "Gibson's units hear marble from a room away. Carpet, they barely hear at all. Hold Shift to sneak."
               on-success: "Quiet as a cat. Keep your feet soft in there."
               on-fail: "It heard you. Softer on the hard floors. Sneak, or keep to the carpet.")

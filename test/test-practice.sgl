@@ -178,10 +178,16 @@
       (assert-true (null? wrong)))
     (assert-true (practice-done? PR))
     (assert-equal 'won (play-outcome P)))
-  (test "A CAPTURE RESETS ONLY ITS ROOM: caught in the patrol room, you and its unit start it again; the rooms before are as you left them"
+  (test "A FAILED GOAL, AND A CAPTURE THAT RESETS ONLY ITS ROOM: walked loud past the booth the sound lesson fails and never succeeds; caught in the patrol room, you and its unit start it again, and the booth's unit keeps what it heard"
     (fresh!)
-    (go! 4.0 7.0 'walk) (go! 7.5 4.0 'walk) (go! 9.0 4.0 'sneak) (go! 15.5 4.0 'sneak) (go! 16.8 4.0 'sneak)
-    (let ((booth-x (guard-x (play-unit-guard P 0))) (booth-y (guard-y (play-unit-guard P 0))))
+    ;; the sound room walked, not sneaked: the booth's unit hears you
+    (go! 4.0 7.0 'walk) (go! 7.5 4.0 'walk) (go! 9.0 4.0 'walk) (go! 12.0 6.5 'walk) (go! 15.5 4.0 'walk) (go! 16.8 4.0 'walk)
+    (display (list 'sound-lines (filter (lambda (e) (eq? (car e) 'sound)) (said)) 'booth-aware (guard-awareness (play-unit-guard P 0)))) (newline)
+    (assert-true (member '(sound . fail) (said)))
+    (assert-false (member '(sound . success) (said)))
+    (let ((booth-x (guard-x (play-unit-guard P 0))) (booth-y (guard-y (play-unit-guard P 0)))
+          (booth-aware (guard-awareness (play-unit-guard P 0))))
+      (assert-true (> booth-aware 0.0))
       ;; stand in the patrol unit's path, lit, facing it: it hunts and catches
       (go! 22.5 3.0 'walk)
       (let loop ((i 0)) (when (and (< i 1800) (eq? (play-outcome P) 'playing)) (tick! NO-INPUT) (loop (+ i 1))))
@@ -196,8 +202,8 @@
       (assert-equal 3 (car (lesson-now)))
       ;; its unit back at its start (route point 0, (22.5 1))
       (assert-true (< (+ (abs (- (guard-x (play-guard P)) 22.5)) (abs (- (guard-y (play-guard P)) 1.0))) 0.3))
-      ;; the sound room's unit untouched
+      ;; the sound room's unit untouched: where it was, and what it heard
       (assert-true (< (+ (abs (- (guard-x (play-unit-guard P 0)) booth-x)) (abs (- (guard-y (play-unit-guard P 0)) booth-y))) 1e-9))
-      ;; the fail line once; the lessons before still succeeded
-      (assert-equal 1 (length (filter (lambda (e) (equal? e '(patrol . fail))) (said))))
-      (assert-true (member '(sound . success) (said))))))
+      (assert-true (= (guard-awareness (play-unit-guard P 0)) booth-aware))
+      ;; the fail line once
+      (assert-equal 1 (length (filter (lambda (e) (equal? e '(patrol . fail))) (said)))))))

@@ -48,7 +48,7 @@
     "That eye on your deck is you, as Gibson sees you. Keep it dark."
     "Good. In there you're nobody. Next door."
     "")
-  (sound (2 3 4) 8.8 4.0 0.0 (through never: suspicious)
+  (sound (2 3 4 5) 8.8 4.0 0.0 (through never: suspicious)
     "Gibson's units hear marble from a room away. Carpet, they barely hear at all. Hold Shift to sneak."
     "Quiet as a cat. Keep your feet soft in there."
     "It heard you. Softer on the hard floors. Sneak, or keep to the carpet.")
