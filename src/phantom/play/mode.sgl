@@ -42,7 +42,8 @@
           play-press! play-mode-set-dev! play-mode-sound-feed
           play-hold? play-after-tick! play-frame! play-hud!
           play-held! play-mode-devices play-mode-deck play-mode-terminal
-          play-mode-practice? play-mode-crash play-mode-lesson play-mode-practice-done?)
+          play-mode-practice? play-mode-crash play-mode-lesson play-mode-practice-done?
+          play-sounding)
 
   (begin
 
@@ -257,12 +258,13 @@
                            ;; placed events pass through the rooms to you like the guard
                            (list (car e) (cadr e) (caddr e) 1.0 #f))
                          (play-take-events! *core*))
-                    (sounding w))))))
+                    (play-sounding *core* w))))))
 
-    ;; The devices sounding now, each with the path from it to you.
-    (define (sounding w)
-      (let* ((data (play-data *core*)) (dv (play-devices-state *core*)) (h (play-hearing *core*))
-             (ds (play-devices data)) (you (play-runner-room *core*)))
+    ;; The devices sounding now in the play core, each with the path from it
+    ;; to you at walker w (the feed's sounding list; tests call it too).
+    (define (play-sounding core w)
+      (let* ((data (play-data core)) (dv (play-devices-state core)) (h (play-hearing core))
+             (ds (play-devices data)) (you (play-runner-room core)))
         (let loop ((i (- (vector-length ds) 1)) (acc '()))
           (if (< i 0)
               acc
@@ -274,7 +276,7 @@
                             (cons (list (device-id d) (device-kind d) (device-x d) (device-y d)
                                         (hear-gain h) (hear-muffled? h) (hear-path-m h)
                                         (and (eq? (device-kind d) 'camera)
-                                             (if (eq? s 'alarmed) 1.0 (play-camera-awareness *core* i))))
+                                             (if (eq? s 'alarmed) 1.0 (play-camera-awareness core i))))
                                   acc)))
                     (loop (- i 1) acc)))))))
 

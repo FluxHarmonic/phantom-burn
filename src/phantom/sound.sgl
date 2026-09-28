@@ -413,7 +413,11 @@
     ;; list is not played again (its cycle already playing finishes). Slot 30:
     ;; ((id . seconds-to-its-next-cycle) ...).
     (define LOOP-S 3.0)
-    (define DEVICE-GAIN 1.0)
+    ;; each loop's gain: the printer's loop is paper ticks and a low motor
+    ;; (RMS 0.027 against the phone's 0.046), and under the music it went
+    ;; unheard (David, 2026-09-28: "the printer did not make a noise"); +6 dB
+    ;; puts it a little above the phone's ring where you command it from
+    (define (device-gain kind) (case kind ((printer) 2.0) (else 1.0)))
     (define (device-loop-key kind)
       (case kind
         ((phone) '(event device-phone-ring))
@@ -430,7 +434,7 @@
                    (if (> left 0.0)
                        (cons id left)
                        (let ((sp (placed s (list-ref d 2) (list-ref d 3) (list-ref d 4) (list-ref d 6))))
-                         (play! s (device-loop-key (list-ref d 1)) (* DEVICE-GAIN (car sp)) (cdr sp))
+                         (play! s (device-loop-key (list-ref d 1)) (* (device-gain (list-ref d 1)) (car sp)) (cdr sp))
                          (cons id (+ left LOOP-S))))))
                ds))))
     (define (sound-device-loops s) (vector-ref s 30))

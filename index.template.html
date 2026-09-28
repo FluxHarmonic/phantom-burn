@@ -161,6 +161,8 @@
     var flowQuery = params.get("play") !== "0" && !params.has("title") &&
       !["play", "title", "floor", "view", "shot", "card", "hud", "trace", "auto"].some(function (k) { return params.has(k); });
     var practiced = (function () { try { return params.has("practiced") || localStorage.getItem("phantomburn.practiced") === "1"; } catch (e) { return params.has("practiced"); } })();
+    // the loaded floor's best (Phantom 0.1): "SECS_INCIDENTS", or ""
+    var bestOf = function (f) { try { return (localStorage.getItem("phantomburn.best." + f) || "").replace(/[^0-9_]/g, ""); } catch (e) { return ""; } };
     var go = (params.get("go") || "").replace(/[^A-Za-z0-9_-]/g, "");
     var floor = (params.get("floor") || go || (params.has("title") ? "root-room" : (flowQuery && !practiced ? "sim" : "14")))
       .replace(/[^A-Za-z0-9_-]/g, "");
@@ -228,6 +230,20 @@
         }
         // practice finished: INFILTRATE is the default from now on
         if (line === "phantom-burn: practice done") { try { localStorage.setItem("phantomburn.practiced", "1"); } catch (e) { /* private window */ } }
+        // a floor finished (Phantom 0.1): remember it, the best time and the
+        // fewest incidents (localStorage phantomburn.best.FLOOR = "SECS_INCIDENTS")
+        if (line.indexOf("phantom-burn: floor-done ") === 0) {
+          var fd = line.slice("phantom-burn: floor-done ".length).split(" ");
+          var fkey = "phantomburn.best." + (fd[0] || "").replace(/[^A-Za-z0-9_-]/g, "");
+          var fs2 = parseInt(fd[1], 10), fi = parseInt(fd[2], 10);
+          if (!isNaN(fs2) && !isNaN(fi)) {
+            try {
+              var was = (localStorage.getItem(fkey) || "").split("_").map(function (v) { return parseInt(v, 10); });
+              if (was.length === 2 && !isNaN(was[0]) && !isNaN(was[1])) { fs2 = Math.min(fs2, was[0]); fi = Math.min(fi, was[1]); }
+              localStorage.setItem(fkey, fs2 + "_" + fi);
+            } catch (e) { /* private window */ }
+          }
+        }
         log1.apply(null, arguments);
       };
     })();
@@ -273,7 +289,8 @@
       if (app.ready && app.ready.then) app.ready.then(function () { status.textContent = ""; });
       var booted = app.ready && app.ready.then ? app.ready : Promise.resolve();
       booted.then(function () {
-        app.dispatch("params", location.search.replace(/^\?/, "") + (flow ? "&flow=1" : "") + (practiced ? "&practiced=1" : ""));
+        var best = bestOf(floor);
+        app.dispatch("params", location.search.replace(/^\?/, "") + (flow ? "&flow=1" : "") + (practiced ? "&practiced=1" : "") + (best && !params.has("best") ? "&best=" + best : ""));
         app.dispatch("floor", floor);
         app.dispatch("dpr", String(window.devicePixelRatio || 1));
         window.addEventListener("resize", function () { app.dispatch("dpr", String(window.devicePixelRatio || 1)); });
@@ -296,9 +313,9 @@
             // PRACTICE's bed, the sim's air in place of the building's hum
             .concat(["bed-sim"])
             .forEach(function (name) {
-              // David swaps the blip and the sim's bed by ear: ?blip=a|b|c, ?bed=a|b
-              // (A by default: the two-note chirp, the soft tone with a fan)
-              var blip = ({a: 1, b: 1, c: 1})[params.get("blip")] ? params.get("blip") : "a";
+              // David swaps the blip and the sim's bed by ear: ?blip=a|b|c, ?bed=a|b (defaults C and A, his picks)
+              // (David, 2026-09-28: blip C, the trill; bed A, the soft tone with a fan)
+              var blip = ({a: 1, b: 1, c: 1})[params.get("blip")] ? params.get("blip") : "c";   // David's pick: C, the trill
               var bed = ({a: 1, b: 1})[params.get("bed")] ? params.get("bed") : "a";
               var file = name === "event-crash" ? "crash-blip-" + blip : name === "bed-sim" ? "bed-sim-" + bed : name;
               fetch("assets/tunes/" + file + ".cts").then(function (r) {

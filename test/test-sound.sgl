@@ -18,7 +18,10 @@
         (phantom sound sections)
         (phantom sound)
         (motif tune)
-        (motif tune player))
+        (motif tune player)
+        ;; the printer's loop, commanded from the deck on floor 14 (Phantom 0.1)
+        (phantom soup) (phantom walker)
+        (phantom play data) (phantom play core) (phantom play devices) (phantom play mode))
 
 (define RATE 32000)
 (define HEAT-TRACE "music-heat-trace")
@@ -681,3 +684,49 @@
                       (loop (+ i 1)))))
                 '(0 1 3))
       (assert-equal 0 stings))))
+
+;; --- Phantom 0.1: the printer, commanded from the deck, is heard ------------------------
+;; David (2026-09-28): "The printer did not make a noise when I used the deck
+;; on it, but it did attract the robot." Through the real game: aim the deck
+;; at floor 14's printer from the print room's door, hold until it runs, take
+;; the mode's sounding list, and feed it to the sound. The printer's loop must
+;; play at once, and sound at least as loud there as the phone's ring would.
+(define DIR14 "assets/floors/14/")
+(define C14 (pbc1->collision (read-file-bytes (string-append DIR14 "collide"))))
+(define INFO14 (floor-info-from-string (read-file-string (string-append DIR14 "floor.sexp"))))
+(define DATA14 (play-data-from-string (read-file-string (string-append DIR14 "play.sexp"))))
+(test-group "the printer's loop, from the deck (Phantom 0.1)"
+  (test "the deck runs floor 14's printer; its loop plays at once, as loud where you stand as a phone's ring"
+    (let* ((p (play-reset! (make-play C14 DATA14 (cdr (assq 'circuits INFO14)))))
+           (on? (lambda (c) #t))
+           (i (device-index DATA14 'print-printer))
+           (d (vector-ref (play-devices DATA14) i))
+           (x 17.5) (y 7.0)
+           (dx (- (device-x d) x)) (dy (- (device-y d) y))
+           (w1 (make-walker x y 0.0 (atan (- dx) dy)))
+           (pitch (atan (- (+ (device-z d) 0.9) (walker-eye-z w1)) (sqrt (+ (* dx dx) (* dy dy)))))
+           (w (walker-step w1 (make-input 0.0 0.0 0.0 pitch #f #f #f 0) TICK C14))
+           (ran (let loop ((k 0))
+                  (and (< k 120)
+                       (let ((r (play-deck! p w #t on?)))
+                         (play-tick! p w on? 1.0 2.0)
+                         (if (and (pair? r) (eq? (car r) 'run)) r (loop (+ k 1))))))))
+      (assert-true (equal? ran (list 'run i 'print)))
+      (assert-true (eq? (devices-state (play-devices-state p) i) 'running))
+      (let* ((sounding (play-sounding p w))
+             (e (assq 'print-printer sounding))
+             (b (make-bank RATE (only-loader "event-device-printer" "event-device-phone-ring"))))
+        (assert-true (and e #t))
+        (let loop () (unless (bank-render! b 65536) (loop)))
+        (let* ((s (ready-sound (only-loader "event-device-printer")))
+               (you (list (walker-x w) (walker-y w) (walker-yaw w))))
+          (sound-frame! s (/ 1 60.0) you '() sounding)
+          (let* ((ev (assoc '(event device-printer) (sound-last-events s)))
+                 (gain (and ev (cadr ev)))
+                 (heard (and gain (* gain (rms (bank-sample b '(event device-printer))))))
+                 ;; a phone's ring from the same place: the same path, its own gain
+                 (atten (list-ref e 4)) (path-m (list-ref e 6))
+                 (placed (* atten (if (<= path-m 2.0) 1.0 (/ 2.0 path-m))))
+                 (ring (* placed (rms (bank-sample b '(event device-phone-ring))))))
+            (display (list 'printer-heard heard 'gain gain 'a-ring-there ring)) (newline)
+            (assert-true (and heard (>= heard ring)))))))))
