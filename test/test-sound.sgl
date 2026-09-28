@@ -298,7 +298,7 @@
       (assert-true (near? (music-lift s) 1.0 1e-9))))
   (test "a new music rate reopens the player in calm (?rate on the web)"
     (let* ((s (ready-sound (only-loader MUSIC-TUNE))) (old (vector-ref s 13)))
-      (sound-set-music-rate! s 28000)
+      (sound-set-music-rate! s 32000)   ; a rate other than MUSIC-RATE (28000): the same one is a no-op
       (assert-true (sound-music-playing? s))
       (assert-false (eq? old (vector-ref s 13)))
       (assert-equal '(calm) (music-walk s '((60 0))))))

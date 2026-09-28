@@ -134,7 +134,7 @@
   //     SOUND-TUNES) as ("tune", "NAME\nTEXT"); every user gesture as
   //     ("gesture", TYPE), since a browser starts audio only inside one; the
   //     AudioContext at 44100 Hz (the game renders its one-shots at that rate;
-  //     the music renders at 24 kHz and the sink upsamples it). ?mute=1: no sound.
+  //     the music renders at 28 kHz, ?rate=24|28|32, and the sink upsamples it). ?mute=1: no sound.
   //   window.phantomDispatch("replay", SCRIPT): gate 5's driver hands the game
   //     a replay script ((phantom floor replay)'s text form); the game prints
   //     "phantom-burn: replay LINE" per tick, then "phantom-burn: replay-done N".
