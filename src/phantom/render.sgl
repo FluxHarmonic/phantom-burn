@@ -44,7 +44,7 @@
           render-scene! render-make-world-mesh render-draw-world-mesh render-title-scene!
           render-draw-floor! render-floor-kind render-floor-info
           render-set-extra-draw! render-draw-object! render-hide-part! render-part-hidden?
-          render-set-cone! render-cone-ids render-sim? render-force-sim!
+          render-set-cone! render-cone-ids render-sim? render-force-sim! render-set-torch!
           render-load-guard! render-guard-ready? render-guard-parts render-draw-guard!
           make-camera camera-set!)
 
@@ -126,6 +126,11 @@ uniform vec4 eye;           // xyz camera, w fog distance
 uniform vec4 cl[8];         // per circuit index: rgb x level x on; a: on
 uniform vec4 ambient;
 uniform vec4 retro;
+uniform vec4 torch_pos;     // the patrol's flashlight: xyz the lamp, w its range (0: off)
+uniform vec4 torch_dir;     // xyz the beam, w the cosine of the cone's half angle
+uniform vec4 torch_box;     // the lamp's room (its group): x0 y0 x1 y1 ...
+uniform vec4 torch_col;     // rgb its colour x strength; a unused
+uniform vec4 torch_zs;      // ... and its floor z0 (x) and ceiling z1 (y)
 in vec3 position;
 in vec2 uv;
 in vec3 normal;
@@ -141,6 +146,21 @@ void main() {
   vec3 lit = ambient.rgb
     + light.x * cl[int(circuit.x)].rgb + light.y * cl[int(circuit.y)].rgb
     + light.z * cl[int(circuit.z)].rgb + light.w * cl[int(circuit.w)].rgb;
+  // the flashlight (Phantom 0.1): only surfaces of the lamp's room, a point
+  // nudged off each along its normal (a wall's far face falls outside), that
+  // face the lamp, in its cone and range: no light through walls
+  if (torch_pos.w > 0.0) {
+    vec3 q = position + normal * 0.05;
+    vec3 d = position - torch_pos.xyz;
+    float r = length(d);
+    if (q.x >= torch_box.x && q.x <= torch_box.z && q.y >= torch_box.y && q.y <= torch_box.w
+        && q.z >= torch_zs.x && q.z <= torch_zs.y && r < torch_pos.w && r > 0.001) {
+      vec3 u = d / r;
+      float cone = smoothstep(torch_dir.w, mix(torch_dir.w, 1.0, 0.4), dot(u, torch_dir.xyz));
+      float face = max(0.0, dot(normal, -u));
+      lit += torch_col.rgb * cone * face * (1.0 - r * r / (torch_pos.w * torch_pos.w));
+    }
+  }
   int tag = int(emission.a * 255.0 + 0.5);
   float glow = tag == 0 ? 0.0 : (tag >= 255 ? 1.0 : cl[clamp(tag - 128, 0, 7)].a);
   v_color = mix(color.rgb * lit, emission.rgb, glow);
@@ -324,6 +344,24 @@ void main() {
                                               (list 0.0 0.0 0.0 0.0))
                                           acc)))))))
               (for-each (lambda (p) (set-pipeline-uniform! p 'cl cl)) (list *c-opaque* *c-glass* *sim-pipe*)))))))
+    ;; The patrol's flashlight (Phantom 0.1): #f off, else (x y z dx dy dz cos
+    ;; range box z0 z1), box (x0 y0 x1 y1) the lamp's room group's extent.
+    (define TORCH-COLOUR '(1.0 0.62 0.25))   ; orange (design section 4)
+    (define TORCH-STRENGTH 3.0)
+    (define (render-set-torch! t)
+      (when *c-opaque*
+        (for-each
+         (lambda (p)
+           (if (not t)
+               (set-pipeline-uniform! p 'torch_pos '(0.0 0.0 0.0 0.0))
+               (begin
+                 (set-pipeline-uniform! p 'torch_pos (list (list-ref t 0) (list-ref t 1) (list-ref t 2) (list-ref t 7)))
+                 (set-pipeline-uniform! p 'torch_dir (list (list-ref t 3) (list-ref t 4) (list-ref t 5) (list-ref t 6)))
+                 (set-pipeline-uniform! p 'torch_box (list-ref t 8))
+                 (set-pipeline-uniform! p 'torch_zs (list (list-ref t 9) (list-ref t 10) 0.0 0.0))
+                 (set-pipeline-uniform! p 'torch_col (append (map (lambda (c) (* TORCH-STRENGTH c)) TORCH-COLOUR) '(1.0))))))
+         (list *c-opaque* *c-glass*))))
+
     ;; The black-level lift: with it, the world fogs to black and black
     ;; then maps to C-BG; without it, the world fogs to C-BG and anything
     ;; darker than C-BG snaps to it in the dither.
@@ -554,6 +592,7 @@ void main() {
       (set! *sim* (or *force-sim* (let ((l (assq 'look info))) (and l (pair? (cdr l)) (eq? (cadr l) 'sim)))))
       (if *sim* (build-wire! info) (begin (when *wire* (mesh-free! *wire*)) (set! *wire* #f)))
       (set! *hidden* '())
+      (render-set-torch! #f)          ; no flashlight until a patrol lights one
       (model-turn!)
       (set! *circuits* (cdr (assq 'circuits info)))
       (when *floor* (mesh-free! *floor*))

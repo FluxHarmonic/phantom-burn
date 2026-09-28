@@ -31,6 +31,7 @@
           play-data play-guard play-guard-world
           play-light play-light-01 play-visibility play-shape play-light-state
           play-badge? play-learned-tier play-way-out play-near-lift? play-lift-tier play-best-after
+          play-torch TORCH-RANGE TORCH-COS TORCH-LIGHT
           play-outcome play-ticks play-start-walker
           play-near-exit? GUARD-START-LEG PICKUP-REACH EXIT-REACH
           play-hearing play-take-steps! play-last-heard play-runner-room
@@ -92,7 +93,10 @@
     ;;  or #f. Only the badge (7) opens readers.
     ;;  41 the way out, once won: stairwell (the badge at the reader) or
     ;;  lift (the service lift, called with the deck), else #f
-    (define (play? p) (and (vector? p) (= (vector-length p) 42) (eq? (vector-ref p 0) 'play)))
+    ;;  42 the patrol's flashlight (Phantom 0.1, item 4): #(on? x y z dx dy
+    ;;  dz), the lamp and its unit beam, from the guard's pose at the tick's start
+    (define (play? p) (and (vector? p) (= (vector-length p) 43) (eq? (vector-ref p 0) 'play)))
+    (define (play-torch p) (vector-ref p 42))
     (define (play-way-out p) (vector-ref p 41))
     ;; within reach of the service lift's call point (by your last place)
     (define (play-near-lift? p)
@@ -179,7 +183,7 @@
                         (make-devices data) (make-deck) (device-approaches data gw) 0.0
                         (make-vector (device-count data) 0.0) (camera-views data)
                         (let ((ts (terminal-targets data))) (vector #f 0 -1 0.0 '(idle) 0.0 ts -1 ts)) #f
-                        units 0 #f #f #f)))
+                        units 0 #f #f #f (vector #f 0.0 0.0 0.0 0.0 1.0 0.0))))
         p))
 
     ;; PRACTICE: a capture in the sim resets only its room (D38). The runner
@@ -256,6 +260,7 @@
       (vector-set! p 36 #f)
       (vector-set! p 40 #f)
       (vector-set! p 41 #f)
+      (vector-set! p 42 (vector #f 0.0 0.0 0.0 0.0 1.0 0.0))
       p)
 
     ;; The path from the guard to you (for playback: how much of the guard
@@ -296,6 +301,57 @@
                      (when (vector-ref p 23) (guard-hear! g level (+ (vector-ref p 20) (vector-ref p 32)) x y z))))))
              events)))))
 
+    ;; --- the patrol's flashlight (design section 4: "It carries a flashlight
+    ;; into dark zones"; Phantom 0.1, item 4) ---------------------------------------
+    ;; The unit's lamp is on where the light at its feet is dark, and while it
+    ;; searches or hunts. It points where the unit faces, a little down, and
+    ;; sweeps from side to side while it searches. In its cone, in range and
+    ;; with nothing between the lamp and you, it lights you: brightest near,
+    ;; nothing at its range.
+    (define TORCH-DARK 0.25)        ; the unit's light-01 under which its lamp goes on
+    (define TORCH-RANGE 8.0)        ; m
+    (define TORCH-COS 0.94)         ; the cosine of the cone's half angle (about 20 degrees)
+    (define TORCH-LIGHT 0.8)        ; light-01 it gives you at the lamp, falling to 0 at its range
+    (define TORCH-HEIGHT 1.35)      ; m, the lamp above the unit's feet
+    (define TORCH-PITCH -0.3)       ; rad, down: the beam meets the floor about 4.5 m ahead
+    (define TORCH-SWEEP 0.45)       ; rad either side while searching
+    (define TORCH-SWEEP-HZ 0.35)
+
+    (define (torch! p ls data)
+      (let* ((g (vector-ref p 3)) (t (vector-ref p 42))
+             (gx (guard-x g)) (gy (guard-y g)) (gz (guard-z g))
+             (st (guard-state g))
+             (dark (< (light-01 (light-at ls data gx gy gz)) TORCH-DARK))
+             ;; not in the sim (PRACTICE's rooms are tuned without it)
+             (on (and (not (vector-ref p 39)) (= (lesson-count data) 0) (or dark (>= st SEARCHING))))
+             (fx (guard-fx g)) (fy (guard-fy g))
+             (a (if (= st SEARCHING)
+                    (* TORCH-SWEEP (dsin (* TAU TORCH-SWEEP-HZ TICK (vector-ref p 9))))
+                    0.0))
+             (ca (dcos a)) (sa (dsin a))
+             ;; the facing turned by a (anticlockwise), then pitched down
+             (hx (- (* fx ca) (* fy sa))) (hy (+ (* fx sa) (* fy ca)))
+             (hl (let ((l (sqrt (+ (* hx hx) (* hy hy))))) (if (> l 1e-6) l 1.0)))
+             (cp (dcos TORCH-PITCH)) (sp (dsin TORCH-PITCH)))
+        (vector-set! t 0 on)
+        (vector-set! t 1 gx) (vector-set! t 2 gy) (vector-set! t 3 (+ gz TORCH-HEIGHT))
+        (vector-set! t 4 (* cp (/ hx hl))) (vector-set! t 5 (* cp (/ hy hl))) (vector-set! t 6 sp)))
+
+    ;; The flashlight's light-01 on you at (x y) with your chest at cz: 0 out
+    ;; of its cone, its range or its sight.
+    (define (torch-on-you p x y cz)
+      (let ((t (vector-ref p 42)))
+        (if (not (vector-ref t 0))
+            0.0
+            (let* ((lx (vector-ref t 1)) (ly (vector-ref t 2)) (lz (vector-ref t 3))
+                   (dx (- x lx)) (dy (- y ly)) (dz (- cz lz))
+                   (d (sqrt (+ (* dx dx) (* dy dy) (* dz dz)))))
+              (if (or (>= d TORCH-RANGE) (< d 1e-6)
+                      (< (/ (+ (* dx (vector-ref t 4)) (* dy (vector-ref t 5)) (* dz (vector-ref t 6))) d) TORCH-COS)
+                      (not (sight-clear? (vector-ref (vector-ref p 2) 1) (play-glass (vector-ref p 1)) lx ly lz x y cz)))
+                  0.0
+                  (* TORCH-LIGHT (- 1.0 (/ (* d d) (* TORCH-RANGE TORCH-RANGE)))))))))
+
     ;; The walker at the floor's arrival spot, facing as the floor says.
     (define (play-start-walker p coll)
       (let* ((s (play-start (vector-ref p 1)))
@@ -311,8 +367,12 @@
                  (x (walker-x w)) (y (walker-y w)) (z (walker-z w))
                  (_ (light-levels! ls (vector-ref p 6) on? night pools))
                  (light (light-at ls data x y z))
-                 ;; at the terminal its screen lights you (design §3)
-                 (l01 (if (vector-ref (vector-ref p 35) 0) (max TERMINAL-LIGHT (light-01 light)) (light-01 light)))
+                 ;; the patrol's flashlight, from its pose now (Phantom 0.1)
+                 (_ (torch! p ls data))
+                 (lamp (torch-on-you p x y (+ z (* 0.55 (walker-height w)))))
+                 ;; at the terminal its screen lights you (design §3); in the
+                 ;; flashlight's beam, it does
+                 (l01 (max lamp (if (vector-ref (vector-ref p 35) 0) (max TERMINAL-LIGHT (light-01 light)) (light-01 light))))
                  (shape (* (stance-factor (walker-crouching? w)) (motion-factor (walker-speed w))))
                  (vis (* l01 shape))
                  (g (vector-ref p 3)))

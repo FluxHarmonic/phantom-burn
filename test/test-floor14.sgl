@@ -232,3 +232,49 @@
     (assert-true (equal? (play-best-after #f 200 3) '(200 . 3)))
     (assert-true (equal? (play-best-after '(150 . 5) 200 3) '(150 . 3)))
     (assert-true (equal? (play-best-after '(150 . 0) 120 2) '(120 . 0)))))
+
+;;; The patrol's flashlight (Phantom 0.1, item 4; design section 4: "It
+;;; carries a flashlight into dark zones"). Its lamp is on where the light at
+;;; its feet is dark and while it searches; in its cone, in range and in
+;;; sight, it lights you; it never lights you through a wall; searching, it sweeps.
+
+(define DARK-ON (lambda (c) (memq c '(emergency screens city))))   ; every switchable light off
+;; a play whose unit stands at (gx gy) facing (fx fy), you at (x y): your light-01 after one tick
+(define (lit-by-torch on? gx gy fx fy x y)
+  (let ((p (fresh14)) (w (stand x y)))
+    (guard-place! (play-guard p) gx gy fx fy)
+    (play-tick! p w on? 1.0 2.0)
+    (list (play-light-01 p) (vector-ref (play-torch p) 0))))
+
+(test-group "the patrol's flashlight"
+  (test "in the lit lobby, calm, its lamp is off"
+    (let ((r (lit-by-torch ALL-ON 4.0 5.0 1.0 0.0 9.0 5.0)))
+      (assert-false (cadr r))))
+  (test "with the lobby dark its lamp is on, and it lights you in its beam; out of the beam you stay dark"
+    (let ((in (lit-by-torch DARK-ON 4.0 5.0 1.0 0.0 9.0 5.0))
+          (behind (lit-by-torch DARK-ON 4.0 5.0 -1.0 0.0 9.0 5.0)))
+      (display (list 'torch-in in 'torch-behind behind)) (newline)
+      (assert-true (cadr in))
+      (assert-true (> (car in) 0.4))
+      (assert-true (< (car behind) 0.2))))
+  (test "it never lights you through a wall: the corridor's lamp, you behind the print room's wall"
+    (let ((through (lit-by-torch DARK-ON 16.5 6.2 0.0 1.0 16.5 9.5)))
+      (display (list 'torch-through-wall through)) (newline)
+      (assert-true (cadr through))
+      (assert-true (< (car through) 0.2))))
+  (test "searching, its beam sweeps from side to side"
+    (let* ((p (fresh14)) (w (stand 1.0 8.0)) (g (play-guard p)))
+      (guard-place! g 6.0 5.0 1.0 0.0)
+      (guard-notice! g 0.65 9.0 5.0 0.0)
+      (let loop ((i 0) (lo 1.0) (hi -1.0))
+        (if (< i 240)
+            (begin (play-tick! p w ALL-ON 1.0 2.0)
+                   (let* ((t (play-torch p)) (a (atan (vector-ref t 5) (vector-ref t 4)))
+                          (rel (- a (atan (guard-fy g) (guard-fx g))))
+                          (rel (cond ((> rel PI) (- rel TAU)) ((< rel (- PI)) (+ rel TAU)) (else rel))))
+                     (if (and (vector-ref t 0) (= (guard-state g) SEARCHING))
+                         (loop (+ i 1) (min lo rel) (max hi rel))
+                         (loop (+ i 1) lo hi))))
+            (begin (display (list 'sweep lo hi)) (newline)
+                   (assert-true (< lo -0.3))
+                   (assert-true (> hi 0.3))))))))

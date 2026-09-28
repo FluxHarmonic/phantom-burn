@@ -102,6 +102,7 @@
         (set! *coll* coll)
         (set! *place* place?)
         (set! *core* (play-reset! (make-play coll data (cdr (assq 'circuits info)))))
+        (set! *torch-boxes* (torch-boxes data info))
         ;; PRACTICE: the sim's lessons (play.sexp carries them)
         (set! *practice* (and (> (lesson-count data) 0) (make-practice data)))
         (render-set-extra-draw! draw-guard!)
@@ -399,6 +400,51 @@
 
     (define (lerp a b t) (+ a (* t (- b a))))
 
+    ;; The patrol's flashlight in the renderer (Phantom 0.1): each room's
+    ;; group's extent, #((x0 y0 x1 y1) z0 z1) by room index, from floor.sexp's
+    ;; outlines (the lamp lights only its own room group's surfaces).
+    (define *torch-boxes* (vector))
+    (define (torch-boxes data info)
+      (let* ((rs (play-rooms data)) (n (vector-length rs))
+             (outs (let ((e (assq 'outlines info))) (if e (cdr e) '())))
+             (group-of (lambda (name)
+                         (let loop ((i 0))
+                           (cond ((>= i n) #f)
+                                 ((eq? (room-name (vector-ref rs i)) name) (room-group (vector-ref rs i)))
+                                 (else (loop (+ i 1)))))))
+             (box-of (lambda (gr)
+                       (let loop ((os outs) (x0 1e9) (y0 1e9) (x1 -1e9) (y1 -1e9))
+                         (cond ((null? os) (list x0 y0 x1 y1))
+                               ((eqv? (group-of (car (car os))) gr)
+                                (let ((xs (map car (cddr (car os)))) (ys (map cadr (cddr (car os)))))
+                                  (loop (cdr os) (min x0 (apply min xs)) (min y0 (apply min ys))
+                                        (max x1 (apply max xs)) (max y1 (apply max ys)))))
+                               (else (loop (cdr os) x0 y0 x1 y1))))))
+             (zs-of (lambda (gr)
+                      (let loop ((i 0) (z0 1e9) (z1 -1e9))
+                        (cond ((>= i n) (cons z0 z1))
+                              ((= (room-group (vector-ref rs i)) gr)
+                               (loop (+ i 1) (min z0 (room-floor (vector-ref rs i))) (max z1 (room-ceiling (vector-ref rs i)))))
+                              (else (loop (+ i 1) z0 z1)))))))
+        (let ((v (make-vector n #f)))
+          (let loop ((i 0))
+            (when (< i n)
+              (let* ((gr (room-group (vector-ref rs i))) (zs (zs-of gr)))
+                (vector-set! v i (vector (box-of gr) (car zs) (cdr zs))))
+              (loop (+ i 1))))
+          v)))
+
+    ;; The flashlight's uniforms this frame: the lamp at the drawn body, its
+    ;; beam and room as the core has them.
+    (define (torch-frame!)
+      (let* ((t (and *core* (play-torch *core*)))
+             (g (and t (play-guard *core*)))
+             (r (and t (vector-ref t 0) (room-at (play-data *core*) (guard-x g) (guard-y g) (guard-z g))))
+             (b (and r (>= r 0) (< r (vector-length *torch-boxes*)) (vector-ref *torch-boxes* r))))
+        (render-set-torch!
+         (and b (list *pose-x* *pose-y* (vector-ref t 3) (vector-ref t 4) (vector-ref t 5) (vector-ref t 6)
+                      TORCH-COS TORCH-RANGE (vector-ref b 0) (vector-ref b 1) (vector-ref b 2))))))
+
     (define (play-frame! alpha cam)
       (set! *cam* cam)
       ;; the devices' LEDs, alarm and blinds, on changes only (the shell's)
@@ -412,7 +458,8 @@
           (set! *pose-y* (lerp (guard-prev-y g) (guard-y g) alpha))
           (set! *pose-fx* (if (> m 1e-6) (/ fx m) 0.0))
           (set! *pose-fy* (if (> m 1e-6) (/ fy m) 1.0))
-          (pose! *model* *pose-x* *pose-y* (guard-z g) *pose-fx* *pose-fy* 0.0 0.0 0.0))))
+          (pose! *model* *pose-x* *pose-y* (guard-z g) *pose-fx* *pose-fy* 0.0 0.0 0.0)
+          (torch-frame!))))
 
     ;; A column-major model matrix: the body's frame at (x y z) facing
     ;; (fx fy), offset ox along its right, and turned by angle a about its

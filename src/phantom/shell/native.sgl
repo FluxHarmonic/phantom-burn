@@ -59,6 +59,8 @@
           (phantom deck preview)
           (phantom title)
           (phantom play mode)
+          (only (phantom play core) play-guard)
+          (only (phantom guard guard) guard-place!)
           (phantom sound game))
 
   (export native-main)
@@ -186,6 +188,13 @@
         (let ((b (find (lambda (e) (equal? (cadr e) (floor-name))) (read-save))))
           (play-mode-set-best! (and b (cons (caddr b) (cadddr b)))))
         (play-mode-set-on-record! (lambda (secs incidents) (record-best! (floor-name) secs incidents)))
+        ;; --place-guard X,Y,FX,FY: the unit put there, facing so (for looking
+        ;; at it and its flashlight; it walks back to its route from there)
+        (let ((g (arg-value args "--place-guard" #f)))
+          (when g
+            (let ((v (numbers g)))
+              (when (and (= (length v) 4) (not (memq #f v)))
+                (guard-place! (play-guard (play-mode-core)) (car v) (cadr v) (caddr v) (cadddr v))))))
         ;; --end-card SECS: straight to the 0.1 end card (for looking at it)
         (let ((e (arg-value args "--end-card" #f)))
           (when e (play-mode-show-end! (or (string->number e) 0))))
