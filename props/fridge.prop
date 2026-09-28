@@ -1,0 +1,11 @@
+;; props/fridge.prop - the kitchen's fridge (floor 14): a tall steel box
+;; with its door seam, handle and a small status LED. Its hum is the
+;; kitchen's sound (design section 4). Origin on the floor under its
+;; middle; the door faces -y.
+(prop fridge
+  parts: ((box  size: (0.7 0.7 1.8)     at: (0 0 0.9)          material: steel)
+          (box  size: (0.66 0.01 0.02)  at: (0 -0.355 1.2)     material: dark)     ; the freezer's seam
+          (box  size: (0.03 0.03 0.5)   at: (0.28 -0.37 0.85)  material: plastic)  ; the fridge's handle
+          (box  size: (0.03 0.03 0.25)  at: (0.28 -0.37 1.45)  material: plastic)  ; the freezer's handle
+          (box  size: (0.02 0.012 0.02) at: (-0.25 -0.356 1.62) material: led))
+  hides: standing)

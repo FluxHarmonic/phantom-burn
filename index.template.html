@@ -99,7 +99,7 @@
   // Phantom Burn's page. The generic loader (sigil-web-app.js) boots the
   // wasm, forwards keydown/keyup and runs the frame loop. This page adds:
   //   the query, sent to the game as ("params", QUERY) before anything loads:
-  //     ?floor=NAME   a compiled floor under assets/floors/NAME/ (default 14-slice),
+  //     ?floor=NAME   a compiled floor under assets/floors/NAME/ (default 14),
   //                   or stand-in (G0's Blender export, assets/stand-in/)
   //     ?view=K       start at the floor's view K (0 arrival, 1 overlook, 2 office;
   //                   the dark rooms: 3 lobby-dark, 4 office-night, 5 corridor-dark)
@@ -162,7 +162,7 @@
       !["play", "title", "floor", "view", "shot", "card", "hud", "trace", "auto"].some(function (k) { return params.has(k); });
     var practiced = (function () { try { return params.has("practiced") || localStorage.getItem("phantomburn.practiced") === "1"; } catch (e) { return params.has("practiced"); } })();
     var go = (params.get("go") || "").replace(/[^A-Za-z0-9_-]/g, "");
-    var floor = (params.get("floor") || go || (params.has("title") ? "root-room" : (flowQuery && !practiced ? "sim" : "14-slice")))
+    var floor = (params.get("floor") || go || (params.has("title") ? "root-room" : (flowQuery && !practiced ? "sim" : "14")))
       .replace(/[^A-Za-z0-9_-]/g, "");
     var dir = floor === "stand-in" ? "assets/stand-in/" : "assets/floors/" + floor + "/";
     var collideFile = floor === "stand-in" ? "floor14.collide.b64" : "collide.b64";

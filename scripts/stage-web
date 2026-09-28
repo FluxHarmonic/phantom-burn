@@ -44,7 +44,7 @@ printf '%s' "$SLUG" | grep -Eqx '[a-z][a-z0-9-]{1,31}' || { say "REFUSED: the ga
 for f in index.html phantom-burn.wasm assets; do
   [ -e "$WEB/$f" ] || { say "REFUSED: $WEB/$f missing (build the web config, or point PHANTOM_WEB_DIR at a runner build)"; exit 1; }
 done
-[ -f "$WEB/assets/floors/14-slice/floor.sexp" ] || { say "REFUSED: $WEB has no compiled floor 14"; exit 1; }
+[ -f "$WEB/assets/floors/14/floor.sexp" ] || { say "REFUSED: $WEB has no compiled floor 14"; exit 1; }
 for f in index.html 404.html robots.txt _headers _redirects; do [ -f "site/$f" ] || { say "REFUSED: site/$f missing"; exit 1; }; done
 grep -c 'data-wasm="phantom-burn"' "$WEB/index.html" | grep -qx 1 || { say "REFUSED: $WEB/index.html does not say data-wasm=\"phantom-burn\" exactly once; the page changed shape"; exit 1; }
 

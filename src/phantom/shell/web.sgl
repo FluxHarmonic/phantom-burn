@@ -2,7 +2,7 @@
 ;;; requestAnimationFrame dispatch.
 ;;;
 ;;; At boot it fetches the floor's meshes and textures through the gles3
-;;; bridge, from assets/floors/FLOOR/ (a compiled floor; 14-slice by
+;;; bridge, from assets/floors/FLOOR/ (a compiled floor; 14 by
 ;;; default) or assets/stand-in/ (?floor=stand-in). The page fetches the
 ;;; collision and a compiled floor's floor.sexp and hands them over as
 ;;; strings, because the bridge has no fetch into a bytevector. The game
@@ -50,7 +50,7 @@
 
   (begin
 
-    (define *floor* "14-slice")
+    (define *floor* "14")
     (define *info* #f)           ; a compiled floor's floor.sexp datum
     (define *info-text* #f)
     (define *params* '())        ; ((key . value) ...) from the page's query
@@ -273,7 +273,7 @@
     ;; The page loads one floor behind the title (sim for a first-timer, else
     ;; 14); picking the other says "go FLOOR" and the page reloads with ?go=.
     (define MENU-ITEMS '("PRACTICE" "INFILTRATE"))
-    (define MENU-FLOORS '("sim" "14-slice"))
+    (define MENU-FLOORS '("sim" "14"))
     (define *menu-sel* 1)
     (define *tap* #f)                ; (x . y): a tap or click on the title, canvas pixels
     (define *going* #f)              ; asked the page for the other floor

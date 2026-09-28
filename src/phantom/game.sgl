@@ -220,9 +220,12 @@
              (main (filter (lambda (v) v) (list (named 'arrival) (named 'overlook)
                                                 (or (named 'into-office) (named 'office)))))
              (rest (filter (lambda (v) (not (memq (car v) '(arrival overlook office into-office)))) vs)))
-        ;; the dark views are floor 14's places: another floor (the sim) has
-        ;; only its own views, from 0
-        (if (null? main) vs (append main DARK-VIEWS rest))))
+        ;; the dark views are the slice's places (its office view says it is
+        ;; the slice): another floor (the sim, the whole floor 14) has only
+        ;; its own views, from 0
+        (if (or (null? main) (not (or (named 'into-office) (named 'office))))
+            vs
+            (append main DARK-VIEWS rest))))
     (define *views* STAND-IN-VIEWS)
     (define *surfaces* stand-in-surfaces)   ; the collision's surface tags, by index
 

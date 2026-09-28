@@ -1,0 +1,111 @@
+;; floors/14.floor - floor 14, the offices, whole (Phantom 0.1; design
+;; section 4, "One floor, concretely: 14"). The slice (floors/14-slice.floor)
+;; stays as the prototype's test floor; this is the floor INFILTRATE plays.
+;; The lobby, its mezzanine and stair are the slice's. East of them a
+;; straight corridor runs to the open plan: the print room and two glass
+;; meeting rooms on its north side, the server closet (off the lobby) and
+;; the FM office on its south, and the kitchen behind the open plan with the
+;; service lift. The duct runs over the corridor from the print room to the
+;; FM office, and still opens onto the mezzanine by its grate.
+;; Metres; x east, y north, z up. `phantom-burn --floor-check` checks it.
+(floor
+  level: 14
+  intent: "carpet and cover; the first time the building works for you"
+  tier-in: staff  tier-out: facilities
+  ambient: (hvac 0.3 buzz 0.2 city 0.4)
+  rooms:
+  ((lobby         corners: ((0 0) (12 0) (14 2) (14 10) (0 10))
+                  floor: 0    ceiling: 6.0  surface: marble  light: c2)
+   (mezzanine     corners: ((0 7) (12 7) (12 4) (14 4) (14 10) (0 10))
+                  floor: 3.0  ceiling: 6.0  over: lobby  surface: tile  light: c2  edge: glass-rail)
+   (corridor      corners: ((14 5.5) (28 5.5) (28 7.5) (14 7.5))
+                  floor: 0    ceiling: 2.8  surface: tile    light: c2)
+   (server-closet corners: ((14 2) (18 2) (18 5.5) (14 5.5))
+                  floor: 0    ceiling: 2.7  surface: raised  light: none)   ; the racks' LEDs, and a raised floor that booms
+   (print-room    corners: ((14 7.5) (19 7.5) (19 12) (14 12))
+                  floor: 0    ceiling: 2.7  surface: tile    light: c3)   ; the small rooms share c3 (the light grid carries six circuits)
+   (meeting-a     corners: ((19 7.5) (23.5 7.5) (23.5 12) (19 12))
+                  floor: 0    ceiling: 2.7  surface: carpet  light: none)   ; dark: the city through the window
+   (meeting-b     corners: ((23.5 7.5) (28 7.5) (28 12) (23.5 12))
+                  floor: 0    ceiling: 2.7  surface: carpet  light: none)
+   (fm-office     corners: ((22 1) (27 1) (27 5.5) (22 5.5))
+                  floor: 0    ceiling: 2.7  surface: carpet  light: c3)
+   (office        corners: ((28 5) (40 5) (40 14) (28 14))
+                  floor: 0    ceiling: 2.7  surface: carpet  light: c1)     ; the open plan
+   (kitchen       corners: ((30 0) (40 0) (40 5) (30 5))
+                  floor: 0    ceiling: 2.7  surface: tile    light: c1)   ; the open plan's circuit
+   (duct          corners: ((14 6) (23.5 6) (23.5 3) (24.5 3) (24.5 7) (16 7) (16 9.5) (15 9.5) (15 7) (14 7))
+                  floor: 3.0  ceiling: 4.0  over: (corridor print-room fm-office)  surface: duct  light: none  crouch-only: #t))
+  openings:
+  ((arch    between: (lobby corridor)          at: (14 6.5))
+   (door    between: (lobby server-closet)     at: (14 3.5))        ; in the lift camera's half of the lobby
+   (door    between: (corridor print-room)     at: (17.5 7.5))
+   (door    between: (corridor meeting-a)      at: (21.25 7.5))
+   (door    between: (corridor meeting-b)      at: (25.75 7.5))
+   (door    between: (corridor fm-office)      at: (26 5.5))
+   (arch    between: (corridor office)         at: (28 6.5))
+   (glass   between: (meeting-a meeting-b)     along: ((23.5 8) (23.5 11.5)))
+   (glass   between: (meeting-b office)        along: ((28 8) (28 11.5)))   ; the open plan sees in
+   (door    between: (office kitchen)          at: (35 5)  width: 1.2)
+   (grate   between: (mezzanine duct)          at: (14 6.5))
+   (hatch   between: (duct print-room)         at: (15.5 8.9))      ; over the filing cabinet
+   (hatch   between: (duct fm-office)          at: (24 3.6))        ; over the filing cabinet
+   (window  in: lobby      along: ((1 0) (11 0))      sill: 0.2  head: 5.8)
+   (window  in: meeting-a  along: ((19.5 12) (23 12))  sill: 0.9  head: 2.4)
+   (window  in: meeting-b  along: ((24 12) (27.5 12))  sill: 0.9  head: 2.4)
+   (window  in: office     along: ((29 14) (39 14))    sill: 0.9  head: 2.4)
+   (window  in: office     along: ((40 6) (40 13))     sill: 0.9  head: 2.4)
+   (exit    in: lobby  at: (3 10)  reader: facilities))       ; the stairwell door, under the mezzanine
+  stairs: ((from: lobby  to: mezzanine  start: (11 2)  end: (11 7)  width: 1.6  style: open))
+  lights: ((c1 level: 0.6)
+           (c2 level: 0.8 panel: (20 5.5) needs: facilities)   ; the lobby and corridor; the panel on the corridor's south wall
+           (c3 level: 0.3))
+  things: ((lifts   in: lobby    along: ((0 1) (0 6))      count: 3)
+           (lifts   in: kitchen  along: ((40 1) (40 3.5))  count: 1)   ; the service lift, behind the kitchen
+           ;; the patrol: the lift lobby, the corridor, the open plan, the kitchen
+           (guard   kind: patrol  route: ((2 2) (12.5 1.5) (21 6.5) (34 10) (36 2.5))  waits: (3 0 0 2 3))
+           ;; the open plan: two desk pods, two monitors left on
+           (desk    at: (31 9.6)    kind: office-desk)
+           (desk    at: (32.6 9.6)  kind: office-desk-off)
+           (desk    at: (31 10.4)   kind: office-desk-off  facing: 180)
+           (desk    at: (32.6 10.4) kind: office-desk-off  facing: 180)
+           (desk    at: (36.5 9.6)  kind: office-desk-off)
+           (desk    at: (38.1 9.6)  kind: office-desk-off)
+           (desk    at: (36.5 10.4) kind: office-desk-off  facing: 180)
+           (desk    at: (38.1 10.4) kind: office-desk      facing: 180)
+           ;; the meeting rooms' tables
+           (desk    at: (21.25 10.2) kind: office-desk-off)
+           (desk    at: (25.75 10.2) kind: office-desk-off)
+           ;; the print room
+           (cabinet at: (15.5 8.9)  kind: filing-cabinet  facing: 180)   ; under the hatch; climb it from the north
+           ;; the FM office
+           (desk    at: (25.4 3.0)  kind: office-desk)
+           (cabinet at: (24 3.6)    kind: filing-cabinet)                ; under the hatch; climb it from the south
+           (badge   on-desk: (24.9 2.75)  tier: facilities)
+           ;; the server closet
+           (prop    at: (17.5 3.0)  kind: server-rack  facing: 270)
+           (prop    at: (17.5 4.4)  kind: server-rack  facing: 270)
+           ;; the kitchen
+           (prop    at: (31 0.4)    kind: fridge           facing: 180)
+           (prop    at: (33.5 0.35) kind: kitchen-counter  facing: 180)
+           (prop    at: (35.6 0.35) kind: kitchen-counter  facing: 180)
+           ;; P3: the devices (topics/phantom-burn-device-api); tier: who may command them
+           (phone    id: meeting-phone   on-desk: (25.3 10.05))                   ; STAFF: rings, pulls the unit
+           (printer  id: print-printer   at: (18.6 10)  facing: 270)              ; STAFF: runs
+           (vent     id: corridor-vent   in: corridor  at: (19 6.0))              ; FACILITIES: masks your steps
+           (blinds   id: lobby-blinds    in: lobby  along: ((1 0) (11 0)))        ; FACILITIES: the city light
+           (terminal id: fm-terminal     on-desk: (25.9 2.8))                     ; the floor map, every allowed command
+           (camera   id: lift-camera     in: lobby  at: (0 3.5)  look: (8.17 0.76 -0.62)  fov: 55  range: 10))
+  views: ((establishing  at: (1 1 1.6)       look: (14 10 3))
+          (arrival       at: (1.3 1.3 1.6)   look: (10.0 7.2 2.2)   lens: 17)
+          (overlook      at: (4.2 9.3 4.6)   look: (7.0 -26.0 1.0)  lens: 19)
+          (open-plan     at: (29 6 1.6)      look: (38 12 1.0)      lens: 17)
+          (from-the-duct at: (21 6.5 3.4)    look: (24 3.6 2.7))
+          (print-room    at: (14.6 11.4 1.6) look: (18.6 8.0 1.0)   lens: 17)
+          (kitchen       at: (30.6 4.4 1.6)  look: (40 1.5 1.2)     lens: 17)
+          (fm-desk       at: (25.4 1.6 1.6)  look: (25.4 3.0 0.75)  lens: 24))
+  ;; gate 3 finds a route from start: to the exit, and each of these
+  routes: ((the-long-way   from: badge         avoid: (corridor))   ; the FM hatch, the duct, the grate, the mezzanine, the stairs
+           (the-print-room from: (17 10.5)     avoid: (corridor))   ; the print room's hatch, the same way out
+           (from-the-kitchen from: (36 2.5)))
+  start: (1 3))

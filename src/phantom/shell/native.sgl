@@ -19,7 +19,7 @@
 ;;; --trace prints a stats line every 120 frames (frame, CPU, world and post
 ;;; pass CPU, draws, allocations per frame); --auto walks forward, turning.
 ;;;
-;;; --floor names the floor's directory: by default assets/floors/14-slice,
+;;; --floor names the floor's directory: by default assets/floors/14,
 ;;; the floor compiler's floor 14 (floor.sgm, collide, floor.sexp, the
 ;;; textures, city.sgm; scripts/floor-import brings it in); assets/stand-in
 ;;; is G0's Blender export (floor14.sgm, floor14.collide). The floor reloads
@@ -78,7 +78,7 @@
                   (or (string->number (substring s (+ x-at 1) (string-length s))) 810))
             (cons 1440 810))))
 
-    (define *dir* "assets/floors/14-slice")
+    (define *dir* "assets/floors/14")
     (define (compiled?) (file-exists? (path "floor.sexp")))
     (define (path name) (string-append *dir* "/" name))
 

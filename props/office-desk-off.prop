@@ -1,0 +1,12 @@
+;; props/office-desk-off.prop - office-desk.prop with its monitor switched
+;; off (floor 14's open plan: two monitors are left on, the rest are dark).
+;; The same parts; the screen is dark and there is no lamp.
+(prop office-desk-off
+  parts: ((box  size: (1.6 0.8 0.04)    at: (0 0 0.73)        material: laminate)
+          (box  size: (0.05 0.7 0.71)   at: (-0.75 0 0.355)   material: steel)
+          (box  size: (0.05 0.7 0.71)   at: (0.75 0 0.355)    material: steel)
+          (box  size: (1.5 0.02 0.4)    at: (0 0.35 0.5)      material: steel)
+          (box  size: (0.6 0.04 0.35)   at: (0 0.14 1.025)    material: plastic)
+          (box  size: (0.54 0.02 0.29)  at: (0 0.11 1.025)    material: dark)
+          (box  size: (0.08 0.06 0.1)   at: (0 0.17 0.8)      material: plastic))
+  hides: crouched)

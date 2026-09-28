@@ -48,3 +48,78 @@
       (assert-true (< (abs (- (walker-y w) 9.5)) 0.01))
       (assert-true (walker-crouching? w))
       (assert-true (near? (walker-z w) 3.0 0.01)))))
+
+;;; The whole floor 14 (floors/14.floor, Phantom 0.1): assets/floors/14, the
+;;; floor INFILTRATE plays. Both ends of the rerouted duct climb (the print
+;;; room's filing cabinet under its hatch, the FM office's under its), and
+;;; the patrol walks its loop through the new rooms (the lift lobby, the
+;;; corridor, the open plan, the kitchen) as the game runs it.
+
+(import (phantom play data)
+        (phantom play core)
+        (phantom guard guard))
+
+(define DIR14 "assets/floors/14/")
+(define C14 (pbc1->collision (read-file-bytes (string-append DIR14 "collide"))))
+(define INFO14 (floor-info-from-string (read-file-string (string-append DIR14 "floor.sexp"))))
+(define DATA14 (play-data-from-string (read-file-string (string-append DIR14 "play.sexp"))))
+
+(define (run14 w n input)
+  (if (= n 0) w (run14 (walker-step w input TICK C14) (- n 1) input)))
+(define (run14-until w input done? n)
+  (cond ((done? w) w)
+        ((= n 0) #f)
+        (else (run14-until (walker-step w input TICK C14) input done? (- n 1)))))
+
+;; Walk forward from (x y) facing yaw onto the cabinet, settle, keep pushing
+;; the same way up through the hatch, settle: (on-cabinet in-duct).
+(define (climb14 x y yaw)
+  (let* ((m (run14-until (make-walker x y 0.0 yaw) FORWARD walker-mantling? 600))
+         (on (and m (run14 m 90 NO-INPUT)))
+         (up (and on (run14-until on FORWARD (lambda (w) (> (walker-z w) 2.9)) 600)))
+         (in (and up (run14 up 90 NO-INPUT))))
+    (list on in)))
+
+(define PATROL14 '((2 2) (12.5 1.5) (21 6.5) (34 10) (36 2.5)))
+
+(test-group "the whole floor 14"
+  (test "the print room: onto the filing cabinet from the north, up through the hatch into the duct"
+    (let* ((r (climb14 15.5 10.8 PI)) (on (car r)) (in (cadr r)))
+      (assert-true (and on (near? (walker-z on) 1.3 0.05)))
+      (assert-true (and in (near? (walker-z in) 3.0 0.05)))
+      (assert-true (and in (walker-crouching? in)))))
+  (test "the FM office: onto the filing cabinet from the south, up through the hatch into the duct"
+    (let* ((r (climb14 24.0 1.6 0.0)) (on (car r)) (in (cadr r)))
+      (assert-true (and on (near? (walker-z on) 1.3 0.05)))
+      (assert-true (and in (near? (walker-z in) 3.0 0.05)))
+      (assert-true (and in (walker-crouching? in)))))
+  (test "the patrol walks its loop: every waypoint within 0.5 m, twice, and never alarmed by a runner out of its way"
+    ;; the runner still in meeting A's dark far corner
+    (let* ((p (play-reset! (make-play C14 DATA14 (cdr (assq 'circuits INFO14)))))
+           (w (walker-step (make-walker 19.6 11.5 0.0 0.0) NO-INPUT TICK C14))
+           (g (play-guard p))
+           (best (make-vector (length PATROL14) 99.0))
+           (visits (make-vector (length PATROL14) 0))
+           (near (make-vector (length PATROL14) #f))
+           (worst 0))
+      (let loop ((i 0))
+        (when (< i (* 60 240))
+          (play-tick! p w (lambda (c) #t) 1.0 2.0)
+          (set! worst (max worst (guard-state g)))
+          (let each ((k 0) (ps PATROL14))
+            (unless (null? ps)
+              (let* ((dx (- (guard-x g) (car (car ps)))) (dy (- (guard-y g) (cadr (car ps))))
+                     (d (sqrt (+ (* dx dx) (* dy dy)))))
+                (vector-set! best k (min (vector-ref best k) d))
+                (cond ((and (< d 0.5) (not (vector-ref near k)))
+                       (vector-set! near k #t)
+                       (vector-set! visits k (+ 1 (vector-ref visits k))))
+                      ((> d 2.0) (vector-set! near k #f))))
+              (each (+ k 1) (cdr ps))))
+          (loop (+ i 1))))
+      (display (list 'patrol14 'best (vector->list best) 'visits (vector->list visits) 'worst worst)) (newline)
+      (assert-true (= worst 0))
+      (let each ((k 0))
+        (when (< k (length PATROL14))
+          (assert-true (>= (vector-ref visits k) 2))
+          (each (+ k 1)))))))
