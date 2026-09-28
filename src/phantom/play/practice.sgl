@@ -34,12 +34,16 @@
 
   (export make-practice practice? practice-reset! practice-tick! practice-note-command!
           practice-reset-room! practice-start-walker practice-crash practice-lesson practice-done? practice-index
-          practice-lines-said DARK-VIS CRASH-KEEP)
+          practice-lines-said practice-lines-where DARK-VIS CRASH-KEEP EXIT-REACH)
 
   (begin
 
     (define DARK-VIS 0.2)           ; the eye is empty below this (its first step, (phantom play mode))
     (define CRASH-KEEP 3)           ; lines (play-mode-crash) gives
+    ;; A through-goal is met at the room's way out (David, 2026-09-26: the
+    ;; success line came only as you entered the next room, with its opening
+    ;; line): this near the opening into the next lesson, horizontally
+    (define EXIT-REACH 1.5)
 
     ;; The practice: a vector
     ;;  0 tag  1 data  2 the lesson you are in (index, -1 before the first)
@@ -49,8 +53,11 @@
     ;;     6 seconds dark (dark-in)  7 a camera alarmed?  8 the terminal ran?
     ;;  4 Crash's lines, newest first: ((text . at) ...)  5 the clock (s)
     ;;  6 done?  7 per lesson, its unit's index (-1: none)  8 per room, its
-    ;;  lesson (-1: none)  9 the lines said, in order: ((lesson . which) ...)
-    (define (practice? v) (and (vector? v) (= (vector-length v) 10) (eq? (vector-ref v 0) 'practice)))
+    ;;  lesson (-1: none)  9 the lines said, newest first: ((lesson which
+    ;;  where) ...), where the lesson of the room you stood in
+    ;;  10 per lesson, its way out: #(x y) the opening into the next
+    ;;  lesson's rooms (the sector graph's edge), or #f
+    (define (practice? v) (and (vector? v) (= (vector-length v) 11) (eq? (vector-ref v 0) 'practice)))
 
     (define (make-practice data)
       (let* ((ls (play-lessons data))
@@ -78,7 +85,24 @@
                                       u)
                                      (else (find (+ u 1)))))))
                          (vector->list ls)))
-                  by-room '()))))
+                  by-room '() (lesson-exits data by-room)))))
+
+    ;; Each lesson's way out: the opening between one of its rooms and one of
+    ;; the next lesson's.
+    (define (lesson-exits data by-room)
+      (let* ((n (lesson-count data)) (es (play-edges data)))
+        (list->vector
+          (map (lambda (i)
+                 (let loop ((k 0))
+                   (if (>= k (vector-length es))
+                       #f
+                       (let* ((e (vector-ref es k)) (a (edge-a e)) (b (edge-b e))
+                              (la (if (>= a 0) (vector-ref by-room a) -1))
+                              (lb (if (>= b 0) (vector-ref by-room b) -1)))
+                         (if (or (and (= la i) (= lb (+ i 1))) (and (= lb i) (= la (+ i 1))))
+                             (vector (edge-x e) (edge-y e))
+                             (loop (+ k 1)))))))
+               (iota n)))))
 
     (define (index-of v x) (let loop ((i 0)) (cond ((>= i (vector-length v)) -1) ((eq? (vector-ref v i) x) i) (else (loop (+ i 1))))))
 
@@ -97,12 +121,18 @@
     (define (practice-index pr) (vector-ref pr 2))
     (define (practice-done? pr) (vector-ref pr 6))
     ;; for the gates: the lines said, in order, ((lesson-id . enter|success|fail) ...)
-    (define (practice-lines-said pr) (reverse (vector-ref pr 9)))
+    (define (practice-lines-said pr) (map (lambda (e) (cons (car e) (cadr e))) (reverse (vector-ref pr 9))))
+    ;; and where you stood: ((lesson which where) ...), where the id of the
+    ;; lesson whose rooms you were in, or #f
+    (define (practice-lines-where pr) (reverse (vector-ref pr 9)))
 
     ;; Crash says a line: for the deck's display, and the blip (a crash
     ;; event at you).
     (define (say! pr core i which text)
-      (vector-set! pr 9 (cons (cons (lesson-id (lesson pr i)) which) (vector-ref pr 9)))
+      (let* ((room (play-runner-room core))
+             (li (if (>= room 0) (vector-ref (vector-ref pr 8) room) -1))
+             (where (and (>= li 0) (lesson-id (lesson pr li)))))
+        (vector-set! pr 9 (cons (list (lesson-id (lesson pr i)) which where) (vector-ref pr 9))))
       (when (> (string-length text) 0)
         (vector-set! pr 4 (cons (cons text (vector-ref pr 5)) (vector-ref pr 4)))
         (play-event! core 'crash (or (play-runner-x core) 0.0) (or (play-runner-y core) 0.0))))
@@ -187,6 +217,14 @@
                            (when (>= (vector-ref t 6) (caddr goal)) (succeed! pr core cur)))
                          (vector-set! t 6 0.0))))
                   ((through)
+                   ;; at the way out, with the goal's conditions met: done now,
+                   ;; while you are still in the room
+                   (let ((ex (vector-ref (vector-ref pr 10) cur)))
+                     (when (and ex (play-runner-x core)
+                                (let ((dx (- (play-runner-x core) (vector-ref ex 0))) (dy (- (play-runner-y core) (vector-ref ex 1))))
+                                  (< (+ (* dx dx) (* dy dy)) (* EXIT-REACH EXIT-REACH)))
+                                (through-met? pr core cur))
+                       (succeed! pr core cur)))
                    (let ((never (option goal 'never)) (after (option goal 'after)))
                      ;; the device the goal asks for, set going
                      (when after

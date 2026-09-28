@@ -170,6 +170,12 @@
     (show 'end)
     (display (list 'said (said) 'done (practice-done? PR))) (newline)
     (assert-true (equal? (said) EXPECTED))
+    ;; each success line while you were still in its room (David: it came only
+    ;; as you entered the next room, with that room's opening line)
+    (let ((wrong (filter (lambda (e) (and (eq? (cadr e) 'success) (not (eq? (caddr e) (car e)))))
+                         (practice-lines-where PR))))
+      (display (list 'success-said-elsewhere wrong)) (newline)
+      (assert-true (null? wrong)))
     (assert-true (practice-done? PR))
     (assert-equal 'won (play-outcome P)))
   (test "A CAPTURE RESETS ONLY ITS ROOM: caught in the patrol room, you and its unit start it again; the rooms before are as you left them"
