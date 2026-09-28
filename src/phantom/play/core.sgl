@@ -30,7 +30,7 @@
   (export make-play play? play-reset! play-tick!
           play-data play-guard play-guard-world
           play-light play-light-01 play-visibility play-shape play-light-state
-          play-badge? play-outcome play-ticks play-start-walker
+          play-badge? play-learned-tier play-outcome play-ticks play-start-walker
           play-near-exit? GUARD-START-LEG PICKUP-REACH EXIT-REACH
           play-hearing play-take-steps! play-last-heard play-runner-room
           play-guard-path! play-set-hearing!
@@ -86,7 +86,10 @@
     ;;  (the only one that steps: the sim wakes the unit of the room you are
     ;;  in)  38 the active unit's index
     ;;  39 units off: no unit steps (the sim's rooms without one)
-    (define (play? p) (and (vector? p) (= (vector-length p) 40) (eq? (vector-ref p 0) 'play)))
+    ;;  Phantom 0.1: 40 the tier your deck learned without the badge (the
+    ;;  sticky note's password at a terminal, or a session left logged in),
+    ;;  or #f. Only the badge (7) opens readers.
+    (define (play? p) (and (vector? p) (= (vector-length p) 41) (eq? (vector-ref p 0) 'play)))
     (define (play-units-off! p off?) (vector-set! p 39 off?) p)
     (define (play-unit-count p) (vector-length (vector-ref p 37)))
     (define (play-active-unit p) (vector-ref p 38))
@@ -118,8 +121,10 @@
     (define (play-device-approach p i) (vector-ref (vector-ref p 31) i))
     (define (play-devices-state p) (vector-ref p 29))
     (define (play-deck p) (vector-ref p 30))
-    ;; the runner's tier (design §3): the facilities badge makes you FACILITIES
-    (define (play-tier p) (if (vector-ref p 7) 'facilities 'staff))
+    ;; the runner's tier (design §3): the facilities badge makes you
+    ;; FACILITIES, and so does a tier the deck learned at a terminal
+    (define (play-tier p) (cond ((vector-ref p 7) 'facilities) ((vector-ref p 40) (vector-ref p 40)) (else 'staff)))
+    (define (play-learned-tier p) (vector-ref p 40))
     (define USE-REACH 1.3)          ; m, horizontally: the panel, the reader
     (define (play-incidents p) (reverse (vector-ref p 24)))
     ;; the events since the last call, oldest first, and forget them
@@ -158,8 +163,8 @@
                         '() 0 -1 '() #f
                         (make-devices data) (make-deck) (device-approaches data gw) 0.0
                         (make-vector (device-count data) 0.0) (camera-views data)
-                        (vector #f 0 -1 0.0 '(idle) 0.0 (terminal-targets data)) #f
-                        units 0 #f)))
+                        (let ((ts (terminal-targets data))) (vector #f 0 -1 0.0 '(idle) 0.0 ts -1 ts)) #f
+                        units 0 #f #f)))
         p))
 
     ;; PRACTICE: a capture in the sim resets only its room (D38). The runner
@@ -234,6 +239,7 @@
       (vector-fill! (vector-ref p 33) 0.0)
       (terminal-reset! (vector-ref p 35))
       (vector-set! p 36 #f)
+      (vector-set! p 40 #f)
       p)
 
     ;; The path from the guard to you (for playback: how much of the guard
@@ -314,7 +320,7 @@
             (let ((outcome
                    (cond
                      ((guard-caught? g) 'caught)
-                     ((and (not (vector-ref p 7)) (near-badge? data x y z)) 'badge)
+                     ((and (not (vector-ref p 7)) (not (play-badge-drawer? data)) (near-badge? data x y z)) 'badge)
                      ((near-exit? data x y z) (vector-set! p 14 #t) 'playing)
                      (else (vector-set! p 14 #f) 'playing))))
               (cond ((eq? outcome 'badge) (vector-set! p 7 #t)
@@ -691,12 +697,29 @@
                  (panel (let find ((ps (play-panels data)))
                           (cond ((null? ps) #f) ((reach? (cadr (car ps)) (caddr (car ps))) (car ps)) (else (find (cdr ps))))))
                  (exit (play-exit data))
-                 (term (terminal-at data x y z)))
+                 (term (terminal-at data x y z))
+                 ;; the badge's drawer (Phantom 0.1), while the badge is in it;
+                 ;; a terminal on the same desk wins only when it is nearer
+                 (b (play-badge data))
+                 (d2 (lambda (px py) (let ((dx (- x px)) (dy (- y py))) (+ (* dx dx) (* dy dy)))))
+                 (drawer (and (play-badge-drawer? data) (not (vector-ref p 7))
+                              (reach? (vector-ref b 0) (vector-ref b 1))
+                              (or (< term 0)
+                                  (let ((t (vector-ref (play-devices data) term)))
+                                    (<= (d2 (vector-ref b 0) (vector-ref b 1)) (d2 (device-x t) (device-y t))))))))
             (cond
+              (drawer
+               (vector-set! p 7 #t)
+               (event! p 'drawer-open (vector-ref b 0) (vector-ref b 1))
+               (event! p 'badge (vector-ref b 0) (vector-ref b 1))
+               (list 'badge))
               ((>= term 0)
-               (terminal-open! p term)
-               (event! p 'terminal-open (device-x (vector-ref (play-devices data) term)) (device-y (vector-ref (play-devices data) term)))
-               (list 'terminal-open))
+               (let ((learned (terminal-open! p term)))
+                 (event! p 'terminal-open (device-x (vector-ref (play-devices data) term)) (device-y (vector-ref (play-devices data) term)))
+                 (if learned
+                     (begin (event! p 'login (device-x (vector-ref (play-devices data) term)) (device-y (vector-ref (play-devices data) term)))
+                            (list 'terminal-open 'session learned))
+                     (list 'terminal-open))))
               (panel
                (let ((c (car panel)) (needs (cadddr panel)))
                  (cond ((and needs (not (vector-ref p 7)))
@@ -741,9 +764,12 @@
                                (else (loop (cdr l) (cons (vector-ref (car l) 3) acc)))))))
         (list->vector (append idx (map (lambda (c) (cons 'zone c)) circuits)))))
 
+    ;; tm: #(open? selected running-row progress status status-seconds rows
+    ;; open-terminal base-rows); rows are the base rows, or LOG IN and them
     (define (terminal-reset! tm)
       (vector-set! tm 0 #f) (vector-set! tm 1 0) (vector-set! tm 2 -1) (vector-set! tm 3 0.0)
-      (vector-set! tm 4 '(idle)) (vector-set! tm 5 0.0))
+      (vector-set! tm 4 '(idle)) (vector-set! tm 5 0.0)
+      (vector-set! tm 6 (vector-ref tm 8)) (vector-set! tm 7 -1))
 
     ;; the terminal device within reach of (x y z), or -1
     (define (terminal-at data x y z)
@@ -756,11 +782,37 @@
                  i)
                 (else (loop (+ i 1)))))))
 
-    (define (terminal-open! p i)
+    ;; A terminal's login: or session: tier (its args), or #f.
+    (define (terminal-arg d key)
+      (let ((a (vector->list (device-args d))))
+        (let loop ((l a)) (cond ((or (null? l) (null? (cdr l))) #f) ((eq? (car l) key) (cadr l)) (else (loop (cddr l)))))))
+
+    ;; Learn a tier at a terminal (Phantom 0.1): the deck keeps it for the
+    ;; attempt. The status shows it logged in.
+    (define (learn-tier! p tier)
       (let ((tm (vector-ref p 35)))
+        (unless (tier-allows? (play-tier p) tier) (vector-set! p 40 tier))
+        (vector-set! tm 4 (list 'done tier 'logged-in)) (vector-set! tm 5 TERMINAL-SHOW)))
+
+    ;; Open terminal i. A session left logged in teaches the deck its tier at
+    ;; once (returns that tier); a terminal with a login: offers LOG IN (the
+    ;; sticky note's password) as its first row while your tier lacks it.
+    ;; Returns the tier learned, or #f.
+    (define (terminal-open! p i)
+      (let* ((tm (vector-ref p 35)) (d (vector-ref (play-devices (vector-ref p 1)) i))
+             (session (terminal-arg d 'session)) (login (terminal-arg d 'login)))
         (terminal-reset! tm)
         (vector-set! tm 0 #t)
-        (devices-state-set! (vector-ref p 29) i 'in-use 0.0)))
+        (vector-set! tm 7 i)
+        (devices-state-set! (vector-ref p 29) i 'in-use 0.0)
+        (cond ((and session (not (tier-allows? (play-tier p) session)))
+               (learn-tier! p session)
+               (vector-set! tm 6 (vector-ref tm 8))
+               session)
+              ((and login (not (tier-allows? (play-tier p) login)))
+               (vector-set! tm 6 (list->vector (cons (cons 'login login) (vector->list (vector-ref tm 8)))))
+               #f)
+              (else (vector-set! tm 6 (vector-ref tm 8)) #f))))
 
     (define (terminal-close! p)
       (let* ((tm (vector-ref p 35)) (data (vector-ref p 1)) (ds (play-devices data)))
@@ -775,12 +827,16 @@
     ;; A row's ID, kind, command (by on?, the circuits' state) and tier.
     (define (row-of p target on?)
       (let ((dv (vector-ref p 29)) (data (vector-ref p 1)))
-        (if (eq? (car target) 'device)
-            (let ((d (vector-ref (play-devices data) (cdr target))))
-              (list (device-id d) (device-kind d) (devices-command dv (cdr target)) (device-tier d)))
-            (let ((c (cdr target)))
-              (list (string->symbol (string-append "lights-" (symbol->string c))) 'lights
-                    (if (on? c) 'lights-off 'lights-on) 'facilities)))))
+        (cond
+          ;; the sticky note's password: anyone who has read it may type it
+          ((eq? (car target) 'login) (list 'sticky-note 'login 'log-in 'staff))
+          ((eq? (car target) 'device)
+           (let ((d (vector-ref (play-devices data) (cdr target))))
+             (list (device-id d) (device-kind d) (devices-command dv (cdr target)) (device-tier d))))
+          (else
+           (let ((c (cdr target)))
+             (list (string->symbol (string-append "lights-" (symbol->string c))) 'lights
+                   (if (on? c) 'lights-off 'lights-on) 'facilities))))))
 
     ;; For the shell (the API, §3): (ROWS SELECTED STATUS), each row
     ;; (ID KIND COMMAND-OR-#f ALLOWED? TIER).
@@ -835,6 +891,12 @@
                     (event! p 'deck-confirm (or (vector-ref p 17) 0.0) (or (vector-ref p 18) 0.0))
                     (cond
                       ((not cmd) #f)
+                      ;; LOG IN with the sticky note's password: the deck learns its tier
+                      ((eq? (car target) 'login)
+                       (learn-tier! p (cdr target))
+                       (vector-set! tm 6 (vector-ref tm 8)) (vector-set! tm 1 0)
+                       (event! p 'login (or (vector-ref p 17) 0.0) (or (vector-ref p 18) 0.0))
+                       (list 'tier (cdr target)))
                       ((eq? (car target) 'zone) (list 'lights (cdr target) cmd))
                       (else
                        (let* ((i (cdr target)) (d (vector-ref (play-devices (vector-ref p 1)) i))

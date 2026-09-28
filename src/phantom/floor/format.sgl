@@ -401,11 +401,13 @@
         (desk (at point2 #f) (in symbol #f) (against symbol #f) (from anchor #f) (kind symbol #t) (facing number #f))
         (cabinet (at point2 #f) (in symbol #f) (against symbol #f) (from anchor #f) (kind symbol #t) (facing number #f))
         (prop (at point2 #f) (in symbol #f) (against symbol #f) (from anchor #f) (kind symbol #t) (facing number #f) (z number #f))
-        (badge (on-desk point2 #t) (tier symbol #t))
+        (badge (on-desk point2 #t) (tier symbol #t) (kept symbol #f))   ; kept: drawer, taken with use (Phantom 0.1)
         (rail (along segment #t) (in symbol #f))
         ;; P3's devices
         (phone (id symbol #t) (on-desk point2 #t) (tier symbol #f) (facing number #f))
-        (terminal (id symbol #t) (on-desk point2 #t) (tier symbol #f) (facing number #f))
+        ;; login: TIER, the sticky note's password (a timed LOG IN row); session:
+        ;; TIER, an account left logged in (opening it teaches the deck TIER)
+        (terminal (id symbol #t) (on-desk point2 #t) (tier symbol #f) (facing number #f) (login symbol #f) (session symbol #f))
         (printer (id symbol #t) (at point2 #f) (in symbol #f) (against symbol #f) (from anchor #f) (facing number #f) (tier symbol #f))
         (vent (id symbol #t) (in symbol #t) (at point2 #t) (tier symbol #f))
         (camera (id symbol #t) (in symbol #t) (at point2 #t) (look point3 #t) (fov number #f) (range number #f) (tier symbol #f))

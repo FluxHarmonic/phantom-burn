@@ -22,7 +22,7 @@
           (sigil io))
 
   (export play-data-from-string play-data?
-          play-route play-waits play-start play-exit play-badge play-glass
+          play-route play-waits play-start play-exit play-badge play-badge-drawer? play-glass
           light-cell light-grid-x0 light-grid-y0 light-grid-w light-grid-h
           light-sample! light-sample-z NCIRCUITS
           play-rooms play-edges play-surface-noise play-surface-name play-panels play-reader play-noise-ambient
@@ -164,6 +164,9 @@
     (define (play-start d) (vector-ref d 3))
     (define (play-exit d) (vector-ref d 4))
     (define (play-badge d) (vector-ref d 5))
+    ;; the badge is in its desk's drawer, taken with use (Phantom 0.1)
+    (define (play-badge-drawer? d)
+      (let ((b (vector-ref d 5))) (and (> (vector-length b) 3) (eq? (vector-ref b 3) 'drawer))))
     (define (play-glass d) (vector-ref d 6))
     (define (light-cell d) (vector-ref d 7))
     (define (light-grid-x0 d) (vector-ref d 8))
@@ -228,7 +231,7 @@
         (vector 'play-data route (list->vector (map flo waits))
                 (list->vector (map flo (entry datum 'start)))
                 (list->vector (map flo (entry datum 'exit)))
-                (list->vector (map flo (entry datum 'badge)))
+                (list->vector (map (lambda (a) (if (symbol? a) a (flo a))) (entry datum 'badge)))
                 glass cell x0 y0 w h starts layers 0.0
                 (list->vector (map (lambda (r) (vector (car r) (cadr r) (flo (list-ref r 2)) (flo (list-ref r 3))
                                                        (list-ref r 4) (list-ref r 5) (list-ref r 6)))
@@ -249,7 +252,7 @@
                   (list->vector
                     (map (lambda (v) (vector (car v) (cadr v) (flo (list-ref v 2)) (flo (list-ref v 3)) (flo (list-ref v 4))
                                              (flo (list-ref v 5)) (list-ref v 6) (list-ref v 7)
-                                             (list->vector (map flo (drop v 8)))))
+                                             (list->vector (map (lambda (a) (if (symbol? a) a (flo a))) (drop v 8)))))
                          (if e (cdr e) '()))))
                 (let ((e (assq 'fixtures datum)))
                   (list->vector

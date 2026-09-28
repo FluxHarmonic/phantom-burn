@@ -775,7 +775,7 @@
                                                                (cons "facing" (js-num (vector-ref d 5)))
                                                                (cons "tier" (js-sym (vector-ref d 6)))
                                                                (cons "room" (js-num (vector-ref d 7)))
-                                                               (cons "args" (js-list (vector-ref d 8) js-num))))))))
+                                                               (cons "args" (js-list (vector-ref d 8) (lambda (a) (if (symbol? a) (js-sym a) (js-num a)))))))))))
           (cons "outlines" (let ((c (compiled-floor-ctx cf)))
                              (js-list (if c (floor-rooms (ctx-floor c)) '())
                                       (lambda (r) (js-obj (list (cons "room" (js-sym (room-name r)))

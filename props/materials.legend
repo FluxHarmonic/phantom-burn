@@ -52,7 +52,8 @@
    (amber    colour: "#FF9F1A"  emits: #t)
    (lamp     colour: "#F2731A"  emits: #t)
    (badge    colour: "#4DF2D9"  emits: #t)
-   (gibson   colour: "#B36BFF"  emits: #t))   ; C-GIBSON violet: the top floor, the root console
+   (gibson   colour: "#B36BFF"  emits: #t)    ; C-GIBSON violet: the top floor, the root console
+   (note     colour: "#FFCC33"))              ; a sticky note (floor 14: the FM password)
   walls: wall
   ceilings: ceiling
   trim: steel

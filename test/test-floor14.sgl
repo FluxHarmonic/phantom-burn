@@ -123,3 +123,71 @@
         (when (< k (length PATROL14))
           (assert-true (>= (vector-ref visits k) 2))
           (each (+ k 1)))))))
+
+;;; Three ways to FACILITIES (Phantom 0.1, item 2): the badge in the FM
+;;; desk's drawer (F to take it), the sticky note's password at the FM
+;;; terminal (a timed LOG IN), and the session left logged in on the server
+;;; closet's terminal. The last two teach the deck FACILITIES with no badge
+;;; to burn; only the badge opens readers.
+
+(define ALL-ON (lambda (c) #t))
+(define (fresh14) (play-reset! (make-play C14 DATA14 (cdr (assq 'circuits INFO14)))))
+(define (stand x y) (walker-step (make-walker x y 0.0 0.0) NO-INPUT TICK C14))
+(define (row-ids p) (map car (car (play-terminal p ALL-ON))))
+;; run the selected row and step until it finishes: what the step returned
+(define (run-row! p)
+  (play-terminal-key! p 'run ALL-ON)
+  (let loop ((i 0))
+    (if (> i (+ 30 (inexact->exact (round (/ TERMINAL-TIME TICK))))) #f
+        (or (play-terminal-step! p ALL-ON) (loop (+ i 1))))))
+
+(test-group "three ways to FACILITIES"
+  (test "the badge is in the FM desk's drawer: walking up to it takes nothing, F at the desk takes it"
+    (let ((p (fresh14)) (w (stand 24.9 1.95)))
+      (let loop ((i 0)) (when (< i 60) (play-tick! p w ALL-ON 1.0 2.0) (loop (+ i 1))))
+      (assert-false (play-badge? p))
+      (assert-true (eq? (play-tier p) 'staff))
+      (assert-true (equal? (play-use! p w ALL-ON) '(badge)))
+      (assert-true (play-badge? p))
+      (assert-true (eq? (play-tier p) 'facilities))))
+  (test "the FM terminal offers LOG IN; the password teaches the deck FACILITIES, and the readers still want the badge"
+    (let ((p (fresh14)) (w (stand 25.9 2.0)))
+      (play-tick! p w ALL-ON 1.0 2.0)
+      (assert-true (equal? (play-use! p w ALL-ON) '(terminal-open)))
+      (assert-true (eq? (car (row-ids p)) 'sticky-note))
+      (assert-true (equal? (car (car (play-terminal p ALL-ON))) '(sticky-note login log-in #t staff)))
+      (assert-true (eq? (play-tier p) 'staff))
+      (assert-true (equal? (run-row! p) '(tier facilities)))
+      (assert-true (eq? (play-tier p) 'facilities))
+      (assert-true (eq? (play-learned-tier p) 'facilities))
+      (assert-false (play-badge? p))
+      (assert-false (memq 'sticky-note (row-ids p)))
+      ;; a FACILITIES row is allowed now: the corridor's vent
+      (assert-true (let ((r (assq 'corridor-vent (car (play-terminal p ALL-ON))))) (and r (list-ref r 3))))
+      (play-terminal-key! p 'close ALL-ON)
+      ;; the stairwell reader and the lobby's light panel want the badge
+      (let ((at-exit (stand 3.0 9.2)))
+        (play-tick! p at-exit ALL-ON 1.0 2.0)
+        (assert-true (equal? (play-use! p at-exit ALL-ON) '(reader-deny))))
+      (let ((at-panel (stand 20.0 5.9)))
+        (play-tick! p at-panel ALL-ON 1.0 2.0)
+        (assert-true (equal? (play-use! p at-panel ALL-ON) '(panel-deny c2))))
+      (assert-true (eq? (play-outcome p) 'playing))))
+  (test "the server closet's terminal: a session left logged in teaches the deck FACILITIES at once"
+    (let ((p (fresh14)) (w (stand 16.1 3.4)))
+      (play-tick! p w ALL-ON 1.0 2.0)
+      (assert-true (equal? (play-use! p w ALL-ON) '(terminal-open session facilities)))
+      (assert-true (eq? (play-tier p) 'facilities))
+      (assert-false (play-badge? p))
+      (assert-false (memq 'sticky-note (row-ids p)))))
+  (test "with FACILITIES learned, the FM terminal has no LOG IN row; a restart forgets the tier"
+    (let ((p (fresh14)))
+      (let ((w (stand 16.1 3.4))) (play-tick! p w ALL-ON 1.0 2.0) (play-use! p w ALL-ON) (play-terminal-key! p 'close ALL-ON))
+      (assert-true (eq? (play-learned-tier p) 'facilities))
+      (let ((w (stand 25.9 2.0)))
+        (play-tick! p w ALL-ON 1.0 2.0)
+        (play-use! p w ALL-ON)
+        (assert-false (memq 'sticky-note (row-ids p))))
+      (play-reset! p)
+      (assert-true (eq? (play-tier p) 'staff))
+      (assert-false (play-learned-tier p)))))

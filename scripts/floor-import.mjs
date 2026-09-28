@@ -71,7 +71,7 @@ const views = j.views.map((v) => `(${v.name} ${v.eye.map(num).join(" ")} ${v.at.
 // P3 (topics/phantom-burn-device-api): the devices, and the terminal map's
 // outlines and openings, carried as the compiler wrote them
 const devices = (j.devices || []).map((d) =>
-  `(${d.id} ${d.kind} ${d.at.map(num).join(" ")} ${num(d.facing || 0)} ${d.tier} ${d.room}${(d.args || []).map((a) => " " + num(a)).join("")})`);
+  `(${d.id} ${d.kind} ${d.at.map(num).join(" ")} ${num(d.facing || 0)} ${d.tier} ${d.room}${(d.args || []).map((a) => " " + (typeof a === "string" ? a : num(a))).join("")})`);
 const outlines = (j.outlines || []).map((o) => `(${o.room} ${num(o.floor)} ${o.corners.map((c) => `(${num(c[0])} ${num(c[1])})`).join(" ")})`);
 const openings = (j.openings || []).map((o) => `(${o.kind} ${num(o.from[0])} ${num(o.from[1])} ${num(o.to[0])} ${num(o.to[1])})`);
 // PRACTICE: the floor's look, and on a sim floor its edges, one edge a row

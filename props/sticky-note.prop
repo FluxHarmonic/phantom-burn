@@ -1,0 +1,5 @@
+;; props/sticky-note.prop - a sticky note (floor 14): the FM's password,
+;; stuck to the desk under the terminal's monitor. Origin on the desk top
+;; under its middle.
+(prop sticky-note
+  parts: ((box  size: (0.076 0.076 0.004)  at: (0 0 0.002)  material: note)))

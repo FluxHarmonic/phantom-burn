@@ -90,7 +90,7 @@
         ;; PRACTICE: the sim's lessons (play.sexp carries them)
         (set! *practice* (and (> (lesson-count data) 0) (make-practice data)))
         (render-set-extra-draw! draw-guard!)
-        (render-hide-part! 'badge #f)
+        (render-hide-part! 'badge (play-badge-drawer? data))
         (set! *phase* 'play)
         (set! *timer* 0.0)
         (set! *fade-in* FADE-IN)))
@@ -109,7 +109,7 @@
       (set! *place* #f)
       (set! *use* #f)
       (set! *feed-gx* #f)
-      (render-hide-part! 'badge #f)
+      (render-hide-part! 'badge (play-badge-drawer? (play-data *core*)))
       (if *practice* (practice-start-walker *practice* *core*) (play-start-walker *core* *coll*)))
 
     ;; a fade, the win card, or the terminal (you stand at it; the floor goes on)
@@ -197,6 +197,8 @@
            (render-circuit-set! (cadr r) (eq? (caddr r) 'lights-on))
            (say! (if (eq? (caddr r) 'lights-on) "LIGHTS ON" "LIGHTS OFF")))
           ((deny) (say! "YOUR TIER CANNOT COMMAND THAT"))
+          ;; LOG IN with the sticky note's password (Phantom 0.1)
+          ((tier) (say! (tier-line (cadr r))))
           (else #f))))
 
     ;; Apply what a use did: the panel switches its circuit in the renderer.
@@ -207,8 +209,16 @@
              (say! (if (eq? (car r) 'panel-on) "LIGHTS ON" "LIGHTS OFF")))
             ((eq? (car r) 'panel-deny) (say! "THE PANEL WANTS A FACILITIES BADGE"))
             ((eq? (car r) 'reader-deny) (say! "THE READER WANTS A FACILITIES BADGE"))
+            ;; the badge, from its drawer (Phantom 0.1)
+            ((eq? (car r) 'badge) (set! *badge-flash* 2.5) (render-hide-part! 'badge #t))
+            ;; a session left logged in: the deck learned its tier
+            ((and (eq? (car r) 'terminal-open) (pair? (cdr r)))
+             (say! (tier-line (caddr r))))
             ((eq? (car r) 'terminal-open) #f)
             (else #f)))
+
+    (define (tier-line tier)
+      (string-append "LOGGED IN. YOUR DECK HAS " (string-upcase* (symbol->string tier)) " NOW"))
 
     ;; --- the sound feed ((phantom sound), topics/phantom-sound-api) ------------
 
@@ -289,7 +299,7 @@
       (set! *place* #t)
       (set! *use* #f)
       (set! *feed-gx* #f)
-      (render-hide-part! 'badge #f)
+      (render-hide-part! 'badge (and *core* (play-badge-drawer? (play-data *core*))))
       ;; the title cleared the guard's draw (its room is not this floor)
       (render-set-extra-draw! draw-guard!))
 
@@ -517,7 +527,9 @@
                         ((and (play-near-exit? *core*) (play-badge? *core*)) "THE READER: PRESS F (USE)")
                         ((play-near-exit? *core*) "THE READER WANTS A FACILITIES BADGE")
                         ((play-badge? *core*) "TO THE STAIRWELL DOOR, UNDER THE MEZZANINE")
-                        (else "FIND THE FACILITIES BADGE: THE FM OFFICE DESK"))))
+                        ;; the deck has FACILITIES without the badge: readers still want it
+                        ((play-learned-tier *core*) "YOUR DECK HAS FACILITIES. THE STAIRWELL READER WANTS THE BADGE")
+                        (else "GET FACILITIES: THE FM OFFICE"))))
         (when line
           (let ((x (/ (- w (text-width line ts)) 2)) (y (* 8 ts)))
             (set-color 0.0 0.0 0.0 0.55)
