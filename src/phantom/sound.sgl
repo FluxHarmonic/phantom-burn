@@ -82,9 +82,11 @@
   (begin
     (define MUSIC-TUNE "music-false-identity")   ; INFILTRATE's track (see make-sound)
     ;; the music renders at this rate and the sink upsamples (the phone budget:
-    ;; False Identity costs ~0.8x at 24 kHz what it does at 32; David's ?trace
-    ;; decides the final rate). Headless, it renders at the sound's own rate.
-    (define MUSIC-RATE 24000)
+    ;; False Identity costs ~0.8x at 24 kHz what it does at 32). David picked 28 kHz
+    ;; after the A/B on his phone (2026-09-28: "a fine middle ground, they all worked
+    ;; fine and sounded good"); ?rate=24|28|32 still switches it. At 24 kHz his phone
+    ;; spent 1.13 ms a frame on the music at p95. Headless, the sound's own rate.
+    (define MUSIC-RATE 28000)
     (define BANK-MS 3)                    ; the bank renders ~3 ms a frame of play until complete
     (define BANK-IDLE-MS 8)               ; and ~8 ms a frame before play (the title: nothing else runs)
     (define SFX-DEPTH-S 0.1)              ; the steps' sink stays shallow: heard ~0.1 s late
