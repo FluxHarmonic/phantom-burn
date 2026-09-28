@@ -204,9 +204,10 @@
 (define (music-frame! s states)
   (sound-frame! s (/ 1 60.0) (list 0.0 0.0 0.0 0.0 'tile 0.0 #f)
                 (map (lambda (st) (list 20.0 20.0 0.0 st 1.0 #f)) states))
-  ;; the player pulled alone: sound-render!'s per-sample mix in Sigil tripled the
+  ;; the music pulled alone, through its controller as the game pulls it (the beat
+  ;; cut is in that pull); sound-render!'s per-sample mix in Sigil tripled the
   ;; suite's time (the byte-identical session tests the mix)
-  (player-pull! (vector-ref s 13) MUSIC-OUT 0 533))
+  (sections-pull! (vector-ref s 15) MUSIC-OUT 533))
 
 ;; the sections the music walked through, each once in order, over a script of
 ;; (frames . states) steps; a step whose frames is a procedure runs until it answers #t (at most 600)
@@ -270,6 +271,37 @@
       (assert-equal 'alert (sound-section s))
       (assert-equal '(alert release detected alert)
                     (music-walk s (list (cons (lambda (s) (eq? (sound-section s) 'release)) '(0)) '(400 3))))))
+  (test "fast in: a chase's pickup cuts in on the next beat (0.58 s at 104 BPM, plus a frame or two), not the next bar (2.31 s)"
+    ;; ten chases from ten places in the bar: each within a beat (34.6 frames) and
+    ;; the frames of the state change and the pull
+    (let ((s (ready-sound (only-loader MUSIC-TUNE))) (worst 0))
+      (let loop ((k 0))
+        (when (< k 10)
+          (music-walk s (list (cons (+ 60 (* 13 k)) '(0))))   ; calm again, somewhere else in the bar
+          (let wait ((i 0))
+            (if (or (eq? (sound-section s) 'detected) (>= i 200))
+                (set! worst (max worst i))
+                (begin (music-frame! s '(3)) (wait (+ i 1)))))
+          (music-walk s (list (cons (lambda (s) (eq? (sound-section s) 'calm)) '(0))))
+          (loop (+ k 1))))
+      (display "worst frames to the pickup: ") (display worst) (newline)
+      (assert-true (<= worst 40))))
+  (test "the alert lift: +3.5 dB while headed for alert, back to level after the release"
+    (let ((s (ready-sound (only-loader MUSIC-TUNE))) (top (expt 10.0 (/ 3.5 20.0))))
+      (music-walk s '((150 0)))
+      (assert-true (near? (music-lift s) 1.0 1e-9))
+      (music-walk s '((300 3)))
+      (assert-equal 'alert (sound-section s))
+      (assert-true (near? (music-lift s) top 1e-6))
+      (music-walk s '((700 0)))
+      (assert-equal 'calm (sound-section s))
+      (assert-true (near? (music-lift s) 1.0 1e-9))))
+  (test "a new music rate reopens the player in calm (?rate on the web)"
+    (let* ((s (ready-sound (only-loader MUSIC-TUNE))) (old (vector-ref s 13)))
+      (sound-set-music-rate! s 28000)
+      (assert-true (sound-music-playing? s))
+      (assert-false (eq? old (vector-ref s 13)))
+      (assert-equal '(calm) (music-walk s '((60 0))))))
   (test "a new track closes the old player first: never two"
     (let* ((s (ready-sound (apply only-loader (list MUSIC-TUNE HEAT-TRACE))))
            (old (vector-ref s 13)))

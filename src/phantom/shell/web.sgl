@@ -524,7 +524,11 @@
              ;; ?go=FLOOR (the menu's other floor, after a reload): straight to it
              (when (and (param "flow") (param "go")) (set! *mode* 'game) (display "phantom-burn: mode game") (newline))
              (when (param "floor") (set! *floor* (param "floor")))
-             (unless (param "mute") (sound-game-init! tune-loader))
+             (unless (param "mute")
+               (sound-game-init! tune-loader)
+               ;; ?rate=24|28|32: the music's render rate in kHz (David's A/B; 24 by default)
+               (let ((r (and (param "rate") (string->number (param "rate")))))
+                 (when (and r (>= r 8) (<= r 48)) (sound-game-set-music-rate! (exact (round (* 1000 r)))))))
              0)
             ((string=? type "tune")
              ;; "NAME\nTEXT": one of SOUND-TUNES, fetched by the page

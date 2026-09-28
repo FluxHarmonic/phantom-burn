@@ -10,7 +10,7 @@
 ;;; transition marks where False Identity has one `release`, so no fixed table
 ;;; fits both.
 ;;;
-;;;   (make-sections player routes)  starts looping calm; #f if the tune lacks a
+;;;   (make-sections player routes sr)  starts looping calm (sr: the player's rate); #f if the tune lacks a
 ;;;                                  state or transition mark the routes name
 ;;;   (sections-want! s 'calm|'aware|'alert)   cheap to call every frame
 ;;;   (sections-tick! s)             once a frame (or a pull): lands jumps, keeps
@@ -35,6 +35,20 @@
 ;;;   state restarts its loop at that bar; rare, and on the grid.
 ;;; - No music timer: the wanted state is the guards' own (the AI's search
 ;;;   expiry ends aware, not a clock here).
+;;; - FAST IN, SLOW OUT (David, 2026-09-26: the detection must be heard at once):
+;;;   the jump into a pickup that leads to alert lands on the next BEAT, not the
+;;;   next bar. motif's mark jumps land only on bar rows, so the music's pull
+;;;   (sections-pull!) renders exactly up to the next beat's sample and cuts there
+;;;   (player-jump!: the scheduled notes flushed, the walk restarted at the pickup's
+;;;   row 0; every pattern of both scores starts with notes or releases on all
+;;;   channels, so the cut is clean). The same mark is also queued as the bar
+;;;   jump, which replaces any stale one and, landing at the pickup's own row 0
+;;;   right after the cut, changes nothing. If the bar comes first, motif lands it
+;;;   and the beat jump is dropped. Every other move waits for its bar.
+;;;
+;;;   (sections-pull! s out n)       the music's n frames: the player's pull, cut at
+;;;                                  the beat when a pickup is armed
+;;;   (sections-headed s)            where the walk is headed (a state)
 
 (define-library (phantom sound sections)
   (import (sigil core)
@@ -43,7 +57,7 @@
           (motif tune player))
   (export make-sections sections-want! sections-tick! sections-playing sections-wanted
           sections-player sections-routes desire-from-states track-routes routes-mark
-          routes-destination STATES)
+          routes-destination STATES sections-pull! sections-headed)
   (begin
     (define STATES '(calm aware alert))
 
@@ -84,16 +98,19 @@
       (routes)
       (regions)                      ; ((name from . to) ...), the tune's
       (wanted mutable: #t)
-      (installed mutable: #t))       ; the section whose region the tick last set
+      (installed mutable: #t)        ; the section whose region the tick last set
+      (beat-mark mutable: #t)        ; a pickup armed to cut in at the next beat, or #f
+      (sr))                          ; the player's sample rate
 
     (define (region s name) (let ((r (assq name (sections-regions s)))) (and r (cdr r))))
 
-    (define (make-sections p routes)
+    (define (make-sections p routes sr)
       (let* ((t (player-tune p))
              (regions (tune-mark-regions t))
              (need (append STATES (map car (vector-ref routes 0)))))
         (and (let all ((ns need)) (or (null? ns) (and (assq (car ns) regions) (all (cdr ns)))))
-             (let ((s (sections player: p routes: routes regions: regions wanted: 'calm installed: 'calm)))
+             (let ((s (sections player: p routes: routes regions: regions wanted: 'calm installed: 'calm
+                                beat-mark: #f sr: sr)))
                (let ((c (region s 'calm))) (player-set-region! p (car c) (cdr c)))
                s))))
 
@@ -128,7 +145,57 @@
                        (let ((q (player-pending-mark p))) (and q (not (eq? (car q) to)) to))))
              (queued (player-pending-mark p)))
         (when (and mark (not (and queued (eq? (car queued) mark))))
-          (player-jump-to-mark! p mark))))
+          (player-jump-to-mark! p mark)
+          ;; a pickup into alert also cuts in at the next beat (fast in)
+          (set-sections-beat-mark! s (and (not (memq mark STATES))
+                                          (eq? (routes-destination (sections-routes s) mark) 'alert)
+                                          mark)))))
+
+    (define (sections-headed s) (headed s (sections-playing s)))
+
+    ;; frames from the render position to the next beat's first sample, if it is
+    ;; within n, else #f: from the newest timeline entry at or before the render
+    ;; position and the row's length (2.5 / tempo x speed seconds), with beats
+    ;; every meter-rows rows of a pattern (both scores' patterns are whole bars)
+    (define (beat-offset p sr n)
+      (let* ((now (player-rendered p))
+             (e (let find ((es (player-timeline p)))
+                  (cond ((null? es) #f) ((<= (vector-ref (car es) 2) now) (car es)) (else (find (cdr es))))))
+             (beat (car (tune-meter (player-tune p)))))
+        (and e
+             (let* ((rs (/ (* sr 2.5 (player-speed p)) (player-tempo p)))
+                    (rowf (+ (vector-ref e 1) (/ (- now (vector-ref e 2)) rs)))
+                    (next (* beat (ceiling (/ (- rowf 1e-9) beat))))
+                    (off (exact (round (- (+ (vector-ref e 2) (* (- next (vector-ref e 1)) rs)) now)))))
+               (and (>= off 0) (< off n) off)))))
+
+    ;; the music's n stereo frames into out: the player's own pull, except that an
+    ;; armed pickup still queued cuts in at the next beat inside these frames
+    (define (sections-pull! s out n)
+      (let* ((p (sections-player s))
+             (m (sections-beat-mark s))
+             (q (player-pending-mark p)))
+        (cond
+          ((not m) (player-pull! p out 0 n))
+          ((not (and q (eq? (car q) m)))       ; landed at a bar already, or replaced
+           (set-sections-beat-mark! s #f)
+           (player-pull! p out 0 n))
+          (else
+           (let ((off (beat-offset p (sections-sr s) n)))
+             (if (not off)
+                 (player-pull! p out 0 n)
+                 (begin
+                   (when (> off 0) (player-pull! p out 0 off))
+                   ;; the pickup is a transition: no region (the installed state's would
+                   ;; walk it straight back), its Bxx finishes it; the queued bar jump
+                   ;; becomes its destination, which lands where that Bxx goes anyway
+                   ;; (a queued pickup would restart it at its end)
+                   (player-set-region! p #f #f)
+                   (player-jump! p (cdr q) 0)
+                   (player-jump-to-mark! p (routes-destination (sections-routes s) m))
+                   (set-sections-installed! s m)
+                   (set-sections-beat-mark! s #f)
+                   (player-pull! p out (* 8 off) (- n off)))))))))
 
     (define (sections-want! s state)
       (unless (eq? state (sections-wanted s))

@@ -60,7 +60,7 @@
           (phantom sound sections))
   (export make-sound sound-start! sound-gesture! sound-prepare! sound-frame! sound-step! sound-event! sound-stop!
           sound-render! sound-trace sound-started? sound-bank sound-mixer sound-bed-mixer sound-last-events
-          sound-section sound-music-playing? sound-set-music! MUSIC-RATE
+          sound-section sound-music-playing? sound-set-music! sound-set-music-rate! music-lift MUSIC-RATE
           sound-cue-plays pip-interval MUSIC-TUNE SURFACE-MAP)
   ;; On the web, one-shots play as the audio bridge's CUES: uploaded once, mixed
   ;; in the AudioWorklet (sigil-wasm-audio's load-audio-cue / play-audio-cue), so
@@ -130,7 +130,7 @@
               #f #f #f #f #f (make-mixer) #f
               '() (list (cons 'bank 0.0) (cons 'sfx 0.0) (cons 'music 0.0) (cons 'bed 0.0) (cons 'frames 0)) #f #f (list 0.0 0.0 0.0)
               (if (and (pair? opt) (pair? (cdr opt))) (cadr opt) MUSIC-TUNE)
-              #f 0 '() 0 '()))
+              #f 0 '() 0 '() 1.0 MUSIC-RATE))
 
     (define (sound-music-playing? s) (and (vector-ref s 13) #t))
 
@@ -155,7 +155,9 @@
     ;; --- start and stop -------------------------------------------------------------------
     ;; the music's player, once its text has arrived (on the web the page
     ;; fetches the tunes, so it may come after the start); none without a track
-    (define (music-rate s) (if (vector-ref s 2) (s-rate s) MUSIC-RATE))
+    ;; the music's rate: ?rate on the web (sound-set-music-rate!), MUSIC-RATE by default;
+    ;; headless, the sound's own (the tests mix it in without resampling)
+    (define (music-rate s) (if (vector-ref s 2) (s-rate s) (vector-ref s 28)))
 
     (define (open-players! s)
       (let* ((name (vector-ref s 21))
@@ -164,7 +166,7 @@
           (let ((p (open-tune-player (read-tune-string text) (music-rate s) loop: #t))
                 (routes (track-routes name)))
             (vector-set! s 13 p)
-            (vector-set! s 15 (and routes (make-sections p routes)))))))
+            (vector-set! s 15 (and routes (make-sections p routes (music-rate s))))))))
 
     (define (close-players! s)
       (let ((p (vector-ref s 13))) (when p (player-close! p)))
@@ -181,12 +183,24 @@
           (open-players! s)
           (unless (vector-ref s 2)
             (when (and name (not (vector-ref s 11)))
-              (vector-set! s 11 (open-music-stream)))))))
+              (vector-set! s 11 (open-music-stream s)))))))
+
+    ;; the music's render rate (?rate=24|28|32 on the web: David A/Bs the lo-fi):
+    ;; a player already open is reopened at the new rate, in calm, and the
+    ;; stream told (the sink upsamples whatever it is fed)
+    (define (sound-set-music-rate! s hz)
+      (unless (= hz (vector-ref s 28))
+        (vector-set! s 28 hz)
+        (when (vector-ref s 13)
+          (close-players! s)
+          (open-players! s))
+        (let ((st (vector-ref s 11)))
+          (when st (guard (e (#t #f)) (set-audio-stream-rate! st hz))))))
 
     (define (open-stream)
       (guard (e (#t #f)) (open-audio-stream channels: 2 buffer-frames: BUFFER)))
-    (define (open-music-stream)
-      (guard (e (#t #f)) (open-audio-stream channels: 2 buffer-frames: BUFFER volume: MUSIC-GAIN rate: MUSIC-RATE)))
+    (define (open-music-stream s)
+      (guard (e (#t #f)) (open-audio-stream channels: 2 buffer-frames: BUFFER volume: MUSIC-GAIN rate: (music-rate s))))
 
     (define (sound-start! s)
       (unless (sound-started? s)
@@ -200,7 +214,7 @@
           (vector-set! s 10 (open-stream))
           (vector-set! s 22 (guard (e (#t #f)) (open-audio-stream channels: 2 buffer-frames: BUFFER volume: BED-GAIN)))
           (when (vector-ref s 21)
-            (vector-set! s 11 (open-music-stream))))
+            (vector-set! s 11 (open-music-stream s))))
         (vector-set! s 18 #t)))
 
     ;; a user gesture: start, or resume a context the browser suspended
@@ -224,6 +238,7 @@
       (for-each (lambda (i) (let ((st (vector-ref s i))) (when st (guard (e (#t #f)) (set-audio-stream-volume! st 0.0)) (guard (e (#t #f)) (close-audio-stream! st))) (vector-set! s i #f)))
                 '(10 11 22))
       (vector-set! s 23 0)
+      (vector-set! s 27 1.0)                ; the alert lift: a new music stream starts level
       (let ((p (vector-ref s 13))) (when p (player-close! p)) (vector-set! s 13 #f))
       (vector-set! s 12 #f)
       (vector-set! s 14 (make-mixer))
@@ -403,7 +418,8 @@
                 ;; the music: the most aware guard's state, no timer of our own
                 (when sec
                   (sections-want! sec (desire-from-states states))
-                  (sections-tick! sec)))
+                  (sections-tick! sec))
+                (music-lift! s dt))
               (let* ((g (car gs)) (e (guard-entry s i))
                      (gx (list-ref g 0)) (gy (list-ref g 1)) (gmoved (list-ref g 2))
                      (state (list-ref g 3))
@@ -470,9 +486,35 @@
       ;; the bed's own mono stream, once its loop is rendered
       (when (bank-bed-loop (sound-bank s))
         (pump-stream! s (vector-ref s 22) SFX-DEPTH-S (lambda (b n) (bed-fill! s b n)) 'bed))
-      (let ((mp (vector-ref s 13)))
-        (when mp (pump-stream! s (vector-ref s 11) MUSIC-DEPTH-S (lambda (b n) (player-pull! mp b 0 n)) 'music
-                               (music-rate s)))))
+      (when (vector-ref s 13)
+        (pump-stream! s (vector-ref s 11) MUSIC-DEPTH-S (lambda (b n) (music-pull! s b n)) 'music
+                      (music-rate s))))
+
+    ;; the music's n frames: through the controller (a pickup cuts in on the beat),
+    ;; or the player alone for a track without routes
+    (define (music-pull! s b n)
+      (let ((sec (vector-ref s 15)))
+        (if sec (sections-pull! sec b n) (player-pull! (vector-ref s 13) b 0 n))))
+
+    ;; THE ALERT LIFT (David, 2026-09-26: yes): the music's gain rises MUSIC-LIFT-DB
+    ;; while the walk is headed for alert (the detected pickup, alert itself), over
+    ;; LIFT-IN-S, and falls back over LIFT-OUT-S once it heads anywhere else (the
+    ;; release is slow). On the stream's volume live; in the headless mix otherwise.
+    (define MUSIC-LIFT-DB 3.5)
+    (define LIFT-IN-S 0.5)
+    (define LIFT-OUT-S 2.5)
+    (define (music-lift s) (vector-ref s 27))
+    (define (music-lift! s dt)
+      (let* ((sec (vector-ref s 15))
+             (top (expt 10.0 (/ MUSIC-LIFT-DB 20.0)))
+             (target (if (and sec (eq? (sections-headed sec) 'alert)) top 1.0))
+             (now (vector-ref s 27))
+             (step (* dt (/ (- top 1.0) (if (> target now) LIFT-IN-S LIFT-OUT-S))))
+             (next (if (> target now) (min target (+ now step)) (max target (- now step)))))
+        (unless (= next now)
+          (vector-set! s 27 next)
+          (let ((st (vector-ref s 11)))
+            (when st (set-audio-stream-volume! st (* MUSIC-GAIN next)))))))
 
     ;; headless: n frames of everything mixed (the music at its stream gain)
     (define (sound-render! s out n)
@@ -480,10 +522,9 @@
         (mixer-render! (sound-mixer s) out n)
         (mixer-render! (sound-bed-mixer s) tmp n)
         (add-into! out tmp n 1.0)
-        (let ((p (vector-ref s 13)))
-          (when p
-            (player-pull! p tmp 0 n)
-            (add-into! out tmp n MUSIC-GAIN)))))
+        (when (vector-ref s 13)
+          (music-pull! s tmp n)
+          (add-into! out tmp n (* MUSIC-GAIN (music-lift s))))))
 
     ;; since the last call: (part . ms-spent) for each part, and (frames . n), the
     ;; frames given to the steps' sink: ms per second of audio is ms / (n / rate)
