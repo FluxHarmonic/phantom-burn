@@ -43,18 +43,32 @@
           play-hold? play-after-tick! play-frame! play-hud!
           play-held! play-mode-devices play-mode-deck play-mode-terminal
           play-mode-practice? play-mode-crash play-mode-lesson play-mode-practice-done?
-          play-sounding)
+          play-sounding play-mode-set-best! play-mode-set-on-record! play-mode-phase play-mode-show-end!)
 
   (begin
 
     (define FADE-OUT 0.9)           ; s, caught: to black
     (define FADE-IN 0.6)            ; s, the floor again
     (define WIN-HOLD 6.0)           ; s on the win card, then a new attempt (or the title)
+    (define END-HOLD 8.0)           ; s on the 0.1 end card after it (a real floor)
 
     (define *core* #f)
     (define *coll* #f)
     (define *model* (make-bytevector 64 0))
-    (define *phase* 'play)          ; play, caught, won
+    (define *phase* 'play)          ; play, caught, won, end (the 0.1 end card)
+    (define (play-mode-phase) *phase*)
+    ;; Phantom 0.1: the floor's best, (secs . incidents) or #f, from the shell
+    ;; (localStorage on the web, the save file natively); the shell's hook
+    ;; (proc secs incidents) keeps a finish; this attempt beat the best?
+    (define *best* #f)
+    (define *on-record* #f)
+    (define *new-best* #f)
+    (define (play-mode-set-best! b) (set! *best* b))
+    (define (play-mode-set-on-record! proc) (set! *on-record* proc))
+    ;; for looking at the end card (the native --end-card): on it now, as
+    ;; if this attempt had finished in secs
+    (define (play-mode-show-end! secs)
+      (set! *ticks-at-win* (* 60 secs)) (set! *phase* 'end) (set! *timer* 0.0) (set! *place* #f))
     (define *timer* 0.0)            ; s in the phase
     (define *fade-in* 0.0)          ; s left of the fade back in
     (define *attempts* 1)
@@ -202,6 +216,13 @@
           ((tier) (say! (tier-line (cadr r))))
           (else #f))))
 
+    ;; A finish on a real floor: the best so far and the shell's keeping.
+    (define (record-finish!)
+      (let ((secs (exact (floor (/ *ticks-at-win* 60)))) (n (length (play-incidents *core*))))
+        (set! *new-best* (and *best* (or (< secs (car *best*)) (< n (cdr *best*)))))
+        (set! *best* (play-best-after *best* secs n))
+        (when *on-record* (*on-record* secs n))))
+
     ;; Apply what a use did: the panel switches its circuit in the renderer.
     (define (apply-use! r)
       (cond ((null? r) (say! "NOTHING HERE TO USE"))
@@ -210,6 +231,8 @@
              (say! (if (eq? (car r) 'panel-on) "LIGHTS ON" "LIGHTS OFF")))
             ((eq? (car r) 'panel-deny) (say! "THE PANEL WANTS A FACILITIES BADGE"))
             ((eq? (car r) 'reader-deny) (say! "THE READER WANTS A FACILITIES BADGE"))
+            ;; the service lift (Phantom 0.1): the deck calls it with FACILITIES
+            ((eq? (car r) 'lift-deny) (say! "THE SERVICE LIFT ANSWERS FACILITIES ONLY"))
             ;; the badge, from its drawer (Phantom 0.1)
             ((eq? (car r) 'badge) (set! *badge-flash* 2.5) (render-hide-part! 'badge #t))
             ;; a session left logged in: the deck learned its tier
@@ -317,9 +340,19 @@
         ((eq? *phase* 'won)
          (guard-hold! (play-guard *core*))
          (cond ((< *timer* WIN-HOLD) #f)
+               ;; a real floor: the 0.1 end card next (the sim goes straight on)
+               ((not *practice*) (set! *phase* 'end) (set! *timer* 0.0) #f)
                (*on-win*
                 ;; hold the card until the shell has gone to the title
                 (when (< *timer* (+ WIN-HOLD TICK)) (*on-win*))
+                #f)
+               (else (restart-walker))))
+        ((eq? *phase* 'end)
+         (guard-hold! (play-guard *core*))
+         (cond ((< *timer* END-HOLD) #f)
+               (*on-win*
+                ;; hold the card until the shell has gone to the title
+                (when (< *timer* (+ END-HOLD TICK)) (*on-win*))
                 #f)
                (else (restart-walker))))
         (*place*
@@ -346,7 +379,9 @@
                  ((eq? o 'won) (set! *phase* 'won) (set! *timer* 0.0)
                   (set! *ticks-at-win* (play-ticks *core*))
                   ;; the patch note's ping, on the landing (none in the sim)
-                  (unless *practice* (play-event! *core* 'note (walker-x w) (walker-y w))))
+                  (unless *practice* (play-event! *core* 'note (walker-x w) (walker-y w)))
+                  ;; the finish, remembered (Phantom 0.1)
+                  (unless *practice* (record-finish!)))
                  ((eq? o 'badge) (set! *badge-flash* 2.5)
                   ;; taken: gone from the desk (the compiler's badge part)
                   (render-hide-part! 'badge #t)))
@@ -520,16 +555,20 @@
             (set-color 1.0 1.0 1.0)))))
 
     (define (draw-objective! w h ts)
-      (let ((line (cond ((eq? *phase* 'won) #f)
+      (let ((line (cond ((memq *phase* '(won end)) #f)
                         ((> *message-t* 0.0) *message*)
                         ;; PRACTICE: Crash's lines coach you; floor 14's places don't apply
                         ((and *practice* (play-near-exit? *core*) (play-badge? *core*)) "THE READER: PRESS F (USE)")
                         (*practice* #f)
                         ((> *badge-flash* 0.0) "FACILITIES BADGE. NOW THE STAIRWELL DOOR, UNDER THE MEZZANINE")
+                        ;; the service lift (Phantom 0.1)
+                        ((play-near-lift? *core*)
+                         (if (eq? (play-tier *core*) 'staff) "THE SERVICE LIFT ANSWERS FACILITIES ONLY" "THE SERVICE LIFT: PRESS F (USE)"))
                         ((and (play-near-exit? *core*) (play-badge? *core*)) "THE READER: PRESS F (USE)")
                         ((play-near-exit? *core*) "THE READER WANTS A FACILITIES BADGE")
                         ((play-badge? *core*) "TO THE STAIRWELL DOOR, UNDER THE MEZZANINE")
                         ;; the deck has FACILITIES without the badge: readers still want it
+                        ((and (play-learned-tier *core*) (play-lift-tier *core*)) "YOUR DECK HAS FACILITIES. CALL THE SERVICE LIFT, BEHIND THE KITCHEN")
                         ((play-learned-tier *core*) "YOUR DECK HAS FACILITIES. THE STAIRWELL READER WANTS THE BADGE")
                         (else "GET FACILITIES: THE FM OFFICE"))))
         (when line
@@ -584,10 +623,53 @@
                                      "  ATTEMPT " (number->string *attempts*))
                       x (line (+ 4 (length patches))) ts)
            (set-color 1.0 1.0 1.0)))
+        ((eq? *phase* 'end) (draw-end-card! w h ts))
         ((> *fade-in* 0.0)
          (set-color 0.0 0.0 0.0 (/ *fade-in* FADE-IN))
          (with-blend-mode 'normal (draw-filled-rect 0 0 w h))
          (set-color 1.0 1.0 1.0))))
+
+    ;; m:ss
+    (define (clock secs)
+      (string-append (number->string (quotient secs 60)) ":"
+                     (let ((s (remainder secs 60))) (string-append (if (< s 10) "0" "") (number->string s)))))
+
+    ;; The 0.1 end card (Phantom 0.1, item 3), after the patch note: the
+    ;; tower's floors above, 27 next, your floor with its time and the way
+    ;; out, and the best kept on this device; then the title (the flow) or a
+    ;; new attempt.
+    (define ABOVE '(("60" "THE TOP") ("51" "EXECUTIVE") ("38" "DATA FLOOR") ("27" "PLANT")))
+    (define (draw-end-card! w h ts)
+      (let* ((a (min 1.0 (/ *timer* 0.8)))
+             (secs (exact (floor (/ *ticks-at-win* 60))))
+             (n (length (play-incidents *core*)))
+             (x (/ (- w (text-width "27  PLANT        NEXT" ts)) 2))
+             (line (lambda (i) (+ (* 0.26 h) (* i 12 ts)))))
+        (set-color 0.0 0.0 0.0 1.0)
+        (with-blend-mode 'normal (draw-filled-rect 0 0 w h))
+        (set-color 0.8 0.85 1.0 a)
+        (big-centred "TO BE CONTINUED" w (* 0.12 h) (* 2 ts))
+        (let loop ((fs ABOVE) (i 0))
+          (unless (null? fs)
+            (if (string=? (car (car fs)) "27") (set-color 0.702 0.42 1.0 a) (set-color 0.45 0.5 0.6 a))
+            (draw-text (string-append (car (car fs)) "  " (cadr (car fs)) (if (string=? (car (car fs)) "27") "        NEXT" ""))
+                       x (line i) ts)
+            (loop (cdr fs) (+ i 1))))
+        (set-color 0.8 0.85 1.0 a)
+        (draw-text (string-append "14  OFFICES      " (clock secs) "  INCIDENTS " (number->string n)) x (line 4) ts)
+        (draw-text (case (play-way-out *core*)
+                     ((lift) "    OUT BY THE SERVICE LIFT")
+                     ((stairwell) "    OUT BY THE STAIRWELL")
+                     (else ""))
+                   x (line 5) ts)
+        (when *best*
+          (set-color 0.45 0.5 0.6 a)
+          (draw-text (string-append "BEST " (clock (car *best*)) "  FEWEST INCIDENTS " (number->string (cdr *best*))
+                                    (if *new-best* "  NEW BEST" ""))
+                     x (line 7) ts))
+        (set-color 0.45 0.5 0.6 a)
+        (big-centred "PHANTOM BURN 0.1" w (* 0.88 h) ts)
+        (set-color 1.0 1.0 1.0)))
 
     ;; Gibson's lines are sentence case; the HUD's font has capitals only, so
     ;; they are drawn in capitals until it grows lower case.

@@ -30,7 +30,8 @@
   (export make-play play? play-reset! play-tick!
           play-data play-guard play-guard-world
           play-light play-light-01 play-visibility play-shape play-light-state
-          play-badge? play-learned-tier play-outcome play-ticks play-start-walker
+          play-badge? play-learned-tier play-way-out play-near-lift? play-lift-tier play-best-after
+          play-outcome play-ticks play-start-walker
           play-near-exit? GUARD-START-LEG PICKUP-REACH EXIT-REACH
           play-hearing play-take-steps! play-last-heard play-runner-room
           play-guard-path! play-set-hearing!
@@ -89,7 +90,21 @@
     ;;  Phantom 0.1: 40 the tier your deck learned without the badge (the
     ;;  sticky note's password at a terminal, or a session left logged in),
     ;;  or #f. Only the badge (7) opens readers.
-    (define (play? p) (and (vector? p) (= (vector-length p) 41) (eq? (vector-ref p 0) 'play)))
+    ;;  41 the way out, once won: stairwell (the badge at the reader) or
+    ;;  lift (the service lift, called with the deck), else #f
+    (define (play? p) (and (vector? p) (= (vector-length p) 42) (eq? (vector-ref p 0) 'play)))
+    (define (play-way-out p) (vector-ref p 41))
+    ;; within reach of the service lift's call point (by your last place)
+    (define (play-near-lift? p)
+      (let ((l (play-lift (vector-ref p 1))) (x (vector-ref p 17)) (y (vector-ref p 18)))
+        (and l x y (let ((dx (- x (vector-ref l 0))) (dy (- y (vector-ref l 1))))
+                     (< (+ (* dx dx) (* dy dy)) (* EXIT-REACH EXIT-REACH))))))
+    ;; the lift's tier, or #f: can your deck call it?
+    (define (play-lift-tier p) (let ((l (play-lift (vector-ref p 1)))) (and l (vector-ref l 2))))
+    ;; The best of a floor (Phantom 0.1): (secs . incidents), each the least
+    ;; so far, after a finish in secs with incidents; best is #f at first.
+    (define (play-best-after best secs incidents)
+      (if best (cons (min (car best) secs) (min (cdr best) incidents)) (cons secs incidents)))
     (define (play-units-off! p off?) (vector-set! p 39 off?) p)
     (define (play-unit-count p) (vector-length (vector-ref p 37)))
     (define (play-active-unit p) (vector-ref p 38))
@@ -164,7 +179,7 @@
                         (make-devices data) (make-deck) (device-approaches data gw) 0.0
                         (make-vector (device-count data) 0.0) (camera-views data)
                         (let ((ts (terminal-targets data))) (vector #f 0 -1 0.0 '(idle) 0.0 ts -1 ts)) #f
-                        units 0 #f #f)))
+                        units 0 #f #f #f)))
         p))
 
     ;; PRACTICE: a capture in the sim resets only its room (D38). The runner
@@ -240,6 +255,7 @@
       (terminal-reset! (vector-ref p 35))
       (vector-set! p 36 #f)
       (vector-set! p 40 #f)
+      (vector-set! p 41 #f)
       p)
 
     ;; The path from the guard to you (for playback: how much of the guard
@@ -697,6 +713,7 @@
                  (panel (let find ((ps (play-panels data)))
                           (cond ((null? ps) #f) ((reach? (cadr (car ps)) (caddr (car ps))) (car ps)) (else (find (cdr ps))))))
                  (exit (play-exit data))
+                 (lift (play-lift data))
                  (term (terminal-at data x y z))
                  ;; the badge's drawer (Phantom 0.1), while the badge is in it;
                  ;; a terminal on the same desk wins only when it is nearer
@@ -735,9 +752,22 @@
                      (event! p 'reader-ok (vector-ref exit 0) (vector-ref exit 1))
                      (event! p 'door-open (vector-ref exit 0) (vector-ref exit 1))
                      (vector-set! p 8 'won)
+                     (vector-set! p 41 'stairwell)
                      (list 'reader-ok))
                    (begin (event! p 'reader-deny (vector-ref exit 0) (vector-ref exit 1))
                           (list 'reader-deny))))
+              ;; the service lift (Phantom 0.1): the deck calls it, with the
+              ;; lift's tier from any source (the badge, a password, a session)
+              ((and lift (reach? (vector-ref lift 0) (vector-ref lift 1)))
+               (if (tier-allows? (play-tier p) (vector-ref lift 2))
+                   (begin
+                     (event! p 'deck-confirm (vector-ref lift 0) (vector-ref lift 1))
+                     (event! p 'lift-call (vector-ref lift 0) (vector-ref lift 1))
+                     (vector-set! p 8 'won)
+                     (vector-set! p 41 'lift)
+                     (list 'lift-ok))
+                   (begin (event! p 'deck-deny (vector-ref lift 0) (vector-ref lift 1))
+                          (list 'lift-deny (vector-ref lift 2)))))
               (else '())))))
 
     ;; --- the terminal (design §3; the device API §3) ------------------------------

@@ -84,6 +84,7 @@
  (reader facilities)
  (noise-ambient hvac 0.3 buzz 0.2 city 0.4)
  (nav -0.5 -0.5 41.0 15.0)
+ (lift 39.4 2.25 facilities)
  (devices
   (print-printer printer 18.6 10.0 0.0 270.0 staff 4)
   (meeting-phone phone 25.3 10.05 0.75 0.0 staff 6)

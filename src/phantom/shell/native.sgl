@@ -47,6 +47,8 @@
   (import (sigil core)
           (sigil math)
           (sigil process)
+          (sigil io)
+          (sigil list)
           (sigil fs)
           (sigil desktop)
           (sigil graphics)
@@ -180,7 +182,44 @@
                           (not (arg-value args "--view" #f)))
         (game-set-play! (vector play-hold? play-after-tick! play-frame! play-hud! play-press! play-held!))
         (play-mode-set-dev! (and (member "--dev" args) #t))
+        ;; the floor's best (Phantom 0.1), kept in the save file
+        (let ((b (find (lambda (e) (equal? (cadr e) (floor-name))) (read-save))))
+          (play-mode-set-best! (and b (cons (caddr b) (cadddr b)))))
+        (play-mode-set-on-record! (lambda (secs incidents) (record-best! (floor-name) secs incidents)))
+        ;; --end-card SECS: straight to the 0.1 end card (for looking at it)
+        (let ((e (arg-value args "--end-card" #f)))
+          (when e (play-mode-show-end! (or (string->number e) 0))))
         (unless (member "--hud" args) (game-set-hud! 0))))
+
+    ;; --- the save (Phantom 0.1): what is remembered, natively ---------------------
+    ;; $XDG_DATA_HOME/phantom-burn/save.sexp (else ~/.local/share/...): one
+    ;; datum, ((best FLOOR SECS INCIDENTS) ...), each floor's best time and
+    ;; fewest incidents (the page keeps the same in localStorage).
+    (define (save-dir)
+      (string-append (or (getenv "XDG_DATA_HOME") (string-append (or (getenv "HOME") ".") "/.local/share"))
+                     "/phantom-burn"))
+    (define (save-path) (string-append (save-dir) "/save.sexp"))
+    (define (floor-name)
+      (let loop ((i (- (string-length *dir*) 1)))
+        (cond ((< i 0) *dir*)
+              ((char=? (string-ref *dir* i) #\/) (substring *dir* (+ i 1) (string-length *dir*)))
+              (else (loop (- i 1))))))
+    (define (read-save)
+      (let ((d (and (file-exists? (save-path))
+                    (guard (e (#t #f)) (read (open-input-string (read-file-string (save-path))))))))
+        (if (list? d) (filter (lambda (e) (and (list? e) (= (length e) 4) (eq? (car e) 'best))) d) '())))
+    (define (record-best! floor secs incidents)
+      (let* ((old (read-save))
+             (was (find (lambda (e) (equal? (cadr e) floor)) old))
+             (e (list 'best floor (if was (min secs (caddr was)) secs) (if was (min incidents (cadddr was)) incidents))))
+        (guard (x (#t #f))
+          (ensure-directory (save-dir))
+          (write-file-string (save-path)
+                             (string-append ";; Phantom Burn's save: each floor's best time (s) and fewest incidents\n"
+                                            (let ((out (open-output-string)))
+                                              (write (cons e (filter (lambda (x) (not (equal? (cadr x) floor))) old)) out)
+                                              (get-output-string out))
+                                            "\n")))))
 
     ;; The guard's body, beside the floors (one for every floor).
     (define GUARD-SGM "assets/guard/guard.sgm")

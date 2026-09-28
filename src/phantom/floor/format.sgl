@@ -396,7 +396,7 @@
 
     ;; Every thing kind's fields.
     (define THING-SPECS
-      '((lifts (in symbol #t) (along segment #t) (count count #t) (kind symbol #f))
+      '((lifts (in symbol #t) (along segment #t) (count count #t) (kind symbol #f) (calls symbol #f))   ; calls: TIER, a lift your deck calls (Phantom 0.1)
         (guard (kind symbol #t) (route points #t) (waits numbers #f))
         (desk (at point2 #f) (in symbol #f) (against symbol #f) (from anchor #f) (kind symbol #t) (facing number #f))
         (cabinet (at point2 #f) (in symbol #f) (against symbol #f) (from anchor #f) (kind symbol #t) (facing number #f))

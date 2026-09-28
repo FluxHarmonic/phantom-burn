@@ -85,6 +85,14 @@
           (when t (display (string-append "phantom-burn: sound " t)) (newline)))))
 
     (define (param key) (let ((p (assoc key *params*))) (and p (cdr p))))
+    ;; "SECS_INCIDENTS" -> (secs . incidents), or #f
+    (define (best-param v)
+      (and v (let loop ((i 0))
+               (cond ((>= i (string-length v)) #f)
+                     ((char=? (string-ref v i) #\_)
+                      (let ((a (string->number (substring v 0 i))) (b (string->number (substring v (+ i 1) (string-length v)))))
+                        (and a b (cons a b))))
+                     (else (loop (+ i 1)))))))
 
     (define (stand-in?) (string=? *floor* "stand-in"))
 
@@ -198,6 +206,13 @@
         (game-set-play! (vector play-hold? play-after-tick! play-frame! play-hud! play-press! play-held!))
         (play-mode-set-dev! (and (param "dev") #t))
         (when (param "flow") (play-mode-set-on-win! (lambda () (set! *want-title* #t))))
+        ;; the floor's best (Phantom 0.1): the page's localStorage, as &best=SECS_INCIDENTS;
+        ;; a finish goes back to it as a line
+        (play-mode-set-best! (best-param (param "best")))
+        (play-mode-set-on-record!
+         (lambda (secs incidents)
+           (display "phantom-burn: floor-done ") (display *floor*) (display " ")
+           (display secs) (display " ") (display incidents) (newline)))
         (unless (or (param "hud") (param "dev")) (game-set-hud! 0)))
       (set! *started* #t)
       (when *replay-text* (run-replay! *replay-text*) (set! *replay-text* #f)))

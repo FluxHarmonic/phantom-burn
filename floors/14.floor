@@ -65,7 +65,7 @@
            (c2 level: 0.8 panel: (20 5.5) needs: facilities)   ; the lobby and corridor; the panel on the corridor's south wall
            (c3 level: 0.3))
   things: ((lifts   in: lobby    along: ((0 1) (0 6))      count: 3)
-           (lifts   in: kitchen  along: ((40 1) (40 3.5))  count: 1)   ; the service lift, behind the kitchen
+           (lifts   in: kitchen  along: ((40 1) (40 3.5))  count: 1  calls: facilities)   ; the service lift, behind the kitchen: the other way out
            ;; the patrol: the lift lobby, the corridor, the open plan, the kitchen
            (guard   kind: patrol  route: ((2 2) (12.5 1.5) (21 6.5) (34 10) (36 2.5))  waits: (3 0 0 2 3))
            ;; the open plan: two desk pods, two monitors left on
