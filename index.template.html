@@ -254,7 +254,7 @@
             // "music MS ... frames N": MS of synthesis over N frames of audio at 44100
             var ms = Number(field(line, "music")), n = Number(field(line, "frames"));
             var perS = n > 0 ? ms / (n / 44100) : 0;
-            shown.music = "music " + (params.get("rate") || "24") + "k " + (field(line, "section") || "?") +
+            shown.music = "music " + (params.get("rate") || "28") + "k " + (field(line, "section") || "?") +
               " x" + (field(line, "lift") || "1") + " · " + perS.toFixed(0) + " ms/s = " +
               (perS / 60).toFixed(2) + " ms a frame · music " + ms + " frames " + n;
           } else if (/^phantom-burn: sound (robot-ready|events-ready|bank-ready) [0-9.]+$/.test(line)) {

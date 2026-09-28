@@ -96,7 +96,7 @@
         (set! *s* (make-sound SOUND-RATE loader))))
 
     ;; the music's render rate in Hz (?rate=24|28|32 on the web, in kHz there): David
-    ;; A/Bs the lo-fi on his phone; 24000 by default
+    ;; A/Bs the lo-fi on his phone; 28000 by default (his pick, 2026-09-28)
     (define (sound-game-set-music-rate! hz)
       (when *s* (sound-set-music-rate! *s* hz)))
 
