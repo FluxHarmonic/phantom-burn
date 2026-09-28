@@ -102,7 +102,11 @@
            (terminal id: fm-terminal     on-desk: (25.9 2.8)  login: facilities)  ; the floor map; LOG IN with the sticky note
            (desk     at: (15.8 2.5)  kind: office-desk-off  facing: 180)          ; the server closet's console desk
            (terminal id: server-terminal on-desk: (16.1 2.6)  facing: 180  session: facilities)   ; an admin left logged in
-           (camera   id: lift-camera     in: lobby  at: (0 3.5)  look: (8.17 0.76 -0.62)  fov: 55  range: 10))
+           (camera   id: lift-camera     in: lobby  at: (0 3.5)  look: (8.17 0.76 -0.62)  fov: 55  range: 10)
+           ;; the second camera (design section 4): under the mezzanine on the lobby's
+           ;; north wall, looking west along it at the stairwell door. Lit, the reader
+           ;; is in its view; dark (the lobby's lights off), it sees nothing.
+           (camera   id: stair-camera    in: lobby  at: (7 10)  look: (3.0 9.3 0.8)  fov: 60  range: 8))   ; look: the point it looks at
   views: ((establishing  at: (1 1 1.6)       look: (14 10 3))
           (arrival       at: (1.3 1.3 1.6)   look: (10.0 7.2 2.2)   lens: 17)
           (overlook      at: (4.2 9.3 4.6)   look: (7.0 -26.0 1.0)  lens: 19)

@@ -92,7 +92,8 @@
   (lobby-blinds blinds 6.0 0.0 3.0 0.0 facilities 0 1.0 0.0 11.0 0.0)
   (fm-terminal terminal 25.9 2.8 0.75 0.0 staff 7 login facilities)
   (server-terminal terminal 16.1 2.6 0.75 180.0 staff 3 session facilities)
-  (lift-camera camera 0.655 3.5 2.61 -20.0321 security 0 55.0 10.0 -21.9891))
+  (lift-camera camera 0.655 3.5 2.61 -20.0321 security 0 55.0 10.0 -21.9891)
+  (stair-camera camera 7.0 9.345 2.61 -179.3554 security 0 60.0 8.0 -24.3454))
  (fixtures
   (4.75 4.75 5.95 c2)
   (8.75 4.75 5.95 c2)
