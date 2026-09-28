@@ -61,6 +61,7 @@
   (export make-sound sound-start! sound-gesture! sound-prepare! sound-frame! sound-step! sound-event! sound-stop!
           sound-render! sound-trace sound-started? sound-bank sound-mixer sound-bed-mixer sound-last-events
           sound-section sound-music-playing? sound-set-music! sound-set-music-rate! music-lift MUSIC-RATE
+          sound-set-bed! sound-bed sound-bed-loop
           sound-cue-plays pip-interval MUSIC-TUNE SURFACE-MAP)
   ;; On the web, one-shots play as the audio bridge's CUES: uploaded once, mixed
   ;; in the AudioWorklet (sigil-wasm-audio's load-audio-cue / play-audio-cue), so
@@ -132,7 +133,17 @@
               #f #f #f #f #f (make-mixer) #f
               '() (list (cons 'bank 0.0) (cons 'sfx 0.0) (cons 'music 0.0) (cons 'bed 0.0) (cons 'frames 0)) #f #f (list 0.0 0.0 0.0)
               (if (and (pair? opt) (pair? (cdr opt))) (cadr opt) MUSIC-TUNE)
-              #f 0 '() 0 '() 1.0 MUSIC-RATE))
+              #f 0 '() 0 '() 1.0 MUSIC-RATE 'floor))
+
+    ;; Which bed plays (slot 29): floor, the building's hum and air, or sim,
+    ;; PRACTICE's air (the bank's bed-sim, once rendered; the hum until then).
+    ;; The two loops are the same length, so the bed's place carries over.
+    (define (sound-set-bed! s which) (vector-set! s 29 which))
+    (define (sound-bed s) (vector-ref s 29))
+    (define (sound-bed-loop s) (bed-loop s))
+    (define (bed-loop s)
+      (let ((sim (and (eq? (vector-ref s 29) 'sim) (bank-sim-bed-loop (sound-bank s)))))
+        (or sim (bank-bed-loop (sound-bank s)))))
 
     (define (sound-music-playing? s) (and (vector-ref s 13) #t))
 
@@ -472,7 +483,7 @@
 
     ;; the bed's stereo stream: n frames of the loop from bed-pos, copied (wrapping)
     (define (bed-fill! s b n)
-      (let ((l (bank-bed-loop (sound-bank s))))
+      (let ((l (bed-loop s)))
         (let loop ((at 0))
           (when (< at n)
             (let* ((len (quotient (bytevector-length l) 8))

@@ -51,7 +51,7 @@
           (motif tune player))
   (export bank-tune-text bank-slots make-bank bank-render! bank-render-for! bank-sample bank-ready? bank-rate
           bank-events-ready? bank-robot-ready? BANK-ORDER
-          bank-bed-loop crossfade-loop BED-TUNE-TEXT BED-LOOP-S
+          bank-bed-loop bank-sim-bed-loop crossfade-loop BED-TUNE-TEXT BED-LOOP-S
           SLOT-S BANK-SURFACES EVENT-KINDS EVENT-S event-seconds)
   (begin
     (define SLOT-S 0.6)                   ; the longest slot (the grate rings through it)
@@ -238,6 +238,11 @@
     ;; of 20 ms, the event at row 0, rendered for its first (event-seconds KIND) seconds
     (define EVENT-KINDS '(door-open door-close panel-on panel-off reader-ok reader-deny badge caught note
                           camera-pip camera-alert
+                          ;; P3's devices and PRACTICE's Crash-line blip (Phantom 0.1: David,
+                          ;; 2026-09-28, "the sound effects in the Phantom sketchbook sound
+                          ;; good"; s0's drafts 9c48c56 and 29fe7ab, copied byte for byte)
+                          deck-hold deck-confirm deck-deny print-done blinds-open blinds-close
+                          terminal-open terminal-close crash
                           ;; robot speak (EDGE), after the rest: three variants of each mood
                           speak-suspicious-1 speak-suspicious-2 speak-suspicious-3
                           speak-searching-1 speak-searching-2 speak-searching-3
@@ -254,6 +259,11 @@
       (quote ((door-open . 2.5) (door-close . 0.52) (panel-on . 0.62) (panel-off . 0.5)
               (reader-ok . 0.54) (reader-deny . 0.5) (badge . 1.06) (caught . 2.5) (note . 1.6)
               (camera-pip . 0.3) (camera-alert . 1.0)
+              ;; measured 2026-09-28 (the last sample above -60 dBFS, plus 15%)
+              (deck-hold . 1.14) (deck-confirm . 0.54) (deck-deny . 0.44) (print-done . 0.74)
+              (blinds-open . 1.16) (blinds-close . 1.16) (terminal-open . 0.62) (terminal-close . 0.56)
+              ;; the blip: its longest variant (A 0.7, B 0.32, C 0.16), since ?blip swaps them
+              (crash . 0.7)
               ;; robot speak: each tune whole (its rows x 60 ms: the phrase and 0.36 s of tail)
               (speak-suspicious-1 . 0.66) (speak-suspicious-2 . 0.78) (speak-suspicious-3 . 0.72)
               (speak-searching-1 . 0.96) (speak-searching-2 . 0.96) (speak-searching-3 . 0.96)
@@ -277,7 +287,7 @@
     (define BANK-ORDER
       (append ROBOT-FIRST
               (filter (lambda (k) (not (or (later-variant? k) (memq k ROBOT-FIRST)))) EVENT-KINDS)
-              '(bed)
+              '(bed bed-sim)
               (filter later-variant? EVENT-KINDS)))
 
     ;; --- rendering -------------------------------------------------------------------------------
@@ -287,7 +297,8 @@
     ;; player's own output copied natively: folding it to mono sample by sample
     ;; in Sigil cost more than motif's render (10 s of the slots' tune: 5.2 s to
     ;; pull, 6.2 s more to fold, natively).
-    ;; #(player rate buf done total samples layout stage bed-loop slots loader kinds-left)
+    ;; #(player rate buf done total samples layout stage bed-loop slots loader kinds-left
+    ;;   sim-bed-loop)   sim-bed-loop: PRACTICE's bed (the loader's bed-sim), or #f
     ;;   stage: 'slots | (event KIND) | 'bed | 'ready; buf/done/total are the
     ;;   current stage's (frames); samples: ((key . bv) ...), the cut slots and the
     ;;   events; layout: ((key start-frame frames) ...); slots: the slots' buffer
@@ -300,7 +311,7 @@
                           (slot-layout)))
              (total (rows->frames (slot-total-rows) rate)))
         (vector (open-tune-player t rate) rate (make-bytevector (* 8 total) 0) 0 total '() layout 'slots #f #f
-                (if (pair? opt) (car opt) (lambda (name) #f)) BANK-ORDER)))
+                (if (pair? opt) (car opt) (lambda (name) #f)) BANK-ORDER #f)))
 
     (define (bank-rate b) (vector-ref b 1))
     (define (bank-ready? b) (eq? (vector-ref b 7) 'ready))
@@ -314,6 +325,9 @@
              (not (member (vector-ref b 7) (map (lambda (k) (list (quote event) k)) ROBOT-FIRST)))
              (let none ((ks ROBOT-FIRST)) (or (null? ks) (and (not (memq (car ks) left)) (none (cdr ks))))))))
     (define (bank-bed-loop b) (vector-ref b 8))
+    ;; PRACTICE's bed, the sim's air in place of the building's hum, as the same
+    ;; kind of seamless loop; #f until rendered, or when the loader has no bed-sim
+    (define (bank-sim-bed-loop b) (vector-ref b 12))
 
     (define BLOCK 1024)
 
@@ -358,9 +372,11 @@
       (vector-set! b 7 stage))
 
     (define (open-bed! b)
+      (open-bed-text! b BED-TUNE-TEXT 'bed))
+    (define (open-bed-text! b text stage)
       (let ((rate (vector-ref b 1)))
-        (open-stage! b (open-tune-player (read-tune-string BED-TUNE-TEXT) rate loop: #t)
-                     (exact (round (* (+ BED-WARM-S BED-LOOP-S BED-XFADE-S) rate))) 'bed)))
+        (open-stage! b (open-tune-player (read-tune-string text) rate loop: #t)
+                     (exact (round (* (+ BED-WARM-S BED-LOOP-S BED-XFADE-S) rate))) stage)))
 
     ;; the next stage in BANK-ORDER: an event the loader has a tune for, or the
     ;; bed; ready when none is left (the slots' buffer back where it was)
@@ -375,6 +391,10 @@
             ((eq? (car left) 'bed)
              (vector-set! b 11 (cdr left))
              (open-bed! b))
+            ((eq? (car left) 'bed-sim)
+             (vector-set! b 11 (cdr left))
+             (let ((text ((vector-ref b 10) "bed-sim")))
+               (if text (open-bed-text! b text 'bed-sim) (loop))))
             (else
               (let* ((kind (car left))
                      (text ((vector-ref b 10) (string-append "event-" (symbol->string kind)))))
@@ -393,8 +413,9 @@
           ((eq? stage 'slots)
            (vector-set! b 9 (vector-ref b 2))                      ; keep the slots' buffer
            (next-event! b))
-          ((eq? stage 'bed)
-           (vector-set! b 8 (crossfade-loop (vector-ref b 2)
+          ((memq stage '(bed bed-sim))
+           (vector-set! b (if (eq? stage 'bed) 8 12)
+                        (crossfade-loop (vector-ref b 2)
                                             (exact (round (* BED-WARM-S rate)))
                                             (exact (round (* BED-LOOP-S rate)))
                                             (exact (round (* BED-XFADE-S rate)))

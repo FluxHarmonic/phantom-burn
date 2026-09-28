@@ -27,6 +27,8 @@
   (cond ((member name (list MUSIC-TUNE HEAT-TRACE)) (read-file-string (string-append "assets/tunes/" name ".cts")))
         ((memq (string->symbol name) (map (lambda (k) (string->symbol (string-append "event-" (symbol->string k)))) EVENT-KINDS))
          (read-file-string (string-append "assets/tunes/" name ".cts")))
+        ;; PRACTICE's bed (the page picks its variant; natively, A)
+        ((string=? name "bed-sim") (read-file-string "assets/tunes/bed-sim.cts"))
         (else #f)))
 
 (define (f32 bv i) (bytevector-ieee-single-ref bv (* 4 i) 'little))
@@ -329,6 +331,37 @@
            (a (run)) (b (run)))
       (assert-true (> (rms a) 0.001))
       (assert-true (equal? a b)))))
+
+;; --- Phantom 0.1: the device and PRACTICE sounds, banked -------------------------------
+(define NEW-KINDS '(deck-hold deck-confirm deck-deny print-done blinds-open blinds-close terminal-open terminal-close crash))
+(test-group "the device and PRACTICE sounds (Phantom 0.1)"
+  (test "each device one-shot and the Crash-line blip is a kind, and renders a sample that sounds (above -50 dBFS)"
+    (let* ((names (map (lambda (k) (string-append "event-" (symbol->string k))) NEW-KINDS))
+           (b (make-bank RATE (apply only-loader names))))
+      (let loop () (unless (bank-render! b 65536) (loop)))
+      (for-each (lambda (k)
+                  (let ((smp (bank-sample b (list 'event k))))
+                    (assert-true (memq k EVENT-KINDS))
+                    (unless (and smp (> (rms smp) 0.00316)) (display (list k 'silent-or-missing)) (newline))
+                    (assert-true (and smp (> (rms smp) 0.00316)))))
+                NEW-KINDS)))
+  (test "PRACTICE's bed renders as its own seamless loop, the hum's length, and the sound plays it while set to sim"
+    (let ((s (ready-sound (only-loader "bed-sim"))))
+      (let* ((floor-l (bank-bed-loop (sound-bank s))) (sim-l (bank-sim-bed-loop (sound-bank s))))
+        (assert-true (and sim-l #t))
+        (assert-equal (bytevector-length floor-l) (bytevector-length sim-l))
+        (assert-false (equal? floor-l sim-l))
+        (assert-true (> (rms sim-l) 0.0003))
+        (assert-true (eq? (sound-bed-loop s) floor-l))
+        (sound-set-bed! s 'sim)
+        (assert-true (eq? (sound-bed-loop s) sim-l))
+        (sound-set-bed! s 'floor)
+        (assert-true (eq? (sound-bed-loop s) floor-l)))))
+  (test "without a bed-sim tune there is no sim loop, and set to sim the hum plays on"
+    (let ((s (ready-sound (only-loader))))
+      (assert-false (bank-sim-bed-loop (sound-bank s)))
+      (sound-set-bed! s 'sim)
+      (assert-true (eq? (sound-bed-loop s) (bank-bed-loop (sound-bank s)))))))
 
 ;; --- the bed as a loop (David's second bench: the bed as a player cost 1.86 ms) ---
 

@@ -282,14 +282,24 @@
           // the music: INFILTRATE's False Identity, PRACTICE's Heat Trace (Codex's scores)
           ["music-false-identity", "music-heat-trace"].concat(
           ["door-open", "door-close", "panel-on", "panel-off", "reader-ok", "reader-deny", "badge", "caught", "note",
-           "camera-pip", "camera-alert"]
+           "camera-pip", "camera-alert",
+           // P3's devices, and PRACTICE's Crash-line blip (Phantom 0.1)
+           "deck-hold", "deck-confirm", "deck-deny", "print-done", "blinds-open", "blinds-close",
+           "terminal-open", "terminal-close", "crash"]
             // robot speak (EDGE): three variants of each mood
             .concat(["bored", "suspicious", "searching", "there", "lost", "settle"].reduce(function (acc, m) {
               return acc.concat(["speak-" + m + "-1", "speak-" + m + "-2", "speak-" + m + "-3"]);
             }, []))
             .map(function (k) { return "event-" + k; }))
+            // PRACTICE's bed, the sim's air in place of the building's hum
+            .concat(["bed-sim"])
             .forEach(function (name) {
-              fetch("assets/tunes/" + name + ".cts").then(function (r) {
+              // David swaps the blip and the sim's bed by ear: ?blip=a|b|c, ?bed=a|b
+              // (A by default: the two-note chirp, the soft tone with a fan)
+              var blip = ({a: 1, b: 1, c: 1})[params.get("blip")] ? params.get("blip") : "a";
+              var bed = ({a: 1, b: 1})[params.get("bed")] ? params.get("bed") : "a";
+              var file = name === "event-crash" ? "crash-blip-" + blip : name === "bed-sim" ? "bed-sim-" + bed : name;
+              fetch("assets/tunes/" + file + ".cts").then(function (r) {
                 if (!r.ok) throw new Error(String(r.status));
                 return r.text();
               }).then(function (t) { app.dispatch("tune", name + "\n" + t); },

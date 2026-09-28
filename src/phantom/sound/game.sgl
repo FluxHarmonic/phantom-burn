@@ -41,7 +41,7 @@
     (define (level-music) (if (play-mode-practice?) PRACTICE-MUSIC MUSIC-TUNE))   ; PRACTICE: Heat Trace in the sim
 
     (define SOUND-TUNES
-      (append (list MUSIC-TUNE PRACTICE-MUSIC)
+      (append (list MUSIC-TUNE PRACTICE-MUSIC "bed-sim")
               (map (lambda (k) (string-append "event-" (symbol->string k))) EVENT-KINDS)))
 
     (define *s* #f)
@@ -110,6 +110,7 @@
       (when *s*
         (say-progress!)
         (sound-set-music! *s* (level-music))  ; the level's track (a no-op unless it changes)
+        (sound-set-bed! *s* (if (play-mode-practice?) 'sim 'floor))  ; PRACTICE's air in place of the hum
         (let ((feed (play-mode-sound-feed walker)))
           (set! *steps-n* (+ *steps-n* (length (caddr feed))))
           (set! *events-n* (+ *events-n* (length (cadddr feed))))
