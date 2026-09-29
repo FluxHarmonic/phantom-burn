@@ -1,17 +1,21 @@
 #!/usr/bin/env node
-// check-site.mjs - the local gate for a staged phantomburn.net tree (a
-// private preview: lighter than Harkfell's verify-site.mjs, the same idea).
+// check-site.mjs - the local gate for a staged phantomburn.net tree (public
+// from 0.1; Harkfell's verify-site.mjs, the same idea).
 //
 //   node scripts/check-site.mjs build/site
 //
 // Serves the tree on loopback through scripts/serve-site.mjs (Pages' rules:
 // the tree's own _headers, real 404s from 404.html, pretty URLs) and checks:
 //   manifest   the tree still hashes to build/site.manifest
-//   old-path   the game's first path (each _redirects source) is in no public
-//              file but _redirects, and has no directory in the tree
-//   root       / is 200 html with no link (<a) and no game path
-//   robots     /robots.txt disallows everything
-//   noindex    every response carries X-Robots-Tag: noindex
+//   tree       the site's own files are there: style.css, the icons, the
+//              Flux Harmonic mark, the fonts with their OFL.txt
+//   old-path   the game's earlier paths (each _redirects source) are in none of
+//              the site's own text files (the landing, the news, the feeds,
+//              version.json, _headers), and have no directory in the tree
+//   root       / is 200 html and links the game at /<game>/
+//   robots     /robots.txt allows everything (public from 0.1)
+//   indexable  no response carries X-Robots-Tag: noindex, and only the 404
+//              page asks not to be indexed (its <meta name="robots">)
 //   files      every file in the manifest is served 200 byte for byte, and
 //              nothing but .html is served as html
 //   missing    a missing path is a 404 with 404.html's body, at the root and
@@ -32,6 +36,9 @@
 //              title's 10 s wait, shows the room once it lands (not the console alone)
 //   reticle    in play the reticle is at the view's centre; aimed at floor 14's
 //              printer (?view=8) it lights and the deck's label stands beside it
+//   (pages)    scripts/check-site-pages.mjs: landing, carousel, contrast,
+//              badge-in, news, feeds, version, preview, crosslink, em-dash,
+//              console (its header lists what each checks)
 //   boots      the game at /<game>/ and its title (?title=1) boot in headless
 //              Chrome through this same server with no console error, and
 //              fetched the wasm from /w/<sha16>/ and nowhere else
@@ -45,6 +52,7 @@ import crypto from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
 import zlib from "node:zlib";
 import { createHandler, parseRedirects } from "./serve-site.mjs";
+import { pageLegs } from "./check-site-pages.mjs";
 
 const DIR = path.resolve((process.argv[2] || "").replace(/\/$/, ""));
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
@@ -52,7 +60,7 @@ if (!process.argv[2] || !fs.existsSync(path.join(DIR, "index.html"))) { console.
 const MAN = DIR + ".manifest";
 if (!fs.existsSync(MAN)) { console.log(`SETUP-FAILED: ${MAN} missing (scripts/stage-web)`); process.exit(2); }
 const sha = (b) => crypto.createHash("sha256").update(b).digest("hex");
-const GATES = ["scripts/check-site.mjs", "scripts/serve-site.mjs", "scripts/tree-manifest"];
+const GATES = ["scripts/check-site.mjs", "scripts/check-site-pages.mjs", "scripts/serve-site.mjs", "scripts/tree-manifest"];
 const gateHashes = GATES.map((g) => [g, sha(fs.readFileSync(path.join(REPO, g)))]);   // at the START of the run
 const head = execFileSync("git", ["-C", REPO, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 const clean = execFileSync("git", ["-C", REPO, "status", "--porcelain", "--untracked-files=no"], { encoding: "utf8" }).trim() === "";
@@ -74,15 +82,18 @@ const REDIRECTS = fs.existsSync(path.join(DIR, "_redirects")) ? parseRedirects(f
 
 // old-path: the first path lives on only as a redirect source
 const OLD = REDIRECTS.map((r) => r.from.replace(/\/\*$/, "").replace(/^\//, "")).filter((p, i, a) => p && a.indexOf(p) === i);
-for (const f of ["index.html", "404.html", "robots.txt", "_headers", "_redirects"]) {
-  if (!fs.existsSync(path.join(DIR, f))) { bad("old-path", `${f} is missing from the tree`); continue; }
-  if (f === "_redirects") continue;
+// the site's own text files: everything but the game's directory and the wasm
+const SITE_TEXT = files.filter((f) => !f.startsWith(SLUG + "/") && !f.startsWith("w/") && f !== "fonts/OFL.txt" && /\.(html|xml|json|txt|css)$|^_headers$/.test(f));
+for (const f of ["index.html", "404.html", "robots.txt", "_headers", "_redirects"]) if (!fs.existsSync(path.join(DIR, f))) bad("old-path", `${f} is missing from the tree`);
+for (const f of SITE_TEXT) {
   const t = fs.readFileSync(path.join(DIR, f), "utf8");
   // as a path (/NAME), not a substring: "display" does not name /play/
   // (redirect sources are plain lowercase names: no regex characters to escape)
   const named = OLD.filter((p) => new RegExp("/" + p + "(?![A-Za-z0-9_-])").test(t));
-  named.length ? bad("old-path", `${f} names ${named.join(" ")}`) : ok("old-path", `${f} names no old path`);
+  if (named.length) bad("old-path", `${f} names ${named.join(" ")}`);
 }
+if (SITE_TEXT.length) ok("old-path", `checked ${SITE_TEXT.length} site text files for ${OLD.map((p) => "/" + p).join(" ")}`);
+else bad("old-path", "no site text files to check");
 for (const p of OLD) fs.existsSync(path.join(DIR, p)) ? bad("old-path", `${p} exists in the tree`) : ok("old-path", `/${p}/ is only a redirect`);
 
 // wasm: one, content-named, and what the page points at
@@ -114,16 +125,23 @@ async function get(p) {
            location: r.headers.get("location") || "", body: Buffer.from(await r.arrayBuffer()) };
 }
 
+// tree: the site's own files
+{
+  const want = ["style.css", "favicon.png", "favicon.ico", "mark.png", "fonts/OFL.txt", "fonts/JetBrainsMono-Regular.woff2", "fonts/JetBrainsMono-Bold.woff2", "fonts/JetBrainsMono-Italic.woff2", "news/index.html", "version.json"];
+  const missing = want.filter((f) => !files.includes(f));
+  missing.length ? bad("tree", `missing: ${missing.join(", ")}`) : ok("tree", `the site's ${want.length} named files are staged`);
+}
 // root, robots
 const root = await get("/");
 const rootText = root.body.toString("utf8");
-root.status === 200 && root.type.startsWith("text/html") && !/<a[\s>]/i.test(rootText) && !rootText.includes(SLUG)
-  ? ok("root", "/ is 200 html, no link, no game path") : bad("root", `/ is ${root.status} ${root.type}, links ${/<a[\s>]/i.test(rootText)}`);
+root.status === 200 && root.type.startsWith("text/html") && rootText.includes(`href="/${SLUG}/"`)
+  ? ok("root", `/ is 200 html and links /${SLUG}/`) : bad("root", `/ is ${root.status} ${root.type}, links /${SLUG}/: ${rootText.includes(`href="/${SLUG}/"`)}`);
 const robots = await get("/robots.txt");
-robots.status === 200 && /User-agent:\s*\*/.test(robots.body.toString()) && /^Disallow:\s*\/\s*$/m.test(robots.body.toString())
-  ? ok("robots", "disallows everything") : bad("robots", `status ${robots.status}: ${robots.body.toString().slice(0, 60)}`);
+const robotsText = robots.body.toString();
+robots.status === 200 && /User-agent:\s*\*/.test(robotsText) && /^Allow:\s*\/\s*$/m.test(robotsText) && !/^Disallow:\s*\S/m.test(robotsText)
+  ? ok("robots", "allows everything") : bad("robots", `status ${robots.status}: ${robotsText.slice(0, 60)}`);
 
-// files, noindex
+// files, indexable
 let served = 0, noidx = 0;
 for (const f of files) {
   if (f === "_headers" || f === "_redirects") continue;   // consumed by Pages, never served
@@ -132,17 +150,19 @@ for (const f of files) {
   const same = r.status === 200 && sha(r.body) === sha(fs.readFileSync(path.join(DIR, f)));
   const htmlOk = f.endsWith(".html") || !r.type.startsWith("text/html");
   if (same && htmlOk) served++; else bad("files", `${f}: ${r.status} ${r.type}${same ? "" : " (bytes differ)"}`);
-  if (/noindex/.test(r.robots)) noidx++; else bad("noindex", `${f} has no X-Robots-Tag: noindex`);
+  if (/noindex/.test(r.robots)) { noidx++; bad("indexable", `${f} is served with X-Robots-Tag: ${r.robots}`); }
+  if (f.endsWith(".html") && f !== "404.html" && /<meta name="robots" content="[^"]*noindex/i.test(fs.readFileSync(path.join(DIR, f), "utf8"))) { noidx++; bad("indexable", `${f} asks not to be indexed`); }
 }
 const nfiles = files.filter((f) => f !== "_headers" && f !== "_redirects").length;
 if (served === nfiles) ok("files", `${served} of ${nfiles} served byte for byte`);
-if (noidx === nfiles) ok("noindex", `all ${noidx} files carry X-Robots-Tag: noindex`);
+if (!/<meta name="robots" content="noindex/.test(fs.readFileSync(path.join(DIR, "404.html"), "utf8"))) { noidx++; bad("indexable", "404.html does not ask not to be indexed"); }
+if (noidx === 0) ok("indexable", `none of ${nfiles} files carries X-Robots-Tag: noindex; 404.html alone says noindex`);
 
 // missing
 const four = fs.existsSync(path.join(DIR, "404.html")) ? fs.readFileSync(path.join(DIR, "404.html")) : Buffer.from("(no 404.html)");
 for (const p of ["/no-such-page", `/${SLUG}/no-such-file.js`, "/p-aaaaaaaaaa/", "/_headers", "/_redirects", `/${SLUG}/phantom-burn.wasm`, "/w/0000000000000000/phantom-burn.wasm"]) {
   const r = await get(p);
-  r.status === 404 && sha(r.body) === sha(four) && /noindex/.test(r.robots)
+  r.status === 404 && sha(r.body) === sha(four)
     ? ok("missing", `${p} is a 404 with 404.html`) : bad("missing", `${p}: ${r.status}`);
 }
 const slash = await get(`/${SLUG}`);
@@ -157,6 +177,15 @@ for (const r of REDIRECTS) {
   g.status === r.status && g.location === want + "?go=14" ? ok("redirect", `${from}?go=14 ${r.status} -> ${want}?go=14`) : bad("redirect", `${from}?go=14: ${g.status} -> ${g.location} (want ${r.status} -> ${want}?go=14)`);
 }
 if (!REDIRECTS.some((r) => r.to.startsWith(`/${SLUG}/`))) bad("redirect", `no rule sends anything to /${SLUG}/`);
+
+// the site's pages in Chrome (scripts/check-site-pages.mjs); a setup failure there is the whole gate's
+{
+  const built = (fs.readFileSync(MAN, "utf8").match(/^# built (.*)$/m) || [])[1] || "";
+  const headSha = (fs.readFileSync(MAN, "utf8").match(/^# head (\S+)$/m) || [])[1] || "";
+  const STAMP = /\(runner build\)$/.test(built) ? built.slice(0, 12) : `local-${headSha.slice(0, 12)}`;
+  try { await pageLegs({ DIR, BASE, SLUG, STAMP, REPO, ok, bad }); }
+  catch (e) { console.log(/^Error: SETUP-FAILED/.test(String(e)) ? String(e).replace(/^Error: /, "") : `SETUP-FAILED: the page legs threw: ${e && e.stack || e}`); server.close(); try { fs.rmSync(DIR + ".verified"); } catch { /* none */ } process.exit(2); }
+}
 
 // boots (what the page requests is recorded from here on: the probes above are not the page's)
 asked.clear();
