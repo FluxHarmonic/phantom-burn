@@ -1,0 +1,32 @@
+#!/bin/sh
+# build-skin - rebuild the skinned guard (G1) from its Blender script:
+#   models/guard/guard-skin.py  -> build/guard-skin/guard-skin.glb (+ rig notes)
+#   gltf-to-sgm.mjs --z-up      -> assets/guard/guard-skin.sgm (+ .sgm.json)
+#   scripts/skin-data.mjs       -> src/phantom/guard/skin-data.sgl
+#
+#   scripts/build-skin [PREVIEW_DIR]
+#
+# The converter is sigil-graphics' (0.14+): GLTF_TO_SGM names it, else the
+# installed dependency's copy under .sigil/deps. Blender is David's Flatpak,
+# headless (procedures/blender-headless-flatpak): --python-exit-code 1, and
+# the output is checked, since a script can succeed and export nothing.
+set -eu
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+OUT=$REPO/build/guard-skin
+CONV=${GLTF_TO_SGM:-$REPO/.sigil/deps/sigil-graphics/scripts/gltf-to-sgm.mjs}
+[ -f "$CONV" ] || { echo "build-skin: no converter at $CONV (set GLTF_TO_SGM)"; exit 2; }
+mkdir -p "$OUT"
+rm -f "$OUT/guard-skin.glb" "$OUT/guard-skin-rig.json"
+PREV=${1:-}
+GRANT=""; [ -n "$PREV" ] && { mkdir -p "$PREV"; GRANT="--filesystem=$PREV"; }
+flatpak run --filesystem="$REPO" $GRANT org.blender.Blender --background --factory-startup \
+  --python-exit-code 1 --python "$REPO/models/guard/guard-skin.py" -- "$OUT" $PREV > "$OUT/blender.log" 2>&1 \
+  || { tail -20 "$OUT/blender.log"; echo "build-skin: blender failed (log $OUT/blender.log)"; exit 1; }
+grep '^GUARD-SKIN' "$OUT/blender.log"
+test -s "$OUT/guard-skin.glb" && test -s "$OUT/guard-skin-rig.json"
+node "$CONV" "$OUT/guard-skin.glb" "$REPO/assets/guard/guard-skin.sgm" --z-up \
+  --attrs position,normal8,color,joints,weights
+cp "$OUT/guard-skin-rig.json" "$REPO/assets/guard/guard-skin-rig.json"
+node "$REPO/scripts/skin-data.mjs" "$REPO/assets/guard/guard-skin.sgm.json" \
+  "$REPO/assets/guard/guard-skin-rig.json" "$REPO/src/phantom/guard/skin-data.sgl"
+echo "build-skin: done"
