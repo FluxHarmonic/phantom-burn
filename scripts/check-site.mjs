@@ -148,6 +148,7 @@ robots.status === 200 && /User-agent:\s*\*/i.test(robotsText) && /^Allow:\s*\/\s
 const asksNoindex = (html) => [...html.matchAll(/<meta\b[^>]*>/gi)].some(([m]) =>
   /\bname\s*=\s*["']?(robots|googlebot|bingbot)\b/i.test(m) && /\bcontent\s*=\s*["'][^"']*noindex/i.test(m));
 let served = 0, noidx = 0;
+const noidxFiles = [];   // one FAIL line for all of them, below
 for (const f of files) {
   if (f === "_headers" || f === "_redirects") continue;   // consumed by Pages, never served
   const url = "/" + f.split("/").map(encodeURIComponent).join("/");
@@ -155,12 +156,13 @@ for (const f of files) {
   const same = r.status === 200 && sha(r.body) === sha(fs.readFileSync(path.join(DIR, f)));
   const htmlOk = f.endsWith(".html") || !r.type.startsWith("text/html");
   if (same && htmlOk) served++; else bad("files", `${f}: ${r.status} ${r.type}${same ? "" : " (bytes differ)"}`);
-  if (/noindex/.test(r.robots)) { noidx++; bad("indexable", `${f} is served with X-Robots-Tag: ${r.robots}`); }
+  if (/noindex/.test(r.robots)) { noidx++; noidxFiles.push(f); }
   if (f.endsWith(".html") && f !== "404.html" && asksNoindex(fs.readFileSync(path.join(DIR, f), "utf8"))) { noidx++; bad("indexable", `${f} asks not to be indexed`); }
 }
 const nfiles = files.filter((f) => f !== "_headers" && f !== "_redirects").length;
 if (served === nfiles) ok("files", `${served} of ${nfiles} served byte for byte`);
 if (!asksNoindex(fs.readFileSync(path.join(DIR, "404.html"), "utf8"))) { noidx++; bad("indexable", "404.html does not ask not to be indexed"); }
+if (noidxFiles.length) bad("indexable", `${noidxFiles.length} files are served with X-Robots-Tag: noindex, e.g. ${noidxFiles.filter((f) => !f.startsWith(SLUG + "/")).slice(0, 5).join(", ")}`);
 if (noidx === 0) ok("indexable", `none of ${nfiles} files carries X-Robots-Tag: noindex; 404.html alone says noindex`);
 
 // missing

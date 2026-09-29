@@ -264,9 +264,12 @@ export async function pageLegs({ DIR, BASE, SLUG, STAMP, REPO, ok, bad }) {
         await sleep(300);
         const m = await evalJS(`(() => { const d = document.documentElement; const a = document.querySelector(".play a");
           const r = a && a.getBoundingClientRect();
-          return { vw: window.innerWidth, sw: Math.max(d.scrollWidth, document.body.scrollWidth), play: r ? [Math.round(r.left), Math.round(r.right)] : null }; })()`);
+          return { vw: window.innerWidth, screen: screen.width, sw: Math.max(d.scrollWidth, document.body.scrollWidth), play: r ? [Math.round(r.left), Math.round(r.right)] : null }; })()`);
         got.push(`${p} ${m.sw}/${m.vw}`);
-        if (m.vw !== 390) detail.push(`${p}: the viewport is ${m.vw} px, not the emulated 390 (the leg measured nothing)`);
+        // a mobile browser widens the layout to fit content wider than the
+        // screen (and zooms out), so a wide page shows as innerWidth > 390
+        if (m.screen !== 390) detail.push(`${p}: the screen is ${m.screen} px, not the emulated 390 (the leg measured nothing)`);
+        else if (m.vw > 390) detail.push(`${p} forced a ${m.vw} px layout on a 390 px phone (something is wider than the screen)`);
         if (m.sw > m.vw) detail.push(`${p} is ${m.sw} px wide on a ${m.vw} px screen`);
         if (m.play && (m.play[0] < 0 || m.play[1] > m.vw)) detail.push(`${p}: BADGE IN spans ${m.play[0]}..${m.play[1]} px on a ${m.vw} px screen`);
       }
