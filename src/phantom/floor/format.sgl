@@ -894,8 +894,8 @@
                                                                          " has no prop file (props/"
                                                                          (symbol->string kind) ".prop)")))
                                 '())
-                            (if (and (eq? (thing-kind t) 'guard) (not (memq kind '(patrol post))))
-                                (list (bad (thing-line t) "the guard: kind is patrol or post"))
+                            (if (and (eq? (thing-kind t) 'guard) (not (memq kind '(patrol post cleaner))))
+                                (list (bad (thing-line t) "the guard: kind is patrol, post or cleaner"))
                                 '())
                             (if (and (eq? (thing-kind t) 'guard) (thing-field t 'waits)
                                      (not (= (length (thing-field t 'waits)) (length (thing-field t 'route)))))

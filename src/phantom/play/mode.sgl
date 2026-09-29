@@ -315,6 +315,24 @@
                                         x y (hear-gain h) (hear-muffled? h) (hear-path-m h) #f)
                                   acc)))))))))
 
+    ;; The night cleaners' vacuums (Phantom 0.1, item 6), always running, each
+    ;; with the path from it to you; id cleaner-K, kind vacuum.
+    (define (vacuums-sounding core data h you w)
+      (let ((st (play-cleaners-state core)))
+        (let loop ((k 0) (acc '()))
+          (if (>= k (vector-length st))
+              (reverse acc)
+              (let* ((c (vector-ref st k))
+                     (room (and c (room-at data (vector-ref c 0) (vector-ref c 1) 0.0))))
+                (if (not (and room (>= room 0)))
+                    (loop (+ k 1) acc)
+                    (begin
+                      (hear-path! h room (vector-ref c 0) (vector-ref c 1) you (walker-x w) (walker-y w))
+                      (loop (+ k 1)
+                            (cons (list (string->symbol (string-append "cleaner-" (number->string k))) 'vacuum
+                                        (vector-ref c 0) (vector-ref c 1) (hear-gain h) (hear-muffled? h) (hear-path-m h) #f)
+                                  acc)))))))))
+
     ;; The devices sounding now in the play core, each with the path from it
     ;; to you at walker w (the feed's sounding list; tests call it too).
     (define (play-sounding core w)
@@ -322,7 +340,7 @@
              (ds (play-devices data)) (you (play-runner-room core)))
         (let loop ((i (- (vector-length ds) 1)) (acc '()))
           (if (< i 0)
-              (append acc (hums-sounding data h you w))
+              (append acc (hums-sounding data h you w) (vacuums-sounding core data h you w))
               (let ((d (vector-ref ds i)) (s (devices-state dv i)))
                 (if (or (memq s '(ringing running on)) (eq? (device-kind d) 'camera))
                     (begin

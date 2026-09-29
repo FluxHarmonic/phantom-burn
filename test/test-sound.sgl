@@ -339,7 +339,7 @@
 ;; --- Phantom 0.1: the device and PRACTICE sounds, banked -------------------------------
 (define NEW-KINDS '(deck-hold deck-confirm deck-deny print-done blinds-open blinds-close terminal-open terminal-close crash
                     device-phone-ring device-printer device-vent
-                    drawer-open login lift-call device-fridge))
+                    drawer-open login lift-call device-fridge device-vacuum))
 (test-group "the device and PRACTICE sounds (Phantom 0.1)"
   (test "each device one-shot and the Crash-line blip is a kind, and renders a sample that sounds (above -50 dBFS)"
     (let* ((names (map (lambda (k) (string-append "event-" (symbol->string k))) NEW-KINDS))

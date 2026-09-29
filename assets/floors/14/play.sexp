@@ -85,6 +85,7 @@
  (noise-ambient hvac 0.3 buzz 0.2 city 0.4)
  (nav -0.5 -0.5 41.0 15.0)
  (lift 39.4 2.25 facilities)
+ (cleaners (((29.2 7.0) (39.4 7.0) (39.4 12.8) (29.2 12.8)) (2.0 0.0 2.0 0.0)))
  (hums (fridge 31.0 0.4))
  (devices
   (print-printer printer 18.6 10.0 0.0 270.0 staff 4)

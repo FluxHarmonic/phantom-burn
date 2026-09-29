@@ -74,7 +74,7 @@ In-process: `(compile-floor "floors/NAME.floor" read-text)` from `(phantom floor
             [style: solid | open]) ...)
   lights: ((CIRCUIT level: L [panel: (x y)] [needs: TIER]) ...)
   things: ((lifts in: ROOM along: ((x y) (x y)) count: N [kind: PROP])
-           (guard kind: patrol|post route: ((x y) ...) [waits: (s ...)])
+           (guard kind: patrol|post|cleaner route: ((x y) ...) [waits: (s ...)])   ; cleaner: walks with a vacuum, reports, never chases
            (desk|cabinet|prop kind: PROP PLACEMENT [facing: DEGREES] [z: Z])
            (badge on-desk: (x y) tier: TIER)
            (rail along: ((x y) (x y)) [in: ROOM]) ...)

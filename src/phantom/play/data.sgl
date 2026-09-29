@@ -22,7 +22,7 @@
           (sigil io))
 
   (export play-data-from-string play-data?
-          play-route play-waits play-start play-exit play-badge play-badge-drawer? play-lift play-hums play-glass
+          play-route play-waits play-start play-exit play-badge play-badge-drawer? play-lift play-hums play-cleaners play-glass
           light-cell light-grid-x0 light-grid-y0 light-grid-w light-grid-h
           light-sample! light-sample-z NCIRCUITS
           play-rooms play-edges play-surface-noise play-surface-name play-panels play-reader play-noise-ambient
@@ -66,7 +66,10 @@
     ;;  call it and the tier that may, or #f (floor 14's second way out)
     ;;  29 the floor's hums (item 8): a vector of #(kind x y), placed loops
     ;;  the sound plays (the fridge)
-    (define (play-data? d) (and (vector? d) (= (vector-length d) 30) (eq? (vector-ref d 0) 'play-data)))
+    ;;  30 the night cleaners (item 6): a vector of #(route waits), each as
+    ;;  slots 1 and 2 hold the patrol's
+    (define (play-data? d) (and (vector? d) (= (vector-length d) 31) (eq? (vector-ref d 0) 'play-data)))
+    (define (play-cleaners d) (vector-ref d 30))
     (define (play-lift d) (vector-ref d 28))
     (define (play-hums d) (vector-ref d 29))
     (define (play-lessons d) (vector-ref d 27))
@@ -282,7 +285,13 @@
                 (let ((e (assq 'lift datum)))
                   (and e (vector (flo (cadr e)) (flo (caddr e)) (cadddr e))))
                 (let ((e (assq 'hums datum)))
-                  (list->vector (map (lambda (h) (vector (car h) (flo (cadr h)) (flo (caddr h)))) (if e (cdr e) '())))))))
+                  (list->vector (map (lambda (h) (vector (car h) (flo (cadr h)) (flo (caddr h)))) (if e (cdr e) '()))))
+                (let ((e (assq 'cleaners datum)))
+                  (list->vector
+                    (map (lambda (c)
+                           (vector (list->vector (apply append (map (lambda (p) (list (flo (car p)) (flo (cadr p)))) (car c))))
+                                   (list->vector (map flo (cadr c)))))
+                         (if e (cdr e) '())))))))
 
     ;; The room grid: (roomgrid N k z room ...) on the light grid's cells,
     ;; as (starts . layers).

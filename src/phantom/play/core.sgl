@@ -32,6 +32,7 @@
           play-light play-light-01 play-visibility play-shape play-light-state
           play-badge? play-learned-tier play-way-out play-near-lift? play-lift-tier play-best-after
           play-torch TORCH-RANGE TORCH-COS TORCH-LIGHT play-ignored-kinds
+          play-cleaners-state CLEANER-SPEED CLEANER-SEE-S VACUUM-NOISE
           play-outcome play-ticks play-start-walker
           play-near-exit? GUARD-START-LEG PICKUP-REACH EXIT-REACH
           play-hearing play-take-steps! play-last-heard play-runner-room
@@ -98,7 +99,11 @@
     ;;  43 the distractions the unit noticed (item 7: STAFF commands work
     ;;  once): ((kind . INDEX-or-#f) ...), INDEX the device whose sounding it
     ;;  noticed while that goes on, then #f: the kind is ignored from then on
-    (define (play? p) (and (vector? p) (= (vector-length p) 44) (eq? (vector-ref p 0) 'play)))
+    ;;  44 the night cleaners (item 6): a vector of #(x y fx fy leg wait
+    ;;  seen cooldown), leg the route point it walks to, wait its pause left,
+    ;;  seen how long it has seen you, cooldown till it reports again
+    (define (play? p) (and (vector? p) (= (vector-length p) 45) (eq? (vector-ref p 0) 'play)))
+    (define (play-cleaners-state p) (vector-ref p 44))
     ;; the device kinds the unit ignores now (Gibson patched them)
     (define (play-ignored-kinds p)
       (let loop ((l (vector-ref p 43)) (acc '()))
@@ -190,7 +195,8 @@
                         (make-devices data) (make-deck) (device-approaches data gw) 0.0
                         (make-vector (device-count data) 0.0) (camera-views data)
                         (let ((ts (terminal-targets data))) (vector #f 0 -1 0.0 '(idle) 0.0 ts -1 ts)) #f
-                        units 0 #f #f #f (vector #f 0.0 0.0 0.0 0.0 1.0 0.0) '())))
+                        units 0 #f #f #f (vector #f 0.0 0.0 0.0 0.0 1.0 0.0) '()
+                        (make-vector (vector-length (play-cleaners data)) #f))))
         p))
 
     ;; PRACTICE: a capture in the sim resets only its room (D38). The runner
@@ -269,6 +275,7 @@
       (vector-set! p 41 #f)
       (vector-set! p 42 (vector #f 0.0 0.0 0.0 0.0 1.0 0.0))
       (vector-set! p 43 '())
+      (cleaners-reset! p)
       p)
 
     ;; The path from the guard to you (for playback: how much of the guard
@@ -360,6 +367,94 @@
                   0.0
                   (* TORCH-LIGHT (- 1.0 (/ (* d d) (* TORCH-RANGE TORCH-RANGE)))))))))
 
+    ;; --- the night cleaner (design section 4; Phantom 0.1, item 6) ------------------
+    ;; "The night cleaner vacuums the open plan (a walking noise mask). If the
+    ;; cleaner sees you, they report you, but they won't chase." A cleaner walks
+    ;; its route at CLEANER-SPEED, pausing at its points; its vacuum is heard like
+    ;; a running vent, raising the patrol's hearing threshold (mask!); if it sees
+    ;; you (in its cone and range, you lit, nothing between) for CLEANER-SEE-S, it
+    ;; reports: an incident, and the patrol comes to search where you were. Then
+    ;; it goes on vacuuming, and reports again only after CLEANER-COOLDOWN.
+    (define CLEANER-SPEED 0.7)      ; m/s
+    (define CLEANER-EYE 1.5)        ; m, its eye above its feet
+    (define CLEANER-COS 0.64)       ; the cosine of its view's half angle (about 50 degrees)
+    (define CLEANER-RANGE 6.0)      ; m
+    (define CLEANER-SEE-S 0.5)      ; s it must see you to report
+    (define CLEANER-COOLDOWN 8.0)   ; s before it reports again
+    (define CLEANER-CALL 0.65)      ; the patrol's awareness a report raises: SEARCHING there
+    (define VACUUM-NOISE 2.0)       ; its vacuum, on the steps' scale
+
+    (define (route-point rt k) (cons (vector-ref rt (* 2 k)) (vector-ref rt (+ 1 (* 2 k)))))
+
+    (define (cleaners-reset! p)
+      (let ((cs (play-cleaners (vector-ref p 1))) (st (vector-ref p 44)))
+        (let loop ((i 0))
+          (when (< i (vector-length cs))
+            (let* ((rt (vector-ref (vector-ref cs i) 0)) (n (quotient (vector-length rt) 2))
+                   (a (route-point rt 0)) (b (route-point rt (modulo 1 n)))
+                   (dx (- (car b) (car a))) (dy (- (cdr b) (cdr a))) (m (sqrt (+ (* dx dx) (* dy dy)))))
+              (vector-set! st i (vector (car a) (cdr a) (if (> m 1e-6) (/ dx m) 0.0) (if (> m 1e-6) (/ dy m) 1.0)
+                                        (modulo 1 n) 0.0 0.0 0.0)))
+            (loop (+ i 1))))))
+
+    (define (cleaners-step! p dt)
+      (let* ((data (vector-ref p 1)) (cs (play-cleaners data)) (st (vector-ref p 44)))
+        (let loop ((i 0))
+          (when (< i (vector-length cs))
+            (let* ((c (vector-ref st i)) (rt (vector-ref (vector-ref cs i) 0)) (ws (vector-ref (vector-ref cs i) 1))
+                   (n (quotient (vector-length rt) 2)))
+              (cond
+               ((not c) #f)                ; not reset yet
+               ((> (vector-ref c 5) 0.0)
+                  (vector-set! c 5 (max 0.0 (- (vector-ref c 5) dt))))
+               (else
+                  (let* ((leg (vector-ref c 4)) (to (route-point rt leg))
+                         (dx (- (car to) (vector-ref c 0))) (dy (- (cdr to) (vector-ref c 1)))
+                         (d (sqrt (+ (* dx dx) (* dy dy)))) (step (* CLEANER-SPEED dt)))
+                    (if (<= d step)
+                        (begin (vector-set! c 0 (car to)) (vector-set! c 1 (cdr to))
+                               (vector-set! c 5 (vector-ref ws leg))
+                               (vector-set! c 4 (modulo (+ leg 1) n)))
+                        (begin (vector-set! c 0 (+ (vector-ref c 0) (* step (/ dx d))))
+                               (vector-set! c 1 (+ (vector-ref c 1) (* step (/ dy d))))
+                               (vector-set! c 2 (/ dx d)) (vector-set! c 3 (/ dy d)))))))
+              (when c (cleaner-look! p c dt)))
+            (loop (+ i 1))))))
+
+    ;; what cleaner c sees of you this tick, and its report
+    (define (cleaner-look! p c dt)
+      (let* ((t (vector-ref p 5)) (data (vector-ref p 1))
+             (cx (vector-ref c 0)) (cy (vector-ref c 1))
+             (cz (+ (let ((r (room-at data cx cy 0.0))) (if (>= r 0) (room-floor (vector-ref (play-rooms data) r)) 0.0)) CLEANER-EYE))
+             (px (vector-ref t 0)) (py (vector-ref t 1)) (pz (vector-ref t 2))
+             (chest (+ pz (* 0.55 (vector-ref t 4)))) (head (vector-ref t 3))
+             (dx (- px cx)) (dy (- py cy)) (d (sqrt (+ (* dx dx) (* dy dy))))
+             (seen (and (< d CLEANER-RANGE) (> d 1e-6)
+                        (>= (/ (+ (* dx (vector-ref c 2)) (* dy (vector-ref c 3))) d) CLEANER-COS)
+                        (>= (vector-ref t 5) CAMERA-DARK)
+                        (let ((coll (vector-ref (vector-ref p 2) 1)) (glass (play-glass data)))
+                          (or (sight-clear? coll glass cx cy cz px py chest)
+                              (sight-clear? coll glass cx cy cz px py head))))))
+        (vector-set! c 7 (max 0.0 (- (vector-ref c 7) dt)))
+        (vector-set! c 6 (if seen (+ (vector-ref c 6) dt) 0.0))
+        (when (and (>= (vector-ref c 6) CLEANER-SEE-S) (<= (vector-ref c 7) 0.0))
+          (vector-set! c 6 0.0) (vector-set! c 7 CLEANER-COOLDOWN)
+          (event! p 'cleaner-report cx cy)
+          (incident! p 'cleaner-saw (vector-ref p 22))
+          (guard-notice! (vector-ref p 3) CLEANER-CALL px py pz))))
+
+    ;; the cleaners' vacuums as the patrol hears them where it stands (rg its room)
+    (define (vacuums-heard p data h rg)
+      (let ((st (vector-ref p 44)) (g (vector-ref p 3)))
+        (let loop ((i 0) (sum 0.0))
+          (if (>= i (vector-length st))
+              sum
+              (let* ((c (vector-ref st i)) (r (and c (room-at data (vector-ref c 0) (vector-ref c 1) 0.0))))
+                (if (and r (>= r 0))
+                    (begin (hear-path! h r (vector-ref c 0) (vector-ref c 1) rg (guard-x g) (guard-y g))
+                           (loop (+ i 1) (+ sum (heard-level h VACUUM-NOISE))))
+                    (loop (+ i 1) sum)))))))
+
     ;; The walker at the floor's arrival spot, facing as the floor says.
     (define (play-start-walker p coll)
       (let* ((s (play-start (vector-ref p 1)))
@@ -393,6 +488,7 @@
             (mask! p)
             (steps! p w x y z)
             (unless (vector-ref p 39) (guard-step! g (vector-ref p 2) (vector-ref p 5) TICK))
+            (unless (vector-ref p 39) (cleaners-step! p TICK))
             (devices-tick! (vector-ref p 29) TICK
                            (lambda (i kind)
                              (when (eq? kind 'printer)
@@ -480,7 +576,8 @@
                       (hear-path! h (device-room d) (device-x d) (device-y d) rg (guard-x g) (guard-y g))
                       (loop (+ i 1) (+ sum (heard-level h VENT-NOISE))))
                     (loop (+ i 1) sum)))
-              (vector-set! p 32 (* MASK-GAIN sum))))))
+              ;; the night cleaners' vacuums too: a walking noise mask
+              (vector-set! p 32 (* MASK-GAIN (+ sum (vacuums-heard p data h rg))))))))
 
     ;; What reaches the guard of device i now (0 when it is silent).
     (define (play-device-level p i)
@@ -738,6 +835,8 @@
         (you-heard "PATROLS TIGHTENED" "You walk loudly for a ghost.")
         ;; P3: seen by a camera ranks with being seen
         (camera-saw "CAMERA COVERAGE EXTENDED" "Smile. You were on my camera.")
+        ;; Phantom 0.1: the night cleaner saw you and reported it
+        (cleaner-saw "CLEANING CREW ON ALERT" "The cleaner told me all about you.")
         (dark-room "EMERGENCY LIGHTING: ~" "You like the dark. I've fixed the dark.")
         ;; P3 (the device API, §5), drafts for David (D18)
         (phone-rang "PATROLS IGNORE PHONES" "Nobody was calling. I know who dialled.")

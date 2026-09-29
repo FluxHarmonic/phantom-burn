@@ -345,3 +345,65 @@
             (begin (tick) (loop (+ k 1) (max hi (guard-state g))))
             (begin (display (list 'printer 'hi hi)) (newline)
                    (assert-true (>= hi SEARCHING))))))))
+
+;;; The night cleaner (Phantom 0.1, item 6; design section 4: "The night
+;;; cleaner vacuums the open plan (a walking noise mask). If the cleaner sees
+;;; you, they report you, but they won't chase.")
+
+(define CLEANER-ROUTE '((29.2 7.0) (39.4 7.0) (39.4 12.8) (29.2 12.8)))
+;; the distance from (x y) to the cleaner's route (its four sides)
+(define (off-route x y)
+  (let loop ((ps CLEANER-ROUTE) (best 99.0))
+    (if (null? ps) best
+        (let* ((a (car ps)) (b (if (null? (cdr ps)) (car CLEANER-ROUTE) (cadr ps)))
+               (ax (car a)) (ay (cadr a)) (bx (car b)) (by (cadr b))
+               (dx (- bx ax)) (dy (- by ay)) (l2 (+ (* dx dx) (* dy dy)))
+               (t (max 0.0 (min 1.0 (/ (+ (* (- x ax) dx) (* (- y ay) dy)) l2))))
+               (qx (+ ax (* t dx))) (qy (+ ay (* t dy))))
+          (loop (cdr ps) (min best (sqrt (+ (* (- x qx) (- x qx)) (* (- y qy) (- y qy))))))))))
+
+(test-group "the night cleaner"
+  (test "it vacuums its loop round the desk pods, every corner, and stays on its route"
+    ;; you in meeting room A's dark far corner, out of everyone's way
+    (let* ((p (fresh14)) (w (stand 19.6 11.5)) (c (vector-ref (play-cleaners-state p) 0))
+           (visits (make-vector 4 0)) (near (make-vector 4 #f)))
+      (let loop ((k 0) (worst 0.0))
+        (if (< k (* 60 110))
+            (begin
+              (play-tick! p w ALL-ON 1.0 2.0)
+              (let each ((i 0) (ps CLEANER-ROUTE))
+                (unless (null? ps)
+                  (let ((d (sqrt (+ (expt (- (vector-ref c 0) (car (car ps))) 2) (expt (- (vector-ref c 1) (cadr (car ps))) 2)))))
+                    (cond ((and (< d 0.2) (not (vector-ref near i))) (vector-set! near i #t) (vector-set! visits i (+ 1 (vector-ref visits i))))
+                          ((> d 1.0) (vector-set! near i #f))))
+                  (each (+ i 1) (cdr ps))))
+              (loop (+ k 1) (max worst (off-route (vector-ref c 0) (vector-ref c 1)))))
+            (begin (display (list 'cleaner-visits (vector->list visits) 'off-route worst)) (newline)
+                   (assert-true (< worst 0.01))
+                   (let each ((i 0)) (when (< i 4) (assert-true (>= (vector-ref visits i) 2)) (each (+ i 1)))))))))
+  (test "it sees you standing lit in its way and reports you: an incident, and the patrol comes; it keeps its route"
+    (let* ((p (fresh14)) (g (play-guard p)) (c (vector-ref (play-cleaners-state p) 0))
+           ;; ahead of it on its first side (it starts at (29.2 7) heading east)
+           (w (stand 33.5 6.2)))
+      (let loop ((k 0) (reported #f) (hi 0) (worst 0.0))
+        (if (< k (* 60 12))
+            (begin
+              (play-tick! p w ALL-ON 1.0 2.0)
+              (loop (+ k 1) (or reported (and (assoc 'cleaner-saw (play-incidents p)) #t)) (max hi (guard-state g))
+                    (max worst (off-route (vector-ref c 0) (vector-ref c 1)))))
+            (begin (display (list 'cleaner-report reported 'patrol-hi hi 'off-route worst)) (newline)
+                   (assert-true reported)
+                   (assert-true (>= hi SEARCHING))
+                   (assert-true (< worst 0.01)))))))
+  (test "its vacuum masks: beside the patrol it raises the patrol's hearing threshold, far away barely"
+    (let* ((p (fresh14)) (g (play-guard p)) (w (stand 1.0 8.0)))
+      (play-units-off! p #t)                       ; the patrol held where it's put
+      (guard-place! g 29.2 8.5 0.0 1.0)            ; beside the cleaner's start
+      (play-tick! p w ALL-ON 1.0 2.0)
+      (let ((near (play-mask p)))
+        (guard-place! g 2.0 2.0 0.0 1.0)           ; the far end of the lobby
+        (play-tick! p w ALL-ON 1.0 2.0)
+        (display (list 'vacuum-mask 'near near 'far (play-mask p))) (newline)
+        ;; heard faintly across the floor, strongly beside it
+        (assert-true (> near 0.5))
+        (assert-true (< (play-mask p) (* 0.25 near)))))))

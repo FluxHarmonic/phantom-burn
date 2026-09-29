@@ -68,6 +68,9 @@
            (lifts   in: kitchen  along: ((40 1) (40 3.5))  count: 1  calls: facilities)   ; the service lift, behind the kitchen: the other way out
            ;; the patrol: the lift lobby, the corridor, the open plan, the kitchen
            (guard   kind: patrol  route: ((2 2) (12.5 1.5) (21 6.5) (34 10) (36 2.5))  waits: (3 0 0 2 3))
+           ;; the night cleaner (design section 4): vacuums the open plan round both desk
+           ;; pods; a walking noise mask; it reports what it sees and never chases
+           (guard   kind: cleaner  route: ((29.2 7) (39.4 7) (39.4 12.8) (29.2 12.8))  waits: (2 0 2 0))
            ;; the open plan: two desk pods, two monitors left on
            (desk    at: (31 9.6)    kind: office-desk)
            (desk    at: (32.6 9.6)  kind: office-desk-off)

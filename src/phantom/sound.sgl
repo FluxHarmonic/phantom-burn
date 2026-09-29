@@ -429,6 +429,7 @@
         ((printer) '(event device-printer))
         ((vent) '(event device-vent))
         ((fridge) '(event device-fridge))     ; not a device: the floor's hums (play-sounding)
+        ((vacuum) '(event device-vacuum))     ; the night cleaner's (play-sounding)
         (else #f)))
     (define (devices! s dt sounding)
       (let ((ds (filter (lambda (e) (device-loop-key (list-ref e 1))) sounding)))

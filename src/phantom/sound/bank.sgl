@@ -260,7 +260,7 @@
                           device-phone-ring device-printer device-vent
                           ;; Phantom 0.1's (item 8): the drawer, a terminal login, the service
                           ;; lift's call, and the fridge's hum (a loop, placed like a device's)
-                          drawer-open login lift-call device-fridge
+                          drawer-open login lift-call device-fridge device-vacuum
                           ;; robot speak (EDGE), after the rest: three variants of each mood
                           speak-suspicious-1 speak-suspicious-2 speak-suspicious-3
                           speak-searching-1 speak-searching-2 speak-searching-3
@@ -285,7 +285,7 @@
               ;; a loop's cycle is 3.0 s (150 rows); rendered 3.4 so its release
               ;; overlaps the next cycle's start instead of dipping at the seam
               (device-phone-ring . 3.4) (device-printer . 3.4) (device-vent . 3.4)
-              (drawer-open . 1.0) (login . 1.5) (lift-call . 2.35) (device-fridge . 3.4)
+              (drawer-open . 1.0) (login . 1.5) (lift-call . 2.35) (device-fridge . 3.4) (device-vacuum . 3.4)
               ;; robot speak: each tune whole (its rows x 60 ms: the phrase and 0.36 s of tail)
               (speak-suspicious-1 . 0.66) (speak-suspicious-2 . 0.78) (speak-suspicious-3 . 0.72)
               (speak-searching-1 . 0.96) (speak-searching-2 . 0.96) (speak-searching-3 . 0.96)
@@ -298,7 +298,7 @@
     ;; cycle's render ends while they still sound. Its last LOOP-FADE-S fades out
     ;; to silence (a quarter cosine), the stretch the next cycle overlaps: each
     ;; seam is a crossfade, not a cut.
-    (define LOOP-KINDS '(device-phone-ring device-printer device-vent device-fridge))
+    (define LOOP-KINDS '(device-phone-ring device-printer device-vent device-fridge device-vacuum))
     (define LOOP-FADE-S 0.4)
     (define (fade-tail! bv rate)
       (let* ((n (quotient (bytevector-length bv) 8))
