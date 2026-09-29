@@ -127,7 +127,7 @@ async function get(p) {
 
 // tree: the site's own files
 {
-  const want = ["style.css", "favicon.png", "favicon.ico", "mark.png", "fonts/OFL.txt", "fonts/JetBrainsMono-Regular.woff2", "fonts/JetBrainsMono-Bold.woff2", "fonts/JetBrainsMono-Italic.woff2", "news/index.html", "version.json"];
+  const want = ["style.css", "logo.png", "favicon.png", "favicon.ico", "mark.png", "fonts/OFL.txt", "fonts/JetBrainsMono-Regular.woff2", "fonts/JetBrainsMono-Bold.woff2", "fonts/JetBrainsMono-Italic.woff2", "news/index.html", "version.json"];
   const missing = want.filter((f) => !files.includes(f));
   missing.length ? bad("tree", `missing: ${missing.join(", ")}`) : ok("tree", `the site's ${want.length} named files are staged`);
 }

@@ -8,7 +8,8 @@
 //
 // BASE is check-site's own server (serve-site.mjs's handler over DIR), so the
 // pages load through the same Pages rules the other legs use. Legs:
-//   landing    / in Chrome: title and h1, the three JetBrains Mono faces
+//   landing    / in Chrome: title, the h1's logo image (the game's own, 2x,
+//              alt "Phantom Burn"), the three JetBrains Mono faces
 //              loaded (not a fallback), every image decoded, BADGE IN
 //              resolving to /<game>/, the source, license, font license and
 //              news links, no em dash in the rendered text, every request 2xx
@@ -145,15 +146,16 @@ export async function pageLegs({ DIR, BASE, SLUG, STAMP, REPO, ok, bad }) {
         const faces = [...document.fonts].map((f) => f.family.replace(/"/g, "") + "/" + f.style + "/" + f.weight + "/" + f.status);
         const imgs = [...document.images].map((i) => [i.getAttribute("src"), i.complete && i.naturalWidth > 0, i.naturalWidth + "x" + i.naturalHeight]);
         const play = document.querySelector(".play a");
-        const h1 = document.querySelector("h1");
+        const logo = document.querySelector("h1 img");
         return { title: document.title, faces, imgs, play: play && play.href, playText: play && play.textContent.trim(),
                  links: [...document.querySelectorAll("a")].map((a) => a.href),
-                 h1: h1 && h1.textContent.trim(), h1font: h1 && getComputedStyle(h1).fontFamily,
+                 logo: logo && [logo.getAttribute("src"), logo.alt, logo.complete && logo.naturalWidth > 0, logo.naturalWidth + "x" + logo.naturalHeight],
                  text: document.body.innerText };
       })()`);
       if (facts.title !== "Phantom Burn") detail.push(`title "${facts.title}"`);
-      if (facts.h1 !== "PHANTOM BURN") detail.push(`h1 "${facts.h1}"`);
-      if (!/^"?JetBrains Mono"?/.test(facts.h1font || "")) detail.push(`the h1 is set in ${facts.h1font}`);
+      // the h1 is the game's own logo (scripts/site-shots), 2x, named for a reader
+      if (!facts.logo) detail.push("the h1 holds no logo image");
+      else if (facts.logo[0] !== "/logo.png" || facts.logo[1] !== "Phantom Burn" || !facts.logo[2] || facts.logo[3] !== "950x136") detail.push(`the h1's logo is ${facts.logo.join(" ")} (want /logo.png "Phantom Burn", decoded, 950x136)`);
       for (const want of ["JetBrains Mono/normal/400/loaded", "JetBrains Mono/normal/700/loaded", "JetBrains Mono/italic/400/loaded"]) {
         if (!facts.faces.includes(want)) detail.push(`font ${want.split("/").slice(0, 3).join(" ")} not loaded (${facts.faces.join(", ")})`);
       }

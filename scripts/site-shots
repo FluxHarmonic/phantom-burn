@@ -11,7 +11,7 @@
 #   scripts/site-shots build/remote-web-<sha> /tmp/shots
 #
 # The rows: NAME|QUERY|WAIT-MS. On floor 14, view=K is the floor's view K
-# (1 arrival: the lobby from the entrance, 7 fm-desk); on=... sets the
+# (1 arrival: the lobby from the entrance, 7 fm-desk), and logo.png is the title's letters alone; on=... sets the
 # switchable circuits (emergency,screens,city: every room light off). Crash's
 # transmission types over floor 14 for about 20 s after arrival, so the lit
 # shot waits it out. The patrol reaches the lobby about 44 s in (measured on
@@ -35,6 +35,13 @@ fm-desk|view=7&on=emergency,screens,city&hud=0|20000
 practice|floor=sim&view=1&hud=0|6000
 title|title=1&hud=0|7000
 ROWS
+# the logo: the title screen at 2x with the room's lights off and fogged to
+# the dark, then the dark (exactly #0D0A1A, C-BG) keyed out; cropped 8 px
+# (4 frame pixels) round the letters, on even offsets so the 2x blocks hold
+node scripts/shot-web.mjs "$BUILD" "$OUT/title-2x.png" --query "title=1&on=none&fog=0.01&hud=0" --wait 7000 --scale 2 | tail -1
+convert "$OUT/title-2x.png" -crop 950x136+4+108 +repage -fuzz 0 -transparent '#0D0A1A' "$OUT/logo.png"
+[ "$(convert "$OUT/title-2x.png" -fuzz 0 -fill none -opaque '#0D0A1A' -trim -format '%wx%h%O' info:)" = "934x120+12+116" ] \
+  || echo "site-shots: WARNING: the letters moved; check logo.png's crop (want the trim 934x120+12+116)"
 # the link preview: the title screen at 2.5x (1200x675), the middle 630 rows
 convert "$OUT/title.png" -filter point -resize 1200x675 -gravity center -crop 1200x630+0+0 +repage "$OUT/og.png"
 # the icon: the title's P, its magenta burn and all, on the dark
@@ -42,5 +49,5 @@ convert "$OUT/title.png" -crop 44x64+2+56 +repage -background '#0d0a1a' -gravity
 convert "$OUT/p64.png" -filter box -resize 32x32 "$OUT/favicon.png"
 convert "$OUT/p64.png" -filter box -resize 16x16 "$OUT/favicon-16.png"
 convert "$OUT/favicon-16.png" "$OUT/favicon.png" "$OUT/favicon.ico"
-for f in og.png favicon.png favicon.ico; do [ -s "$OUT/$f" ] || { echo "site-shots: no $OUT/$f"; exit 1; }; done
+for f in logo.png og.png favicon.png favicon.ico; do [ -s "$OUT/$f" ] || { echo "site-shots: no $OUT/$f"; exit 1; }; done
 echo "site-shots: $(ls "$OUT" | wc -l) files in $OUT; og.png $(identify -format '%wx%h' "$OUT/og.png")"

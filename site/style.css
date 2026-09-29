@@ -38,7 +38,21 @@ a:hover { color: var(--magenta); }
 
 main, footer { max-width: 992px; margin: 0 auto; padding: 0 16px; }
 
-/* The name, burned in (the title screen's D36, in CSS): italic block
+/* The logo: the game's own title screen, captured at 2x with the room's
+   lights off (scripts/site-shots: title=1&on=none&fog=0.01, the dark keyed
+   to transparent). Drawn at 2x like the pictures, the column's width on a
+   phone. */
+h1.logo { margin: 0; line-height: 0; }
+h1.logo img {
+  display: block;
+  width: min(950px, 100%);
+  height: auto;
+  margin: 0 auto;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+/* The 404's number, burned in (the title screen's D36, in CSS): italic block
    letters, cyan fading to white, with a magenta line through their top
    third (40% of the line box: the caps start about 20% down). */
 header { text-align: center; padding: 4rem 0 2rem; }
