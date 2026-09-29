@@ -7,8 +7,15 @@
 //
 // files         every file of DIR.manifest (but _headers and the @ lines,
 //               functions/ and wrangler.jsonc) is 200 and byte for byte the
-//               staged file, with no X-Robots-Tag: noindex (public from 0.1),
-//               and nothing but .html comes back as html. The wasm,
+//               staged file, and nothing but .html comes back as html. On a
+//               custom domain (phantomburn.net) no file may carry X-Robots-Tag:
+//               noindex (public from 0.1). On *.pages.dev that is not asserted:
+//               Cloudflare adds noindex to every pages.dev deployment URL itself,
+//               preview AND production (measured 2026-09-29 on Harkfell:
+//               preview.harkfell.pages.dev and d45c2824.harkfell.pages.dev say
+//               noindex, harkfell.pages.dev and harkfell.com do not), and
+//               publish-web checks the deployment's own URL. The tree's
+//               _headers is held to it locally by check-site's indexable leg. The wasm,
 //               w/<sha16>/phantom-burn.wasm, is fetched through the Pages
 //               Function (from R2) like any file. The edge can serve the
 //               previous deployment for up to a minute, so a mismatch is
@@ -52,6 +59,8 @@ const entries = lines.map((l) => ({ h: l.slice(0, 64), f: l.slice(66) })).filter
 const SLUG = (fs.readFileSync(DIR + ".manifest", "utf8").match(/^# game (\S+)$/m) || [])[1];
 if (!SLUG) { console.log("SETUP-FAILED: the manifest names no game path (# game)"); process.exit(2); }
 const hide = (s) => s;
+// Cloudflare's own noindex on pages.dev deployment URLs (see files above)
+const PAGES_DEV = /\.pages\.dev$/.test(new URL(BASE).hostname);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // t-975606: the wasm route can answer 404 for a few seconds after a deploy.
 // Fetch it again after 2, 4 and 8 s while it says 404, and say so each time;
@@ -84,7 +93,7 @@ async function check(f, wantSha) {
   if (sha(body) !== wantSha) why.push("bytes differ");
   if (!f.endsWith(".html") && type.startsWith("text/html")) why.push(`served as ${type}`);
   // the wasm's Function says noindex on purpose (a binary is no page); the site's files must not
-  if (!f.startsWith("w/") && /noindex/.test(r.headers.get("x-robots-tag") || "")) why.push(`X-Robots-Tag: ${r.headers.get("x-robots-tag")}`);
+  if (!PAGES_DEV && !f.startsWith("w/") && /noindex/.test(r.headers.get("x-robots-tag") || "")) why.push(`X-Robots-Tag: ${r.headers.get("x-robots-tag")}`);
   return why;
 }
 let bad = 0;
@@ -96,7 +105,7 @@ for (const { h, f } of entries) {
   }
   if (why.length) { bad++; fail("files", `${f}: ${why.join(", ")}`); }
 }
-if (!bad) pass("files", `${entries.length} files byte for byte, none noindex (the wasm through the Function)`);
+if (!bad) pass("files", `${entries.length} files byte for byte (the wasm through the Function); ${PAGES_DEV ? "noindex not asserted: Cloudflare adds it on pages.dev" : "none noindex"}`);
 
 // ---- the wasm -------------------------------------------------------------------------
 const wasm = entries.find((e) => /^w\/[0-9a-f]{16}\/phantom-burn\.wasm$/.test(e.f));

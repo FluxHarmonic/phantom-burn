@@ -128,9 +128,13 @@ export async function pageLegs({ DIR, BASE, SLUG, STAMP, REPO, ok, bad }) {
       return waitFor(() => evalJS("document.readyState === 'complete' && document.fonts.status === 'loaded'"), 15000);
     };
     const errorsAt = {};   // page -> errors seen while it was open
+    // the landing's errors are collected from its first load through the
+    // carousel, contrast and phone legs (timers, clicks, the phone's media
+    // queries), up to the click into the game, whose own legs judge it
+    let landingFrom = null;
     const note = async (p, from, netFrom) => {
       const errs = consoleErrors.slice(from);
-      const reqs = badRequests(netSince(netFrom)).map((r) => `${r.url.replace(BASE, "")} ${r.status ?? ""}${r.failed ?? ""}`);
+      const reqs = badRequests(netSince(netFrom)).map((r) => `${(r.url || "(no url)").replace(BASE, "")} ${r.status ?? ""}${r.failed ?? ""}`);
       errorsAt[p] = [...errs, ...reqs.map((r) => `request ${r}`)];
     };
 
@@ -173,8 +177,8 @@ export async function pageLegs({ DIR, BASE, SLUG, STAMP, REPO, ok, bad }) {
       if (EM.test(facts.text)) detail.push("an em dash in the rendered text");
       if (!/How it was made/i.test(facts.text) || !/No image generator was used/.test(facts.text)) detail.push("the How it was made disclosure is missing");
       const reqs = badRequests(netSince(n0));
-      if (reqs.length) detail.push(`requests not 2xx: ${reqs.map((r) => `${r.url.replace(BASE, "")} ${r.status ?? ""}${r.failed ?? ""}`).join(", ")}`);
-      await note("/", e0, n0);
+      if (reqs.length) detail.push(`requests not 2xx: ${reqs.map((r) => `${(r.url || "(no url)").replace(BASE, "")} ${r.status ?? ""}${r.failed ?? ""}`).join(", ")}`);
+      landingFrom = [e0, n0];
       detail.length ? bad("landing", detail.join("; "))
         : ok("landing", `title and h1; ${facts.faces.filter((f) => f.endsWith("/loaded")).length} JetBrains Mono faces loaded; ${facts.imgs.length} images decoded (${shots.length} 480x270 pictures); BADGE IN -> /${SLUG}/; source, license, font license and news links; ${netSince(n0).length} requests, all 2xx`);
     }
@@ -272,6 +276,7 @@ export async function pageLegs({ DIR, BASE, SLUG, STAMP, REPO, ok, bad }) {
     }
 
     // ---- badge-in: a real click, as a visitor gets there ------------------------------
+    await note("/ (landing, carousel, contrast, phone at 390 px)", landingFrom[0], landingFrom[1]);
     {
       const detail = [];
       const l0 = consoleLines.length;

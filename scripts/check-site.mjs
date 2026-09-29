@@ -60,7 +60,8 @@ if (!process.argv[2] || !fs.existsSync(path.join(DIR, "index.html"))) { console.
 const MAN = DIR + ".manifest";
 if (!fs.existsSync(MAN)) { console.log(`SETUP-FAILED: ${MAN} missing (scripts/stage-web)`); process.exit(2); }
 const sha = (b) => crypto.createHash("sha256").update(b).digest("hex");
-const GATES = ["scripts/check-site.mjs", "scripts/check-site-pages.mjs", "scripts/serve-site.mjs", "scripts/tree-manifest"];
+// shot-web.mjs decides the boots, transmission and fullscreen verdicts
+const GATES = ["scripts/check-site.mjs", "scripts/check-site-pages.mjs", "scripts/serve-site.mjs", "scripts/shot-web.mjs", "scripts/tree-manifest"];
 const gateHashes = GATES.map((g) => [g, sha(fs.readFileSync(path.join(REPO, g)))]);   // at the START of the run
 const head = execFileSync("git", ["-C", REPO, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 const clean = execFileSync("git", ["-C", REPO, "status", "--porcelain", "--untracked-files=no"], { encoding: "utf8" }).trim() === "";
@@ -138,10 +139,14 @@ root.status === 200 && root.type.startsWith("text/html") && rootText.includes(`h
   ? ok("root", `/ is 200 html and links /${SLUG}/`) : bad("root", `/ is ${root.status} ${root.type}, links /${SLUG}/: ${rootText.includes(`href="/${SLUG}/"`)}`);
 const robots = await get("/robots.txt");
 const robotsText = robots.body.toString();
-robots.status === 200 && /User-agent:\s*\*/.test(robotsText) && /^Allow:\s*\/\s*$/m.test(robotsText) && !/^Disallow:\s*\S/m.test(robotsText)
+robots.status === 200 && /User-agent:\s*\*/i.test(robotsText) && /^Allow:\s*\/\s*$/mi.test(robotsText) && !/^Disallow:\s*\S/mi.test(robotsText)
   ? ok("robots", "allows everything") : bad("robots", `status ${robots.status}: ${robotsText.slice(0, 60)}`);
 
 // files, indexable
+// a <meta> for robots (or a named crawler) whose content says noindex, its
+// attributes in any order
+const asksNoindex = (html) => [...html.matchAll(/<meta\b[^>]*>/gi)].some(([m]) =>
+  /\bname\s*=\s*["']?(robots|googlebot|bingbot)\b/i.test(m) && /\bcontent\s*=\s*["'][^"']*noindex/i.test(m));
 let served = 0, noidx = 0;
 for (const f of files) {
   if (f === "_headers" || f === "_redirects") continue;   // consumed by Pages, never served
@@ -151,11 +156,11 @@ for (const f of files) {
   const htmlOk = f.endsWith(".html") || !r.type.startsWith("text/html");
   if (same && htmlOk) served++; else bad("files", `${f}: ${r.status} ${r.type}${same ? "" : " (bytes differ)"}`);
   if (/noindex/.test(r.robots)) { noidx++; bad("indexable", `${f} is served with X-Robots-Tag: ${r.robots}`); }
-  if (f.endsWith(".html") && f !== "404.html" && /<meta name="robots" content="[^"]*noindex/i.test(fs.readFileSync(path.join(DIR, f), "utf8"))) { noidx++; bad("indexable", `${f} asks not to be indexed`); }
+  if (f.endsWith(".html") && f !== "404.html" && asksNoindex(fs.readFileSync(path.join(DIR, f), "utf8"))) { noidx++; bad("indexable", `${f} asks not to be indexed`); }
 }
 const nfiles = files.filter((f) => f !== "_headers" && f !== "_redirects").length;
 if (served === nfiles) ok("files", `${served} of ${nfiles} served byte for byte`);
-if (!/<meta name="robots" content="noindex/.test(fs.readFileSync(path.join(DIR, "404.html"), "utf8"))) { noidx++; bad("indexable", "404.html does not ask not to be indexed"); }
+if (!asksNoindex(fs.readFileSync(path.join(DIR, "404.html"), "utf8"))) { noidx++; bad("indexable", "404.html does not ask not to be indexed"); }
 if (noidx === 0) ok("indexable", `none of ${nfiles} files carries X-Robots-Tag: noindex; 404.html alone says noindex`);
 
 // missing
