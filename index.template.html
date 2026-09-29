@@ -89,7 +89,7 @@
   // 2026-09-29). Substratic's, from substratic.js's "webgl" section,
   // copied as is (Phantom doesn't load substratic.js; the fullscreen section
   // below came the same way). It must come before the loader's tag
-  // (<!--sigil:app-->), which it switches off when there is no WebGL 2.
+  // (the build's app marker), which it switches off without WebGL 2.
   (function () {
     "use strict";
   // ---- webgl -------------------------------------------------------------------
@@ -102,7 +102,7 @@
   // nothing. So, before the wasm boots:
   //   - a throwaway canvas is asked for "webgl2", then "webgl", so the message
   //     can say whether WebGL is off entirely or only WebGL 2 is missing;
-  //   - with no WebGL 2, the loader's <script> (the build's <!--sigil:app-->,
+  //   - with no WebGL 2, the loader's script tag (the build's app marker,
   //     which comes after this one) is switched to text/plain as the parser
   //     inserts it, before it runs: the wasm is never fetched;
   //   - a message in the page says what to do (#sub-webgl, data-webgl "none"
