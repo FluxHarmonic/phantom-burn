@@ -28,6 +28,8 @@
 //   transmission  floor 14 (?go=14, the flow) prints Crash's transmission
 //   fullscreen Substratic's button, and the page's "phantom-burn: fullscreen"
 //              line (the pause panel's row), each call requestFullscreen
+//   title-room the first title after a cold load, its room held back past the
+//              title's 10 s wait, shows the room once it lands (not the console alone)
 //   boots      the game at /<game>/ and its title (?title=1) boot in headless
 //              Chrome through this same server with no console error, and
 //              fetched the wasm from /w/<sha16>/ and nowhere else
@@ -39,6 +41,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
+import zlib from "node:zlib";
 import { createHandler, parseRedirects } from "./serve-site.mjs";
 
 const DIR = path.resolve((process.argv[2] || "").replace(/\/$/, ""));
@@ -94,7 +97,13 @@ m && page.includes(`data-wasm="/w/${m[1]}/phantom-burn"`) && !page.includes('dat
 // every request the boots make, to see where the page took its wasm from
 const asked = new Set();
 const handler = createHandler(DIR);
-const server = http.createServer((req, res) => { asked.add(decodeURIComponent(req.url.split("?")[0])); handler(req, res); });
+// title-room: while holdRoom is set, the title's root room answers that much later
+let holdRoom = 0;
+const server = http.createServer((req, res) => {
+  asked.add(decodeURIComponent(req.url.split("?")[0]));
+  if (holdRoom && req.url.includes("/assets/floors/root-room/")) setTimeout(() => handler(req, res), holdRoom);
+  else handler(req, res);
+});
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
 const BASE = `http://127.0.0.1:${server.address().port}`;
 async function get(p) {
@@ -189,6 +198,26 @@ for (const [q, want] of [["hud=0", "game"], ["title=1", "title"]]) {
   ev === "button 2" ? ok("fullscreen", "Substratic's button and the pause panel's line each request fullscreen")
                     : bad("fullscreen", `the fullscreen spy: ${ev || "no result"} (want button 2)`);
 }
+// title-room (David, 2026-09-29: the first title after a cold load showed only
+// the console): the root room held back 12 s, past the title's 10 s wait, so
+// the title starts without it; when it lands the title must put it in. The
+// root console's screen is violet (C-GIBSON); the bare title has none.
+{
+  holdRoom = 12000;
+  const png = "/tmp/phantom-check-site-title-room.png";
+  const r = await new Promise((resolve) => {
+    const ch = spawn("node", [path.join(REPO, "scripts/shot-web.mjs"), DIR, png,
+      "--url", `${BASE}/${SLUG}/`, "--wait", "14000"]);
+    let o = "";
+    ch.stdout.on("data", (d) => { o += d; }); ch.stderr.on("data", (d) => { o += d; });
+    const kill = setTimeout(() => ch.kill("SIGKILL"), 200000);
+    ch.on("close", (code) => { clearTimeout(kill); resolve({ status: code, out: o }); });
+  });
+  holdRoom = 0;
+  const n = r.status === 0 && fs.existsSync(png) ? violetPixels(png) : -1;
+  n >= 300 ? ok("title-room", `the first title, its room held back 12 s, shows it when it lands (${n} violet pixels)`)
+           : bad("title-room", `the first title with its room held back: ${n < 0 ? "no shot (rc " + r.status + ")" : n + " violet pixels (want 300 or more): the console alone"}`);
+}
 server.close();
 if (m) {
   const want = `/w/${m[1]}/phantom-burn.wasm`;
@@ -208,3 +237,34 @@ if (fail === 0) {
 try { fs.rmSync(DIR + ".verified"); } catch { /* none */ }
 console.log(`RED: ${pass} pass, ${fail} fail`);
 process.exit(1);
+
+// A PNG's pixels that are near C-GIBSON's violet (#B36BFF): 8-bit RGB or RGBA,
+// not interlaced (a Chrome screenshot).
+function violetPixels(file) {
+  const b = fs.readFileSync(file);
+  let o = 8, w = 0, h = 0, ch = 0, idat = [];
+  while (o < b.length) {
+    const len = b.readUInt32BE(o), type = b.toString("latin1", o + 4, o + 8), d = b.subarray(o + 8, o + 8 + len);
+    if (type === "IHDR") { w = d.readUInt32BE(0); h = d.readUInt32BE(4); ch = d[9] === 6 ? 4 : 3; if (d[8] !== 8 || d[12] !== 0) return -1; }
+    else if (type === "IDAT") idat.push(d);
+    o += 12 + len;
+  }
+  const raw = zlib.inflateSync(Buffer.concat(idat)), stride = w * ch, px = Buffer.alloc(stride * h);
+  for (let y = 0; y < h; y++) {
+    const f = raw[y * (stride + 1)], src = raw.subarray(y * (stride + 1) + 1, (y + 1) * (stride + 1));
+    for (let x = 0; x < stride; x++) {
+      const a = x >= ch ? px[y * stride + x - ch] : 0, up = y > 0 ? px[(y - 1) * stride + x] : 0,
+            c = x >= ch && y > 0 ? px[(y - 1) * stride + x - ch] : 0;
+      let v = src[x];
+      if (f === 1) v += a; else if (f === 2) v += up; else if (f === 3) v += (a + up) >> 1;
+      else if (f === 4) { const pp = a + up - c, pa = Math.abs(pp - a), pb = Math.abs(pp - up), pc = Math.abs(pp - c); v += pa <= pb && pa <= pc ? a : pb <= pc ? up : c; }
+      px[y * stride + x] = v & 255;
+    }
+  }
+  let n = 0;
+  for (let i = 0; i < w * h; i++) {
+    const r = px[i * ch], g = px[i * ch + 1], bl = px[i * ch + 2];
+    if (Math.abs(r - 179) < 45 && Math.abs(g - 107) < 45 && Math.abs(bl - 255) < 45) n++;
+  }
+  return n;
+}

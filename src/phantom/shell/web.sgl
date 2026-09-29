@@ -325,6 +325,7 @@
     (define *t-info* #f)
     (define *t-fetches* '())
     (define *t-none* #f)             ; the room's floor.sexp did not load
+    (define *t-bare* #f)             ; the title is up without its room (yet)
     (define *t-waited* 0.0)
     (define *t-time* #f)             ; seconds on the title, once it is up
     (define (t-url name) (string-append "assets/floors/root-room/" name))
@@ -353,6 +354,11 @@
       (if (and *t-info* (t-fetched?))
           (title-init! t-load-mesh* t-load-texture* *t-info*)
           (title-init!))
+      ;; started without its room (it had not landed within 10 s: a slow
+      ;; network, the game's own files loading too): put the room in when it
+      ;; lands (David, 2026-09-29: the first title after a cold load showed
+      ;; only the console; a title after PRACTICE had the room)
+      (set! *t-bare* (not (and *t-info* (t-fetched?))))
       (apply-params!)
       (set! *pressed* '())
       (set! *tap* #f)
@@ -407,8 +413,9 @@
 
     (define (flow-title-tick payload)
       (let ((dt (frame-dt payload)))
-        ;; the floor's files load behind the title, and the sound's bank renders
-        (prefetch-game!)
+        ;; the floor's files load behind the title (once the title is up, so the
+        ;; title's room lands first), and the sound's bank renders
+        (when *t-time* (prefetch-game!))
         (sound-game-idle!)
         (when (and (not *t-info*) *t-info-text*)
           (let ((text *t-info-text*))
@@ -422,6 +429,12 @@
           (set! *t-waited* (+ *t-waited* dt))
           (when (or (and *t-info* (t-fetched?)) *t-none* (> *t-waited* 10.0))
             (flow-title-start!)))
+        ;; the room landed after the title started without it: in it goes
+        (when (and *t-time* *t-bare* *t-info* (t-fetched?))
+          (set! *t-bare* #f)
+          (title-init! t-load-mesh* t-load-texture* *t-info*)
+          (apply-params!)
+          (display "phantom-burn: title room") (newline))
         (if *t-time*
             (begin
               (set! *t-time* (+ *t-time* dt))
