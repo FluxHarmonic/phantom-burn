@@ -495,7 +495,8 @@
         (set! *tx-time* (+ *tx-time* TICK))
         (when (and (not *tx-said*) (>= *tx-time* TX-START))
           (set! *tx-said* #t)
-          (display "phantom-burn: transmission ") (display (car (tx-lines))) (newline)))
+          ;; one display: on the web each display call is its own console line
+          (display (string-append "phantom-burn: transmission " (car (tx-lines)))) (newline)))
       (set! *badge-flash* (max 0.0 (- *badge-flash* TICK)))
       (set! *eye-flash* (max 0.0 (- *eye-flash* TICK)))
       (cond

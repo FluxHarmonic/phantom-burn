@@ -235,8 +235,11 @@
         (play-mode-set-best! (best-param (param "best")))
         (play-mode-set-on-record!
          (lambda (secs incidents)
-           (display "phantom-burn: floor-done ") (display *floor*) (display " ")
-           (display secs) (display " ") (display incidents) (newline)))
+           ;; one display: on the web each display call is its own console line,
+           ;; and the page reads the protocol a line at a time
+           (display (string-append "phantom-burn: floor-done " *floor* " "
+                                   (number->string secs) " " (number->string incidents)))
+           (newline)))
         (unless (or (param "hud") (param "dev")) (game-set-hud! 0)))
       (set! *started* #t)
       (when *replay-text* (run-replay! *replay-text*) (set! *replay-text* #f)))
@@ -485,7 +488,7 @@
                  ;; ready once the first frame is drawn (shots wait for this line)
                  (unless *said-ready*
                    (set! *said-ready* #t)
-                   (display "phantom-burn: ready ") (display *floor*) (newline))))
+                   (display (string-append "phantom-burn: ready " *floor*)) (newline))))
               ((eq? *started* 'failed) #f)
               ((all-ready?) (start!))
               (else
