@@ -1,6 +1,6 @@
 ;;; Phantom Burn's configuration for substratic's shared site tools
-;;; (substratic tasks/: stage-web, check-site, publish-web, verify-live,
-;;; pages-dev-check, cloudflare-setup, build-remote, host-site). Read as
+;;; (substratic tasks/: build-remote, stage-web, check-site, publish-web,
+;;; verify-live, pages-dev-check, cloudflare-setup, host-site). Read as
 ;;; data, never evaluated; an unknown key or section is refused.
 (substratic schema: 1)
 
@@ -16,21 +16,31 @@
           zone: "phantomburn.net"
           ;; the newest date this box's wrangler 4.112 workerd supports
           compatibility-date: "2026-07-14")
-  ;; the wasm in R2, served by the generated Function at /w/<sha16>/phantom-burn.wasm
-  wasm: (bucket: "phantomburn-wasm" binding: "WASM" route: "w")
+  ;; the wasm in R2, served by the generated Function at /w/<sha16>/phantom-burn.wasm;
+  ;; the Function says noindex (a binary is no page) though the site is public
+  wasm: (bucket: "phantomburn-wasm" binding: "WASM" route: "w" noindex: yes)
   apps: ((name: "phantom-burn"
           ;; a runner build: PHANTOM_WEB_DIR=build/remote-web-<sha>
           web: (dir: "build/web" env: "PHANTOM_WEB_DIR")
-          ;; the game's path: /beta/ (David, 2026-09-26), overridable
+          ;; the game's path: /badge-in/ (David, 2026-09-29), overridable
           mount: (env: "PHANTOM_SITE_SLUG" file: "~/.config/phantomburn/slug"
-                  default: "beta" pattern: "[a-z][a-z0-9-]{1,31}")
-          requires: ("assets/floors/14-slice/floor.sexp")))
-  ;; a private preview: robots.txt disallows everything, every response
-  ;; and the wasm Function say X-Robots-Tag: noindex
-  indexing: noindex
+                  default: "badge-in" pattern: "[a-z][a-z0-9-]{1,31}")
+          requires: ("assets/floors/14/floor.sexp")))
+  ;; public from 0.1: robots.txt allows everything, no X-Robots-Tag on the
+  ;; site, and only the 404 page asks not to be indexed
+  indexing: index
+  ;; site/'s tracked files, whole; /news/ and /version.json are generated
   site: (source: "site"
-         files: ("index.html" "404.html" "robots.txt" "_headers" "_redirects"))
-  ;; the game's own legs of check-site: the root page and the boots
-  check: (arm: "scripts/check-boots.mjs" gate-files: ("scripts/shot-web.mjs"))
+         copy: tracked
+         required: ("index.html" "404.html" "robots.txt" "_headers" "_redirects" "style.css")
+         refuse: ("news" "version.json"))
+  ;; news/*.md -> /news/, its feeds and /version.json (Harkfell's D38 shape)
+  stage-hook: (argv: ("node" "scripts/build-news.mjs" "news" "{dir}" "--version" "{version}" "--stamp" "{stamp}")
+               outputs: ("version.json" "news/index.html" "news/feed.xml" "news/feed.json")
+               inputs: ("news"))
+  ;; the game's own legs of check-site: the landing and the site's pages,
+  ;; the boots, floor 14, fullscreen, the first title's room, the reticle
+  check: (arm: "scripts/check-game.mjs"
+          gate-files: ("scripts/check-site-pages.mjs" "scripts/shot-web.mjs"))
   host: (https: 8811 http: 8812 dir: "~/Projects/Code/sigil/phantom-burn-hosted")
   remote: (web-config: web))
