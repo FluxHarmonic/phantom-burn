@@ -60,7 +60,7 @@
     ;; Window, keyboard and cursor capture (GLFW); native only.
     (from-git url: "codeberg:sigil/sigil-app" name: "sigil-desktop" version: "^0.12.0" configs: '(dev release))
     ;; Drawing, 2D and the 3D path, both targets.
-    (from-git url: "codeberg:sigil/sigil-graphics" version: "^0.12.0")
+    (from-git url: "codeberg:sigil/sigil-graphics" version: "^0.14.0")
     ;; vec/mat/quat as float32 bytevectors, the camera, rays.
     (from-git url: "codeberg:sigil/sigil-geometry" version: "^0.1.0")
     ;; Web only: the wasm runtime and loader, the WebGL2 bridge and app

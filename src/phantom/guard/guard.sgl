@@ -45,6 +45,7 @@
           guard-prev-x guard-prev-y guard-prev-fx guard-prev-fy
           guard-state guard-state-name guard-awareness guard-sees? guard-rate
           guard-leg guard-waiting? guard-phase guard-on-edge?
+          guard-attending? guard-attend-x guard-attend-y guard-attend-z
           make-target target-set!
           CALM SUSPICIOUS SEARCHING HUNTING
           GUARD-EYE RANGE WALK-SPEED HUNT-SPEED)
@@ -202,6 +203,13 @@
     (define (guard-phase g) (vector-ref g S-PHASE))
     (define (guard-on-edge? g) (vector-ref g S-EDGE))
     (define (guard-caught? g) (vector-ref g S-CAUGHT))
+    ;; Where it attends (G1's skinned head turns there): the place it last
+    ;; saw or heard you, meaningful from SUSPICIOUS up. Numbers, not a list,
+    ;; so a frame's draw allocates nothing.
+    (define (guard-attending? g) (>= (vector-ref g S-STATE) SUSPICIOUS))
+    (define (guard-attend-x g) (vector-ref g S-LSX))
+    (define (guard-attend-y g) (vector-ref g S-LSY))
+    (define (guard-attend-z g) (vector-ref g S-LSZ))
 
     ;; --- the step -------------------------------------------------------------------
 

@@ -278,7 +278,44 @@
                          (loop (+ i 1) lo hi))))
             (begin (display (list 'sweep lo hi)) (newline)
                    (assert-true (< lo -0.3))
-                   (assert-true (> hi 0.3))))))))
+                   (assert-true (> hi 0.3)))))))
+  ;; G1: the lamp is where the skinned body holds its torch (the hand, the arm
+  ;; raised), 0.29 m right, 0.48 m forward and 0.99 m up of the unit's feet in
+  ;; its own frame, as it stood when the tick began (the lamp is set before
+  ;; the unit steps); the drawn lamp rides the animated hand, this one does not
+  (test "the lamp sits at the hand: 0.29 m right, 0.48 m forward, 0.99 m up of the unit's feet"
+    (let loop ((cases '((4.0 5.0 1.0 0.0) (4.0 5.0 0.0 1.0) (16.5 6.2 0.0 1.0) (6.0 5.0 -1.0 0.0))))
+      (unless (null? cases)
+        (let* ((c (car cases)) (p (fresh14)) (w (stand 9.0 5.0)) (g (play-guard p)))
+          (apply guard-place! g c)
+          (play-tick! p w DARK-ON 1.0 2.0)
+          (let* ((t (play-torch p)) (fx (guard-prev-fx g)) (fy (guard-prev-fy g)))
+            (assert-true (vector-ref t 0))
+            (assert-true (< (abs (- (vector-ref t 1) (+ (guard-prev-x g) (* 0.29 fy) (* 0.48 fx)))) 1e-9))
+            (assert-true (< (abs (- (vector-ref t 2) (+ (guard-prev-y g) (* -0.29 fx) (* 0.48 fy)))) 1e-9))
+            (assert-true (< (abs (- (vector-ref t 3) (+ (guard-z g) 0.99))) 1e-9))))
+        (loop (cdr cases)))))
+  ;; the reviewer's case: close to room 9's wall, facing it, you in the dark
+  ;; beyond it in room 8; with the lamp past the wall you were lit 0.77
+  (test "facing a wall close up, the lamp stays on its side of it: you beyond the wall stay dark"
+    (let ((r (lit-by-torch DARK-ON 30.625 4.625 0.0 1.0 30.885 6.6)))
+      (display (list 'torch-wall-close r)) (newline)
+      (assert-true (cadr r))
+      (assert-true (< (car r) 0.2))))
+  (test "the lamp is deterministic: the same 240 ticks give the same lamp, tick for tick"
+    (let ((run (lambda ()
+                 (let* ((p (fresh14)) (w (stand 1.0 8.0)) (g (play-guard p)))
+                   (guard-place! g 6.0 5.0 1.0 0.0)
+                   (guard-notice! g 0.65 9.0 5.0 0.0)
+                   (let loop ((i 0) (acc '()))
+                     (if (= i 240) (reverse acc)
+                         (begin (play-tick! p w DARK-ON 1.0 2.0)
+                                (loop (+ i 1) (cons (vector-copy (play-torch p)) acc)))))))))
+      (let ((a (run)) (b (run)))
+        (assert-equal 240 (length a))
+        (assert-true (equal? a b))
+        ;; and it moved: the sweep turned the beam, the walk moved the lamp
+        (assert-false (equal? (car a) (list-ref a 239)))))))
 
 ;;; The second camera (Phantom 0.1, item 5; design section 4: "another
 ;;; watches the stairwell door"): at the reader in the lit lobby it alarms

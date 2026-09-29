@@ -239,18 +239,14 @@
                                               (get-output-string out))
                                             "\n")))))
 
-    ;; The guard's body, beside the floors (one for every floor).
-    (define GUARD-SGM "assets/guard/guard.sgm")
-    (define (load-guard!)
-      (when (file-exists? GUARD-SGM)
-        (render-load-guard! (lambda (layout) (load-mesh layout GUARD-SGM)))))
-
-    ;; G1's skin door (--skin N)
+    ;; The guard's body (G1's skinned robot, one for every floor), and the
+    ;; skin door's demo (--skin N). The baked guard (assets/guard/guard.sgm)
+    ;; is no longer loaded.
     (define SKIN-FILE (string-append "assets/" SKIN-SGM))
     (define (skin-setup! args)
       (let ((n (string->number (arg-value args "--skin" "none"))))
-        (when (and n (> n 0) (file-exists? SKIN-FILE))
-          (skin-door! n)
+        (when (file-exists? SKIN-FILE)
+          (when (and n (> n 0)) (skin-door! n))
           (skin-load! (lambda (layout) (load-mesh layout SKIN-FILE)))
           (let ((f (string->number (arg-value args "--skin-freeze" "none")))) (when f (skin-freeze! (* 1.0 f))))
           (let ((l (arg-value args "--skin-look" #f)))
@@ -270,14 +266,14 @@
           (let* ((ns (numbers g))
                  (at (lambda (k d) (if (and (> (length ns) k) (list-ref ns k)) (* 1.0 (list-ref ns k)) d)))
                  (num (lambda (flag d) (let ((v (string->number (arg-value args flag "none")))) (if v (* 1.0 v) d)))))
-            (if (render-guard-ready?)
+            (if (skin-ready?)
                 (begin
                   (guard-preview-set! (at 0 0.0) (at 1 0.0) (at 2 0.0) (at 3 2.0)
                                       (num "--guard-speed" 1.3)
                                       (exact (round (num "--guard-state" -1.0)))
                                       (num "--guard-light" 0.7))
                   (render-set-extra-draw! guard-preview-draw!))
-                (begin (display (string-append "phantom-burn: --guard: no " GUARD-SGM)) (newline)))))))
+                (begin (display (string-append "phantom-burn: --guard: no " SKIN-FILE)) (newline)))))))
 
     ;; S1's sound: with --play, not muted, and not an automated run
     (define (sound-wanted? args frames seconds)
@@ -297,7 +293,6 @@
         ;; --look-sim: any compiled floor in the sim's look (PRACTICE, D38)
         (when (member "--look-sim" args) (render-force-sim! #t))
         (game-init! load-mesh* load-texture* (load-collision) (load-info))
-        (load-guard!)
         (skin-setup! args)
         (apply-settings! args)
         (start-play! args (load-info))

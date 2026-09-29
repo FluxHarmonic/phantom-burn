@@ -318,3 +318,43 @@
       (newline)
       (assert-true (>= (- control empty) 180))   ; one bytevector a call
       (assert-true (<= (- posing empty) 2)))))
+
+;; --- in play (G1 in Phantom 0.1): the torch arm follows the core's beam -------------------
+;; (phantom guard skin-draw)'s play pose, headless: the body at the origin
+;; facing +y, standing (the phase unchanged), the core's flashlight on along a
+;; beam pitched down 0.3 rad (TORCH-PITCH), then swept +-0.45 rad.
+(import (phantom guard skin-draw))
+(define M0 (list->mat4 '(1.0 0.0 0.0 0.0  0.0 1.0 0.0 0.0  0.0 0.0 1.0 0.0  0.0 0.0 0.0 1.0)))
+(define (beam a) (let ((cp (cos -0.3)) (sp (sin -0.3))) (list (* cp (- (sin a))) (* cp (cos a)) sp)))
+(define *clock* 10.0)
+;; pose for s seconds at 60 Hz with the torch on? along beam angle a
+(define (hold! s on? a)
+  (let ((b (beam a)))
+    (let loop ((k 0))
+      (when (< k (exact (round (* 60 s))))
+        (set! *clock* (+ *clock* (/ 1.0 60.0)))
+        (skin-play-pose! *clock* M0 0.0 on? (car b) (cadr b) (caddr b))
+        (loop (+ k 1))))))
+(define (tip) (list (skin-torch-x) (skin-torch-y) (skin-torch-z)))
+(define (dist a b) (sqrt (apply + (map (lambda (x y) (* (- x y) (- x y))) a b))))
+
+(test-group "the torch arm in play"
+  (test "on: the torch points along the core's beam, ahead and swept either way (to 1e-4)"
+    (for-each (lambda (a)
+                (hold! 1.0 #t a)
+                (let ((b (beam a)))
+                  (assert-true (< (abs (- (skin-torch-dx) (car b))) 1e-4))
+                  (assert-true (< (abs (- (skin-torch-dy) (cadr b))) 1e-4))
+                  (assert-true (< (abs (- (skin-torch-dz) (caddr b))) 1e-4))))
+              '(0.0 0.45 -0.45)))
+  (test "on, standing: the tip is within 10 cm of the core's lamp (0.29 right, 0.48 forward, 0.99 up)"
+    (hold! 1.0 #t 0.0)
+    (assert-true (< (dist (tip) '(0.29 0.48 0.99)) 0.1)))
+  (test "off: the arm hangs (the torch at the hip, below 0.9 m); on again, it rises without a jump"
+    (hold! 1.0 #f 0.0)
+    (assert-true (< (skin-torch-z) 0.9))
+    (let ((before (tip)))
+      (hold! (/ 1.0 60.0) #t 0.0)
+      (assert-true (< (dist (tip) before) 0.03))
+      (hold! 0.5 #t 0.0)
+      (assert-true (> (skin-torch-z) 0.95)))))

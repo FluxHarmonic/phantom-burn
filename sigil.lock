@@ -25,9 +25,9 @@
            version: "0.12.0")
   (package name: "sigil-graphics"
            url: "codeberg:sigil/sigil-graphics"
-           ref: "^0.12.0"
-           sha: "bfcd31eb33a14ee65cffb17430a326caec4acb84"
-           version: "0.12.0")
+           ref: "^0.14.0"
+           sha: "02c33e8128fa983a55826ffa04b7ccd3eb31a1a0"
+           version: "0.14.0")
   (package name: "sigil-geometry"
            url: "codeberg:sigil/sigil-geometry"
            ref: "^0.1.0"

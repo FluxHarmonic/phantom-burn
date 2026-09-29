@@ -22,9 +22,9 @@
 ;;; play mode sets it). One guard's easing state is kept here; a second guard
 ;;; will need it per guard.
 ;;;
-;;; With G1's skin door open ((phantom guard skin-draw): ?skin=N, --skin N)
-;;; and its mesh loaded, guard-body-draw! hands the guard to the skinned
-;;; path instead; closed, nothing here changes.
+;;; Once G1's skinned mesh is loaded ((phantom guard skin-draw); both shells
+;;; load it), guard-body-draw! hands the guard to the skinned path; the baked
+;;; path below is left in place, unused, until it is removed after 0.1.
 ;;;
 ;;; guard-preview-draw! is the native --guard preview (a guard walking a
 ;;; circle, no AI), for shots of the body without P1's play.
@@ -75,7 +75,7 @@
         (* POSES (- c (floor c)))))
 
     (define (guard-body-draw! model phase state r g b)
-      (if (and (> (skin-door) 0) (skin-ready?))
+      (if (skin-ready?)
           (skin-guard-draw! model phase state r g b)
           (baked-body-draw! model phase state r g b)))
 

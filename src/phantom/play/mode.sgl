@@ -33,6 +33,7 @@
           (phantom guard hearing)
           (phantom guard guard)
           (phantom guard body)
+          (phantom guard skin-draw)
           (phantom play devices)
           (phantom play practice)
           (phantom deck hud))
@@ -591,15 +592,26 @@
               (loop (+ i 1))))
           v)))
 
-    ;; The flashlight's uniforms this frame: the lamp at the drawn body, its
-    ;; beam and room as the core has them.
+    ;; The flashlight's uniforms this frame: the lamp at the drawn torch's tip
+    ;; (the skinned body's hand, as last drawn; the core's lamp before the
+    ;; first draw), its beam and room as the core has them.
     (define (torch-frame!)
       (let* ((t (and *core* (play-torch *core*)))
              (g (and t (play-guard *core*)))
-             (r (and t (vector-ref t 0) (room-at (play-data *core*) (guard-x g) (guard-y g) (guard-z g))))
+             ;; the drawn torch's tip, unless a wall stands between the body
+             ;; and it (then the core's lamp, which keeps to the body's side)
+             (tip? (and t (vector-ref t 0) (skin-torch-ready?)
+                        (sight-clear? *coll* (play-glass (play-data *core*))
+                                      (guard-x g) (guard-y g) (skin-torch-z)
+                                      (skin-torch-x) (skin-torch-y) (skin-torch-z))))
+             (lx (and t (if tip? (skin-torch-x) (vector-ref t 1))))
+             (ly (and t (if tip? (skin-torch-y) (vector-ref t 2))))
+             (lz (and t (if tip? (skin-torch-z) (vector-ref t 3))))
+             ;; the room box from where the lamp is (a doorway: the room ahead)
+             (r (and t (vector-ref t 0) (room-at (play-data *core*) lx ly (guard-z g))))
              (b (and r (>= r 0) (< r (vector-length *torch-boxes*)) (vector-ref *torch-boxes* r))))
         (render-set-torch!
-         (and b (list *pose-x* *pose-y* (vector-ref t 3) (vector-ref t 4) (vector-ref t 5) (vector-ref t 6)
+         (and b (list lx ly lz (vector-ref t 4) (vector-ref t 5) (vector-ref t 6)
                       TORCH-COS TORCH-RANGE (vector-ref b 0) (vector-ref b 1) (vector-ref b 2))))))
 
     (define (play-frame! alpha cam)
@@ -639,6 +651,11 @@
         (let* ((g (play-guard *core*))
                (ls (play-light-state *core*))
                (_ (light-rgb-at! ls (play-data *core*) *pose-x* *pose-y* (guard-z g))))
+          ;; the skinned body's flashlight arm and head (G1): the core's beam, and
+          ;; where the unit attends
+          (let ((t (play-torch *core*)))
+            (skin-guard-frame! (vector-ref t 0) (vector-ref t 4) (vector-ref t 5) (vector-ref t 6)
+                               (guard-attending? g) (guard-attend-x g) (guard-attend-y g) (guard-attend-z g)))
           (guard-body-draw! *model* (guard-phase g) (guard-state g)
                             (light-r ls) (light-g ls) (light-b ls)))))
 

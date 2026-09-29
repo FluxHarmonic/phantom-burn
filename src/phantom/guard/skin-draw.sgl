@@ -1,6 +1,17 @@
-;;; (phantom guard skin-draw) - G1's skinned guard, behind the skin door
-;;; (?skin=N on the web, --skin N natively; N guards, 0 or absent is off and
-;;; the game draws its baked guard exactly as before).
+;;; (phantom guard skin-draw) - G1's skinned guard: the guard's body in play
+;;; (Phantom 0.1 on), and the skin door's demo (?skin=N on the web, --skin N
+;;; natively: N guards and the demo behaviours below).
+;;;
+;;; In play (no door): one guard, posed from the walk. Standing, the head
+;;; looks around; from SUSPICIOUS up it turns toward where the unit last saw
+;;; or heard you (skin-guard-frame!, from play mode). The torch arm is raised,
+;;; and the cone drawn, only while the core's flashlight is on, and the hand
+;;; aims along the core's beam (its search sweep included), so the arm and the
+;;; light agree. The torch's tip in the world (skin-torch-x/y/z) is where play
+;;; mode puts the rendered lamp. make-skin-body / skin-body-draw! draw another
+;;; unit (the night cleaner) with its own pose, a tint and a visor colour.
+;;;
+;;; The demo (the door opened): what follows.
 ;;;
 ;;; With the door open, (phantom guard body)'s guard-body-draw! hands its
 ;;; guard here: the same inputs (the body's frame, metres walked, the alert
@@ -57,6 +68,9 @@
           (phantom guard skin-data))
 
   (export SKIN-SGM skin-door skin-door! skin-load! skin-ready?
+          skin-guard-frame! skin-torch-ready? skin-torch-x skin-torch-y skin-torch-z
+          skin-torch-dx skin-torch-dy skin-torch-dz skin-play-pose!
+          make-skin-body skin-body-palette! skin-body-draw!
           skin-guard-draw! skin-hud-line skin-freeze! skin-look-at!
           skin-pose-ms skin-guards-drawn skin-bench!)
 
@@ -68,6 +82,7 @@
     (define LOOK-PITCH 0.5)    ; rad (29 deg) up or down
     (define LOOK-RATE 3.0)     ; rad/s the head turns
     (define RAISE 1.35)        ; rad the forearm lifts to hold the torch level
+    (define RAISE-TIME 0.35)   ; s to raise or lower it (play)
     (define SWEEP 0.6)         ; rad (34 deg) either side, standing
     (define TILT 0.14)         ; rad (8 deg) the beam points down
     (define SWEEP-PERIOD 4.5)  ; s, left and right
@@ -85,11 +100,13 @@
     (define TF 11)             ; floats a sample: t x y z fx fy phase state r g b
     (define CONE-LEN 7.0) (define CONE-HALF 0.32) (define CONE-SIDES 12)
 
-    (define *count* 0)
+    (define *count* 0)         ; the door's guards; 0: play (one guard, no demo)
+    (define *demo* #f)         ; the door opened: the demo behaviours
     (define (skin-door) *count*)
     (define (skin-door! n)
       (set! *count* (max 0 (min MAX-GUARDS n)))
-      (when (> *count* 0) (ensure-skin!)))
+      (set! *demo* (> *count* 0))
+      (when *demo* (ensure-skin!)))
 
     (define *freeze* #f)       ; a fraction of the walk cycle held, for shots
     (define (skin-freeze! f) (set! *freeze* f))
@@ -136,6 +153,7 @@ uniform vec4 eye;           // xyz camera, w fog distance
 uniform vec4 retro;
 uniform vec4 light;         // rgb: the light where the guard stands
 uniform vec4 visor;         // rgb: the strip's glow
+uniform vec4 tint;          // rgb: this unit's colours, multiplied (1 1 1: the guard's own)
 uniform vec4 bones[" (number->string (* 3 NJ)) "];  // three rows of each joint's skin matrix
 in vec3 position;
 in vec4 normal8;
@@ -162,7 +180,7 @@ void main() {
   vec3 wn = normalize(mat3(model) * n);
   vec3 to_eye = normalize(eye.xyz - wp);
   float shade = 0.5 + 0.3 * max(wn.z, 0.0) + 0.4 * max(dot(wn, to_eye), 0.0);
-  v_color = color.a < 0.5 ? visor.rgb : color.rgb * light.rgb * shade;
+  v_color = color.a < 0.5 ? visor.rgb : color.rgb * tint.rgb * light.rgb * shade;
   v_uv = vec2(0.5);
   v_fog = clamp(length(wp - eye.xyz) / eye.w, 0.0, 1.0);
   vec4 clip = view_proj * vec4(wp, 1.0);
@@ -261,16 +279,74 @@ void main() {
     ;;   marker-m marker?), cursor the trail sample (a count from the first) a
     ;; demo guard stands on, offset its phase in the marker's and the sweep's
     ;; cycles, marker the marker's world point, marker? whether the head
-    ;; follows it this frame
+    ;; follows it this frame; then tint (a bytevector), visor (a bytevector, or #f
+    ;; for the alert state's colour), and what play mode says this frame:
+    ;; torch-on? tdx tdy tdz (the core's beam, world) attend? ax ay az
     (define (make-guard i)
       (let ((p (make-skin-pose SKEL)) (hq (make-quat)) (fq (make-quat)) (wq (make-quat)))
         (skin-override! p J-HEAD hq)
         (skin-override! p J-FORE fq)
         (skin-override-absolute! p J-HAND wq)
         (vector p -1.0 0.0 1.0 0.0 0.0 #f 0.0 0.0 0.0 hq fq wq (make-mat4) (make-mat4) (make-vec3)
-                (make-bytevector 16 0) (make-bytevector 16 0) 0 (* 1.37 i) (make-vec3) (make-mat4) #f)))
+                (make-bytevector 16 0) (make-bytevector 16 0) 0 (* 1.37 i) (make-vec3) (make-mat4) #f
+                (let ((t (make-bytevector 16 0))) (f32! t 0 1.0) (f32! t 1 1.0) (f32! t 2 1.0) (f32! t 3 1.0) t) #f
+                #f 0.0 1.0 0.0 #f 0.0 0.0 0.0
+                0.0 0.0 0.0)))      ; 33 raise (0 hanging, 1 raised), 34 35 the beam's last yaw and pitch (body frame)
     (define *guards* #f)
     (define QA (make-quat)) (define QB (make-quat))
+    (define QI (make-quat))    ; the identity
+
+    ;; Play mode, each frame before guard-body-draw!: the core's flashlight
+    ;; (on?, and its beam in the world) and the unit's attention (attending?,
+    ;; and the point).
+    (define (skin-guard-frame! on? dx dy dz attend? ax ay az)
+      (when *guards*
+        (let ((g (vector-ref *guards* 0)))
+          (vector-set! g 25 on?) (vector-set! g 26 dx) (vector-set! g 27 dy) (vector-set! g 28 dz)
+          (vector-set! g 29 attend?) (vector-set! g 30 ax) (vector-set! g 31 ay) (vector-set! g 32 az))))
+
+    ;; The torch's tip in the world after the live guard's last pose.
+    (define *torch-world* (make-vec3))
+    (define *torch-dir* (make-vec3))
+    (define TORCH-DIR (apply vec3 (rig 'torch_dir)))
+    (define *torch-ready* #f)
+    (define *said-drawn* #f)
+    (define (skin-torch-dx) (vec3-x *torch-dir*))
+    (define (skin-torch-dy) (vec3-y *torch-dir*))
+    (define (skin-torch-dz) (vec3-z *torch-dir*))
+    ;; the torch's tip and direction in the world, from guard g's pose
+    (define (torch-world! g model)
+      (skin-pose-point! TV (vector-ref g 0) J-HAND TORCH-TIP)
+      (mat4-transform-point! *torch-world* model TV)
+      (skin-pose-direction! TW (vector-ref g 0) J-HAND TORCH-DIR)
+      (mat4-transform-direction! *torch-dir* model TW)
+      (set! *torch-ready* #t))
+
+    ;; For tests (no GL): pose the live guard in play as a frame would, with
+    ;; the core's torch on? along (dx dy dz), at clock t; then the torch's
+    ;; tip and direction are skin-torch-x.. and skin-torch-dx..
+    (define (skin-play-pose! t model phase on? dx dy dz)
+      (ensure-skin!)
+      (skin-guard-frame! on? dx dy dz #f 0.0 0.0 0.0)
+      (let ((g (vector-ref *guards* 0)))
+        (draw-one! g t model phase 0 1.0 1.0 1.0 #f)
+        (torch-world! g model)))
+    (define (skin-torch-ready?) *torch-ready*)
+    (define (skin-torch-x) (vec3-x *torch-world*))
+    (define (skin-torch-y) (vec3-y *torch-world*))
+    (define (skin-torch-z) (vec3-z *torch-world*))
+
+    ;; Another unit (the night cleaner): its own pose and easing, a tint on
+    ;; every colour but the visor, and its visor's colour.
+    (define (make-skin-body) (ensure-skin!) (make-guard 0))
+    (define (skin-body-palette! inst tr tg tb vr vg vb)
+      (let ((t (vector-ref inst 23)) (v (make-bytevector 16 0)))
+        (f32! t 0 tr) (f32! t 1 tg) (f32! t 2 tb) (f32! t 3 1.0)
+        (f32! v 0 vr) (f32! v 1 vg) (f32! v 2 vb) (f32! v 3 1.0)
+        (vector-set! inst 24 v)))
+    ;; (inside the world pass; skin-body-palette! allocates: call it once)
+    (define (skin-body-draw! inst model phase state r g b)
+      (when (skin-ready?) (draw-one! inst (now) model phase state r g b #t)))
     (define TV (make-vec3)) (define TW (make-vec3))
     (define TM (make-mat4)) (define TS (make-mat4))
 
@@ -337,7 +413,7 @@ void main() {
                               (s (if (< (string-length s) 4) (string-append (make-string (- 4 (string-length s)) #\0) s) s)))
                          (string-append (substring s 0 (- (string-length s) 3)) "." (substring s (- (string-length s) 3) (string-length s)))))
     (define (skin-hud-line)
-      (and (> *count* 0)
+      (and *demo*
            (string-append "SKIN " (number->string *drawn*) " GUARDS  POSE " (fixed2 *pose-ms*) " MS  "
                           (fixed3 (if (> *drawn* 0) (/ *pose-ms* *drawn*) 0.0)) " PER GUARD  ALLOC " (number->string *alloc*)
                           (if *bench-ms*
@@ -366,7 +442,7 @@ void main() {
       (ensure-skin!)
       (let* ((n (max 1 (exact (round n0))))
              (g (vector-ref *guards* (- MAX-GUARDS 1))) (p (vector-ref g 0)))
-        (aim-torch! g 1.0)
+        (aim-torch-demo! g 1.0)
         (quat-from-axis-angle! (vector-ref g 10) Z-AXIS 0.4)
         (let* ((a (allocations)) (b (allocations)) (cost (- b a))
                (fused (time-batch! skin-pose-fused! p n cost))
@@ -384,15 +460,20 @@ void main() {
     ;; inside the world pass: the live guard, then the demo guards.
     (define (skin-guard-draw! model phase state r g b)
       (when (skin-ready?)
-        (let ((t (now)))
+        (let ((t (now)) (g0 (vector-ref *guards* 0)))
           (unless *opened-at* (set! *opened-at* t))
-          (when (and (not *bench-ms*) (> (- t *opened-at*) BENCH-AFTER)) (skin-bench! BENCH))
-          (trail-push! (- t *opened-at*) model phase state r g b)
+          (when (and *demo* (not *bench-ms*) (> (- t *opened-at*) BENCH-AFTER)) (skin-bench! BENCH))
+          (when *demo* (trail-push! (- t *opened-at*) model phase state r g b))
           (set! *drawn-frame* 0)
-          (draw-one! (vector-ref *guards* 0) t model phase state r g b)
-          (draw-demo! t (- t *opened-at*) 1)
+          (draw-one! g0 t model phase state r g b #t)
+          ;; the torch's tip in the world, for play mode's lamp
+          (torch-world! g0 model)
+          (unless *said-drawn*
+            (set! *said-drawn* #t)
+            (display (if *demo* "phantom: skinned guard drawn (demo)" "phantom: skinned guard drawn")) (newline))
+          (when *demo* (draw-demo! t (- t *opened-at*) 1))
           (set! *drawn* *drawn-frame*)
-          (when (> (- t *said-at*) 2.0)
+          (when (and *demo* (> (- t *said-at*) 2.0))
             (set! *said-at* t)
             (display (string-append "phantom: skin guards " (number->string *drawn*) " pose-ms " (fixed3 *pose-ms*)
                                     " per-guard " (fixed3 (if (> *drawn* 0) (/ *pose-ms* *drawn*) 0.0))
@@ -423,11 +504,12 @@ void main() {
           (when o
             (trail-model! (vector-ref g 13) o)
             (draw-one! g t (vector-ref g 13) (f32 *trail* (+ o 6)) (exact (round (f32 *trail* (+ o 7))))
-                       (f32 *trail* (+ o 8)) (f32 *trail* (+ o 9)) (f32 *trail* (+ o 10)))))
+                       (f32 *trail* (+ o 8)) (f32 *trail* (+ o 9)) (f32 *trail* (+ o 10)) #t)))
         (draw-demo! t rel (+ i 1))))
 
 
-    (define (draw-one! g t model phase state r g0 b)
+    ;; Pose unit g for this frame and, with draw?, draw it (the body and the torch).
+    (define (draw-one! g t model phase state r g0 b draw?)
       (let* ((dt (if (vector-ref g 6) (clamp (- t (vector-ref g 6)) 0.0 0.1) 0.0)))
         (vector-set! g 6 t)
         (unless (= phase (vector-ref g 1))
@@ -453,14 +535,14 @@ void main() {
                (clip-t (* (clip-duration WALK)
                           (if *freeze* *freeze* (let ((c (/ phase CYCLE))) (- c (floor c))))))
                (rest (if *freeze* 0.0 (smooth (vector-ref g 3))))
-               (sample? (and (eq? g (vector-ref *guards* 0)) (= *pose-frames* 0)))
+               (sample? (and *demo* (eq? g (vector-ref *guards* 0)) (= *pose-frames* 0)))
                (_ (when (and sample? (not *stats-cost*))
                     (let* ((a (allocations)) (b (allocations))) (set! *stats-cost* (- b a)))))
                (a0 (if sample? (allocations) 0))
                (j0 (current-jiffy)))
           ;; the head: toward the look point when it is in reach, else the scan
           (aim-head! g model dt)
-          (aim-torch! g t)
+          (aim-torch! g t model dt)
           (skin-pose-fused! p WALK clip-t rest)
           (let ((ms (/ (* 1000.0 (- (current-jiffy) j0)) (jiffies-per-second))))
             (when sample? (set! *alloc* (- (allocations) a0 *stats-cost*)))
@@ -470,13 +552,42 @@ void main() {
               (when (>= *pose-frames* 60)
                 (set! *pose-ms* (/ *pose-acc* *pose-frames*))
                 (set! *pose-acc* 0.0) (set! *pose-frames* 0))))
-          (draw-body! g p model state r g0 b)
-          (draw-torch! g p model)
-          (set! *drawn-frame* (+ *drawn-frame* 1)))))
+          (when draw?
+            (draw-body! g p model state r g0 b)
+            (draw-torch! g p model)
+            (set! *drawn-frame* (+ *drawn-frame* 1))))))
 
     ;; The look point in the body's frame, relative to the head joint: yaw and
     ;; pitch to turn toward it, or #f when it is out of reach or behind.
     (define (aim-head! g model dt)
+      (if *demo* (aim-head-demo! g model dt) (aim-head-play! g model dt)))
+
+    ;; In play: toward the unit's attention while it attends, else the scan
+    ;; when it stands, else ahead.
+    (define (aim-head-play! g model dt)
+      (let* ((att? (vector-ref g 29))
+             (dx (- (vector-ref g 30) (f32 model 12))) (dy (- (vector-ref g 31) (f32 model 13)))
+             (fx (f32 model 4)) (fy (f32 model 5))
+             (bx (- (* dx fy) (* dy fx))) (by (+ (* dx fx) (* dy fy)))
+             (bz (- (+ (vector-ref g 32) 1.3) (f32 model 14)))   ; its chest, about
+             (d (sqrt (+ (* bx bx) (* by by))))
+             (look? (and att? (> d 0.3)))
+             (scan (vector-ref g 5))
+             (want-yaw (cond (look? (clamp (atan (- bx) by) (- LOOK-YAW) LOOK-YAW))
+                             ((> scan 0.0)
+                              (* SCAN-YAW (smooth scan)
+                                 (clamp (* 1.6 (sin (/ (* 6.283185307179586 (max 0.0 (- (vector-ref g 4) SCAN-AFTER))) SCAN-PERIOD))) -1.0 1.0)))
+                             (else 0.0)))
+             (want-pitch (if look? (clamp (atan (- bz 1.6) d) (- LOOK-PITCH) LOOK-PITCH) 0.0))
+             (step (* LOOK-RATE (max dt 0.0))))
+        (vector-set! g 7 (+ (vector-ref g 7) (clamp (- want-yaw (vector-ref g 7)) (- step) step)))
+        (vector-set! g 8 (+ (vector-ref g 8) (clamp (- want-pitch (vector-ref g 8)) (- step) step)))
+        (vector-set! g 22 #f)
+        (quat-from-axis-angle! QA Z-AXIS (vector-ref g 7))
+        (quat-from-axis-angle! QB X-AXIS (vector-ref g 8))
+        (quat-mul! (vector-ref g 10) QA QB)))
+
+    (define (aim-head-demo! g model dt)
       (let* ((p (vector-ref g 0))
              (target (or *look-at* (render-eye-position)))
              (dx (- (vec3-x target) (f32 model 12))) (dy (- (vec3-y target) (f32 model 13)))
@@ -527,20 +638,48 @@ void main() {
     ;; The torch: the forearm lifted by RAISE; the hand's aim set outright,
     ;; the bind pose's (level, forward) tipped down by TILT and swept slowly
     ;; about the body's z, walking or standing.
-    (define (aim-torch! g t)
+    (define (aim-torch! g t model dt)
+      (if *demo* (aim-torch-demo! g t) (aim-torch-play! g model dt)))
+
+    ;; In play: with the core's flashlight on, the forearm rises (over
+    ;; RAISE-TIME) and the hand turns to the beam's aim (in the body's frame);
+    ;; off, both ease back: the arm hangs as walked, the torch held level and
+    ;; forward in the hand. No snap when the torch toggles.
+    (define (aim-torch-play! g model dt)
+      (let ((p (vector-ref g 0)) (hq (vector-ref g 12)) (on? (vector-ref g 25)))
+        (when on?
+          (let* ((dx (vector-ref g 26)) (dy (vector-ref g 27)) (dz (vector-ref g 28))
+                 (fx (f32 model 4)) (fy (f32 model 5))
+                 (bx (- (* dx fy) (* dy fx))) (by (+ (* dx fx) (* dy fy))))
+            (vector-set! g 34 (atan (- bx) by))
+            (vector-set! g 35 (atan dz (sqrt (+ (* bx bx) (* by by)))))))
+        (vector-set! g 33 (clamp (+ (vector-ref g 33) (* (if on? 1.0 -1.0) (/ (max dt 0.0) RAISE-TIME))) 0.0 1.0))
+        (let ((s (smooth (vector-ref g 33))))
+          (quat-from-axis-angle! (vector-ref g 11) X-AXIS (* RAISE s))
+          (quat-from-axis-angle! QA Z-AXIS (* s (vector-ref g 34)))
+          (quat-from-axis-angle! QB X-AXIS (* s (vector-ref g 35)))
+          (quat-mul! hq QA QB)
+          (quat-mul! hq hq HAND-BIND)
+          (skin-override-absolute! p J-HAND hq))))
+
+    (define (aim-torch-demo! g t)
       (let* ((sweep (* SWEEP (sin (+ (vector-ref g 19) (/ (* 6.283185307179586 t) SWEEP-PERIOD)))))
              (hq (vector-ref g 12)))
         (quat-from-axis-angle! (vector-ref g 11) X-AXIS RAISE)
         (quat-from-axis-angle! QA Z-AXIS sweep)
         (quat-from-axis-angle! QB X-AXIS (- TILT))
         (quat-mul! hq QA QB)
-        (quat-mul! hq hq HAND-BIND)))
+        (quat-mul! hq hq HAND-BIND)
+        (skin-override-absolute! (vector-ref g 0) J-HAND hq)))
 
     (define (draw-body! g p model state r g0 b)
       (let ((light (vector-ref g 16)) (visor (vector-ref g 17)))
         (f32! light 0 r) (f32! light 1 g0) (f32! light 2 b) (f32! light 3 1.0)
-        (visor-color! visor state)
+        (if (vector-ref g 24)
+            (let ((v (vector-ref g 24))) (f32! visor 0 (f32 v 0)) (f32! visor 1 (f32 v 1)) (f32! visor 2 (f32 v 2)) (f32! visor 3 1.0))
+            (visor-color! visor state))
         (render-share-uniforms! *pipe* #t)
+        (set-pipeline-uniform! *pipe* 'tint (vector-ref g 23))
         (set-pipeline-uniform! *pipe* 'model model)
         (set-pipeline-uniform! *pipe* 'light light)
         (set-pipeline-uniform! *pipe* 'visor visor)
@@ -559,6 +698,10 @@ void main() {
 
     ;; the cone's frame: model * the hand's skin matrix * a move to the torch's tip
     (define (draw-torch! g p model)
+      (when (or *demo* (vector-ref g 25))
+        (draw-cone! g p model)))
+
+    (define (draw-cone! g p model)
       (let ((m (vector-ref g 14)))
         (mat4-translation! TM TORCH-TIP)
         (skin-pose-skin! TS p J-HAND)

@@ -101,14 +101,16 @@
 
     ;; the floor's meshes and textures, and the guard's body (assets/guard, for
     ;; every floor: P1's play draws it)
+    ;; The body is G1's skinned robot (the baked guard's guard.sgm is no
+    ;; longer fetched).
     (define GUARD-SGM "guard/guard.sgm")
-    (define (asset-names) (append (if (> (skin-n) 0) (list SKIN-SGM) '()) (cons GUARD-SGM (floor-asset-names))))
-    ;; ?skin=N: G1's skin door, N guards (0 or absent: closed)
+    (define (asset-names) (cons SKIN-SGM (floor-asset-names)))
+    ;; ?skin=N: the skin door's demo, N guards (absent or 0: play's one guard)
     (define (skin-n) (let ((v (and (param "skin") (string->number (param "skin"))))) (if (and v (> v 0)) (exact v) 0)))
     (define (skin-setup!)
+      (when (> (skin-n) 0) (skin-door! (skin-n)))
+      (skin-load! (lambda (layout) (load-mesh* layout SKIN-SGM)))
       (when (> (skin-n) 0)
-        (skin-door! (skin-n))
-        (skin-load! (lambda (layout) (load-mesh* layout SKIN-SGM)))
         (let ((f (and (param "skinfreeze") (string->number (param "skinfreeze"))))) (when f (skin-freeze! (* 1.0 f))))
         (let ((l (param "skinlook")))
           (when l (let ((ns (map (lambda (v) (* 1.0 (or v 0))) (map string->number (string-split l ",")))))
@@ -210,7 +212,6 @@
       ;; one attempt: a failure is reported once, not retried per frame
       (set! *started* 'failed)
       (game-init! load-mesh* load-texture* (pbc1->collision (base64->bytevector *collide*)) *info*)
-      (render-load-guard! (lambda (layout) (load-mesh* layout GUARD-SGM)))
       (skin-setup!)
       (set! *collide* #f)
       (apply-params!)
