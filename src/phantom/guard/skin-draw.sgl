@@ -8,17 +8,23 @@
 ;;; from the walk clip in (phantom guard skin-data). On top of the walk:
 ;;;   - the head turns toward a point: the camera, when it is within LOOK-M
 ;;;     and in front of him (clamped to +-LOOK-YAW and +-LOOK-PITCH, turning
-;;;     at LOOK-RATE); standing, with nothing to look at, he scans as the
-;;;     baked guard does;
+;;;     at LOOK-RATE); standing, he looks around (the scan); otherwise a
+;;;     marker (a small cyan diamond) that swings in a wide arc in front of
+;;;     his head, and the head follows it, so the head visibly moves on its
+;;;     own, beyond the walk;
 ;;;   - the torch arm is raised, and the torch is held level (an absolute
 ;;;     override on the hand: its position follows the arm's swing, its
-;;;     aim does not), tipped down by TILT and swept +-SWEEP while he stands;
+;;;     aim does not), tipped down by TILT and swept slowly +-SWEEP, walking
+;;;     or standing;
 ;;;   - the torch's cone is drawn from the hand bone: its apex at the torch's
 ;;;     tip and its axis along the torch, both carried by the hand's skin
 ;;;     matrix, so the beam follows the arm's swing, the raise and the sweep.
 ;;; Guards 1..N-1 are demo guards for the cost measurement: each replays the
 ;;; first guard's recorded trail DELAY s later than the one before, so they
 ;;; walk where it walked, stop where it stopped, and pose independently.
+;;; Guard 1 also stops by itself: every STOP-PERIOD s it holds still for
+;;; STOP-FOR s (and looks around), then walks faster until it is back on
+;;; its place in the line.
 ;;;
 ;;; What it measures (the HUD's SKIN line, and a console line every 2 s):
 ;;; the CPU time of posing (all guards, and per guard), averaged over the
@@ -57,17 +63,21 @@
   (begin
 
     (define SKIN-SGM "guard/guard-skin.sgm")
-    (define LOOK-M 9.0)        ; m: the head follows the camera inside this
+    (define LOOK-M 3.5)        ; m: the head follows the camera inside this
     (define LOOK-YAW 1.2)      ; rad (69 deg) either side
     (define LOOK-PITCH 0.5)    ; rad (29 deg) up or down
     (define LOOK-RATE 3.0)     ; rad/s the head turns
     (define RAISE 1.35)        ; rad the forearm lifts to hold the torch level
     (define SWEEP 0.6)         ; rad (34 deg) either side, standing
     (define TILT 0.14)         ; rad (8 deg) the beam points down
-    (define SWEEP-PERIOD 3.2)  ; s, left and right
+    (define SWEEP-PERIOD 4.5)  ; s, left and right
+    (define MARK-YAW 1.1) (define MARK-PERIOD 6.5)       ; the marker's arc: rad either side, s
+    (define MARK-PITCH 0.3) (define MARK-PITCH-PERIOD 4.1)
+    (define MARK-DIST 2.0) (define MARK-SIZE 0.13)        ; m from the head; the diamond's half size
+    (define STOP-PERIOD 16.0) (define STOP-FOR 5.0)       ; guard 1's own stops
     (define CYCLE 1.5)         ; m walked per walk cycle (the baked guard's)
     (define EASE 0.3) (define SCAN-AFTER 0.6) (define SCAN-IN 0.5) (define SCAN-OUT 0.2)
-    (define SCAN-PERIOD 6.0) (define SCAN-YAW 0.66) (define STILL 0.12)
+    (define SCAN-PERIOD 3.0) (define SCAN-YAW 0.66) (define STILL 0.12)
     (define DELAY 2.5)         ; s between demo guards on the trail
     (define MAX-GUARDS 16)
     (define BENCH 1000) (define BENCH-AFTER 3.0)
@@ -109,7 +119,7 @@
         ;; the hand's orientation in the bind pose (the torch level, forward)
         (set! HAND-BIND (quat-from-mat4 (mat4-inverse (skeleton-inverse-bind SKEL J-HAND))))
         (set! *guards* (let ((v (make-vector MAX-GUARDS #f)))
-                         (let f ((i 0)) (when (< i MAX-GUARDS) (vector-set! v i (make-guard)) (f (+ i 1))))
+                         (let f ((i 0)) (when (< i MAX-GUARDS) (vector-set! v i (make-guard i)) (f (+ i 1))))
                          v))
         (set! *trail* (make-bytevector (* 4 TF TRAIL) 0))))
     (define (rig key) (cadr (assq key SKIN-RIG)))
@@ -207,6 +217,25 @@ void main() {
     (define *mesh* #f)
     (define *pipe* #f)
     (define *cone* #f)
+    (define *marker* #f)
+    (define CONE-TINT (let ((b (make-bytevector 16 0))) (for-each (lambda (i x) (f32! b i x)) '(0 1 2 3) '(1.0 0.78 0.35 0.3)) b))
+    (define MARK-TINT (let ((b (make-bytevector 16 0))) (for-each (lambda (i x) (f32! b i x)) '(0 1 2 3) '(0.3 0.95 0.85 0.95)) b))
+    ;; a diamond (octahedron) MARK-SIZE across, in the cone's layout, w 0 (full tint)
+    (define (make-marker-mesh)
+      (let* ((r MARK-SIZE)
+             (pts (list (list r 0 0) (list 0 r 0) (list (- r) 0 0) (list 0 (- r) 0)))
+             (top (list 0 0 r)) (bot (list 0 0 (- r)))
+             (tris (let loop ((k 0) (acc '()))
+                     (if (= k 4) acc
+                         (let ((a (list-ref pts k)) (b (list-ref pts (modulo (+ k 1) 4))))
+                           (loop (+ k 1) (append (list a b top b a bot) acc))))))
+             (bv (make-bytevector (* 16 (length tris)) 0)))
+        (let loop ((i 0) (ts tris))
+          (unless (null? ts)
+            (f32! bv (* 4 i) (inexact (car (car ts)))) (f32! bv (+ (* 4 i) 1) (inexact (cadr (car ts))))
+            (f32! bv (+ (* 4 i) 2) (inexact (caddr (car ts)))) (f32! bv (+ (* 4 i) 3) 0.0)
+            (loop (+ i 1) (cdr ts))))
+        (make-mesh (make-vertex-layout '((cone float4))) bv)))
     (define *cone-pipe* #f)
 
     ;; (load layout) -> the mesh: the shell's loader for assets/guard/guard-skin.sgm
@@ -220,7 +249,7 @@ void main() {
                                          (string-append (glsl-header) CONE-FRAGMENT)
                                          '(blend normal depth-write #f cull none)))
         (set! *cone* (make-cone-mesh))
-        (set-pipeline-uniform! *cone-pipe* 'tint '(1.0 0.78 0.35 0.3)))
+        (set! *marker* (make-marker-mesh)))
       (when *mesh* (mesh-free! *mesh*))
       (set! *mesh* (load (make-vertex-layout SKIN-LAYOUT))))
     (define (skin-ready?) (and *mesh* *pipe* #t))
@@ -228,15 +257,18 @@ void main() {
     ;; --- per guard -------------------------------------------------------------------
 
     ;; #(pose last-phase changed-at rest stood scan drawn-at yaw pitch sweep-t
-    ;;   head-q fore-q hand-q model cone-m tip light visor cursor), cursor the
-    ;; trail sample (a count from the first) a demo guard stands on
-    (define (make-guard)
+    ;;   head-q fore-q hand-q model cone-m tip light visor cursor offset marker
+    ;;   marker-m marker?), cursor the trail sample (a count from the first) a
+    ;; demo guard stands on, offset its phase in the marker's and the sweep's
+    ;; cycles, marker the marker's world point, marker? whether the head
+    ;; follows it this frame
+    (define (make-guard i)
       (let ((p (make-skin-pose SKEL)) (hq (make-quat)) (fq (make-quat)) (wq (make-quat)))
         (skin-override! p J-HEAD hq)
         (skin-override! p J-FORE fq)
         (skin-override-absolute! p J-HAND wq)
         (vector p -1.0 0.0 1.0 0.0 0.0 #f 0.0 0.0 0.0 hq fq wq (make-mat4) (make-mat4) (make-vec3)
-                (make-bytevector 16 0) (make-bytevector 16 0) 0)))
+                (make-bytevector 16 0) (make-bytevector 16 0) 0 (* 1.37 i) (make-vec3) (make-mat4) #f)))
     (define *guards* #f)
     (define QA (make-quat)) (define QB (make-quat))
     (define TV (make-vec3)) (define TW (make-vec3))
@@ -376,11 +408,18 @@ void main() {
         (if (>= i (min *count* *drawn*)) ""
             (string-append " " (fixed2 (f32 m 12)) "," (fixed2 (f32 m 13)) (where model (+ i 1))))))
 
+    ;; How far guard 1 is held back at door time rel: rising 0 -> STOP-FOR
+    ;; over STOP-FOR s (its trail time stands still: he stops), then falling
+    ;; back to 0 over the rest of the period (he walks faster, catching up).
+    (define (stall rel)
+      (let ((u (- rel (* STOP-PERIOD (floor (/ rel STOP-PERIOD))))))
+        (if (< u STOP-FOR) u (* STOP-FOR (/ (- STOP-PERIOD u) (- STOP-PERIOD STOP-FOR))))))
+
     ;; t the clock (for easing), rel the door's time (for the trail)
     (define (draw-demo! t rel i)
       (when (< i *count*)
         (let* ((g (vector-ref *guards* i))
-               (o (trail-seek! g (- rel (* i DELAY)))))
+               (o (trail-seek! g (- rel (* i DELAY) (if (= i 1) (stall rel) 0.0)))))
           (when o
             (trail-model! (vector-ref g 13) o)
             (draw-one! g t (vector-ref g 13) (f32 *trail* (+ o 6)) (exact (round (f32 *trail* (+ o 7))))
@@ -450,26 +489,46 @@ void main() {
              (yaw0 (atan (- bx) by))
              (reach? (and (< d LOOK-M) (> d 0.3) (< (abs yaw0) (+ LOOK-YAW 0.6))))
              (scan (vector-ref g 5))
+             (rel (- (now) (or *opened-at* 0.0)))
+             (off (vector-ref g 19))
+             (mark? (and (not reach?) (not (> scan 0.0))))
+             (mark-yaw (* MARK-YAW (sin (+ off (/ (* 6.283185307179586 rel) MARK-PERIOD)))))
+             (mark-pitch (* MARK-PITCH (sin (+ off (/ (* 6.283185307179586 rel) MARK-PITCH-PERIOD)))))
              (want-yaw (cond (reach? (clamp yaw0 (- LOOK-YAW) LOOK-YAW))
                              ((> scan 0.0)
                               (* SCAN-YAW (smooth scan)
                                  (clamp (* 1.6 (sin (/ (* 6.283185307179586 (max 0.0 (- (vector-ref g 4) SCAN-AFTER))) SCAN-PERIOD))) -1.0 1.0)))
-                             (else 0.0)))
-             (want-pitch (if reach? (clamp (atan (- bz hz) d) (- LOOK-PITCH) LOOK-PITCH) 0.0))
+                             (else mark-yaw)))
+             (want-pitch (cond (reach? (clamp (atan (- bz hz) d) (- LOOK-PITCH) LOOK-PITCH))
+                               (mark? mark-pitch)
+                               (else 0.0)))
              (step (* LOOK-RATE (max dt 0.0))))
         (vector-set! g 7 (+ (vector-ref g 7) (clamp (- want-yaw (vector-ref g 7)) (- step) step)))
         (vector-set! g 8 (+ (vector-ref g 8) (clamp (- want-pitch (vector-ref g 8)) (- step) step)))
+        (vector-set! g 22 mark?)
+        (when mark? (marker-at! g model mark-yaw mark-pitch hz))
         ;; head-q = yaw about the body's z, after pitch about its x
         (quat-from-axis-angle! QA Z-AXIS (vector-ref g 7))
         (quat-from-axis-angle! QB X-AXIS (vector-ref g 8))
         (quat-mul! (vector-ref g 10) QA QB)))
 
+    ;; The marker's world point: MARK-DIST from the head (at height hz) along
+    ;; yaw (about the body's z, positive to his left) and pitch
+    (define (marker-at! g model yaw pitch hz)
+      (let* ((cp (cos pitch))
+             (bx (* MARK-DIST (- (sin yaw)) cp)) (by (* MARK-DIST (cos yaw) cp)) (bz (+ hz (* MARK-DIST (sin pitch))))
+             (fx (f32 model 4)) (fy (f32 model 5)))
+        ;; right is (fy, -fx), forward (fx, fy)
+        (vec3-set! (vector-ref g 20)
+                   (+ (f32 model 12) (* bx fy) (* by fx))
+                   (+ (f32 model 13) (- (* bx fx)) (* by fy))
+                   (+ (f32 model 14) bz))))
+
     ;; The torch: the forearm lifted by RAISE; the hand's aim set outright,
-    ;; the bind pose's (level, forward) tipped down by TILT and swept about
-    ;; the body's z while he stands.
+    ;; the bind pose's (level, forward) tipped down by TILT and swept slowly
+    ;; about the body's z, walking or standing.
     (define (aim-torch! g t)
-      (let* ((standing (smooth (vector-ref g 3)))
-             (sweep (* SWEEP standing (sin (/ (* 6.283185307179586 t) SWEEP-PERIOD))))
+      (let* ((sweep (* SWEEP (sin (+ (vector-ref g 19) (/ (* 6.283185307179586 t) SWEEP-PERIOD)))))
              (hq (vector-ref g 12)))
         (quat-from-axis-angle! (vector-ref g 11) X-AXIS RAISE)
         (quat-from-axis-angle! QA Z-AXIS sweep)
@@ -506,5 +565,13 @@ void main() {
         (mat4-mul! m TS TM)
         (mat4-mul! m model m)
         (render-share-uniforms! *cone-pipe* #f)
+        (set-pipeline-uniform! *cone-pipe* 'tint CONE-TINT)
         (set-pipeline-uniform! *cone-pipe* 'model m)
-        (draw-mesh *cone-pipe* *cone*)))))
+        (draw-mesh *cone-pipe* *cone*)
+        ;; the marker the head is following, if it is
+        (when (vector-ref g 22)
+          (let ((mm (vector-ref g 21)))
+            (mat4-translation! mm (vector-ref g 20))
+            (set-pipeline-uniform! *cone-pipe* 'tint MARK-TINT)
+            (set-pipeline-uniform! *cone-pipe* 'model mm)
+            (draw-mesh *cone-pipe* *marker*)))))))
