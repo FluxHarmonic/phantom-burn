@@ -262,7 +262,8 @@
     (define (play-press! k)
       (cond ((not *core*) #f)
             (*paused* (pause-key! k))
-            ((memq k '(escape p pause)) (play-mode-pause!) #t)
+            ;; P too, except with ?dev (the lab's P switches the dither)
+            ((or (memq k '(escape pause)) (and (eq? k 'p) (not *dev*))) (play-mode-pause!) #t)
             ((and (memq k '(return enter)) (transmission-showing?)) (set! *tx-dismissed* #t) #t)
             ;; at the terminal: W/S or up/down select, F (USE) runs, C closes
             ((and (eq? *phase* 'play) (play-terminal-open? *core*))
