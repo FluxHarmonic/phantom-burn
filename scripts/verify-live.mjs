@@ -88,22 +88,24 @@ async function check(f, wantSha) {
   const r = await fetch(BASE + url, { redirect: "follow" });
   const body = Buffer.from(await r.arrayBuffer());
   const type = r.headers.get("content-type") || "";
-  const why = [];
+  const why = [], sticky = [];
   if (r.status !== 200) why.push(`status ${r.status}`);
   if (sha(body) !== wantSha) why.push("bytes differ");
   if (!f.endsWith(".html") && type.startsWith("text/html")) why.push(`served as ${type}`);
   // the wasm's Function says noindex on purpose (a binary is no page); the site's files must not
-  if (!PAGES_DEV && !f.startsWith("w/") && /noindex/.test(r.headers.get("x-robots-tag") || "")) why.push(`X-Robots-Tag: ${r.headers.get("x-robots-tag")}`);
-  return why;
+  // (not retried: waiting does not change a header the tree's _headers sets;
+  // 158 files x 90 s of retries would take hours to say so)
+  if (!PAGES_DEV && !f.startsWith("w/") && /noindex/.test(r.headers.get("x-robots-tag") || "")) sticky.push(`X-Robots-Tag: ${r.headers.get("x-robots-tag")}`);
+  return { why, sticky };
 }
 let bad = 0;
 for (const { h, f } of entries) {
-  let why = await check(f, h);
-  for (let t = 0; why.length && t < 9; t++) {
+  let { why, sticky } = await check(f, h);
+  for (let t = 0; why.length && !sticky.length && t < 9; t++) {
     console.log(`  retry files: ${f}: ${why.join(", ")}; again in 10 s (${t + 1} of 9)`);
-    await sleep(10000); why = await check(f, h);
+    await sleep(10000); ({ why, sticky } = await check(f, h));
   }
-  if (why.length) { bad++; fail("files", `${f}: ${why.join(", ")}`); }
+  if (why.length || sticky.length) { bad++; fail("files", `${f}: ${[...why, ...sticky].join(", ")}`); }
 }
 if (!bad) pass("files", `${entries.length} files byte for byte (the wasm through the Function); ${PAGES_DEV ? "noindex not asserted: Cloudflare adds it on pages.dev" : "none noindex"}`);
 
