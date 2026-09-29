@@ -219,12 +219,25 @@
         (let ((r (run p w ALL-ON (* 60 10) (lambda (i) NO-INPUT))))
           (display (list 'under-stair-hunt (cdr r) 'ticks (play-ticks p) 'guard (guard-x g) (guard-y g))) (newline)
           (assert-true (memq 'caught (cdr r)))))))
-  (test "in the dark, under the treads, a guard 4 m away does not see you"
+  ;; Phantom 0.1 (item 4): in the dark the unit's flashlight is on. Its eyes
+  ;; still see nothing of you in the dark: held facing 35 degrees off you,
+  ;; inside its 100-degree view but out of its lamp's 20-degree cone, it
+  ;; stays unaware. Its lamp on you is another matter: the stair is open at
+  ;; the side, so the beam lights you there (light-01 about 0.59) and the unit
+  ;; starts to notice you (slowly: you are crouched and still).
+  (test "in the dark, under the treads, a guard 4 m away does not see you (you in its view, out of its lamp)"
+    (let* ((w (under-stair-walker)) (p (fresh-play)) (g (play-guard p)))
+      (guard-reset! g (play-guard-world p) 0)
+      (let ((r (held-awareness p w DARK (* 60 3) 7.0 4.5 0.819 0.574)))
+        (display (list 'under-stair-dark r)) (newline)
+        (assert-true (= (car r) 0.0)))))
+  (test "in the dark, its flashlight on you under the treads lights you and the unit starts to notice: the stair is open at the side"
     (let* ((w (under-stair-walker)) (p (fresh-play)) (g (play-guard p)))
       (guard-reset! g (play-guard-world p) 0)
       (let ((r (held-awareness p w DARK (* 60 3) 7.0 4.5 1.0 0.0)))
-        (display (list 'under-stair-dark r)) (newline)
-        (assert-true (= (car r) 0.0))))))
+        (display (list 'under-stair-dark-lamp r 'lit (play-light-01 p))) (newline)
+        (assert-true (> (play-light-01 p) 0.4))
+        (assert-true (> (car r) 0.0))))))
 
 (test-group "capture"
   (test "a hunting guard 0.7 m away through a wall does not catch you"
