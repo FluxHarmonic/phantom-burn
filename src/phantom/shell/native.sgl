@@ -8,6 +8,8 @@
 ;;;                [--hide PART] [--deck-preview] [--terminal-preview]
 ;;;                [--look X,Y,Z,TX,TY,TZ] [--deck-held] [--press KEY@SECONDS,...] [--look-sim]
 ;;;                [--guard X,Y[,Z[,R]]] [--guard-speed V] [--guard-state S] [--guard-light L]
+;;;                [--skin N] [--skin-freeze F] [--skin-look X,Y,Z]
+;;;   phantom-burn --skin-bench N                      G1: time N poses of the skinned guard, no window
 ;;;   phantom-burn --title [--title-at T] [--freeze]   the title screen
 ;;;   phantom-burn --play [...]                        P1: the guard, the badge, the exit
 ;;;                [--mute]                            S1's sound off
@@ -40,6 +42,12 @@
 ;;; visor S (0 calm to 3 hunting; default -1 steps through them), lit by grey
 ;;; L (default 0.7). No AI: P1's play draws the real guard.
 ;;;
+;;; --skin N opens G1's skin door ((phantom guard skin-draw)): the guard is
+;;; the skinned one (assets/guard/guard-skin.sgm), and N-1 demo guards follow
+;;; his trail; the HUD's SKIN line has the posing cost. --skin-freeze F holds
+;;; the walk at fraction F of its cycle, --skin-look X,Y,Z turns the heads
+;;; toward a point instead of the camera (both for shots).
+;;;
 ;;; Click to capture the mouse for looking (sigil-desktop 0.12's cursor
 ;;; capture); Escape gives it back, and quits when it is not captured.
 
@@ -56,6 +64,7 @@
           (phantom render)
           (phantom game)
           (phantom guard body)
+          (phantom guard skin-draw)
           (phantom deck preview)
           (phantom title)
           (phantom play mode)
@@ -236,6 +245,18 @@
       (when (file-exists? GUARD-SGM)
         (render-load-guard! (lambda (layout) (load-mesh layout GUARD-SGM)))))
 
+    ;; G1's skin door (--skin N)
+    (define SKIN-FILE (string-append "assets/" SKIN-SGM))
+    (define (skin-setup! args)
+      (let ((n (string->number (arg-value args "--skin" "none"))))
+        (when (and n (> n 0) (file-exists? SKIN-FILE))
+          (skin-door! n)
+          (skin-load! (lambda (layout) (load-mesh layout SKIN-FILE)))
+          (let ((f (string->number (arg-value args "--skin-freeze" "none")))) (when f (skin-freeze! (* 1.0 f))))
+          (let ((l (arg-value args "--skin-look" #f)))
+            (when l (let ((ns (map (lambda (v) (* 1.0 (or v 0))) (numbers l))))
+                      (when (= (length ns) 3) (apply skin-look-at! ns))))))))
+
     (define (numbers s)     ; "1,2.5,3" -> (1 2.5 3); #f for a word that is not one
       (let loop ((i 0) (start 0) (acc '()))
         (if (or (= i (string-length s)) (char=? (string-ref s i) #\,))
@@ -277,6 +298,7 @@
         (when (member "--look-sim" args) (render-force-sim! #t))
         (game-init! load-mesh* load-texture* (load-collision) (load-info))
         (load-guard!)
+        (skin-setup! args)
         (apply-settings! args)
         (start-play! args (load-info))
         (when (sound-wanted? args frames seconds)
@@ -359,6 +381,8 @@
              (seconds (string->number (arg-value args "--seconds" "none")))
              (size (size-of (arg-value args "--size" "1440x810"))))
         (set! *dir* (arg-value args "--floor" (if (member "--title" args) "assets/floors/root-room" *dir*)))
+        (let ((b (string->number (arg-value args "--skin-bench" "none"))))
+          (when b (skin-bench! (exact b)) (exit 0)))
         (run-game "Phantom Burn" (car size) (cdr size)
                   (if (member "--title" args)
                       (title-loop args frames seconds)

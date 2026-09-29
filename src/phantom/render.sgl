@@ -46,6 +46,7 @@
           render-set-extra-draw! render-draw-object! render-hide-part! render-part-hidden?
           render-set-cone! render-cone-ids render-sim? render-force-sim! render-set-torch!
           render-load-guard! render-guard-ready? render-guard-parts render-draw-guard!
+          render-world-fragment render-share-uniforms! render-eye-position
           make-camera camera-set!)
 
   (begin
@@ -1059,6 +1060,28 @@ void main() {
           (set-pipeline-uniform! *g-pipe* 'lift *g-lift*)
           (set-pipeline-uniform! *g-pipe* 'alpha 1.0)
           (draw-mesh-range *g-pipe* *g-mesh* (car p) (cdr p)))))
+
+    ;; --- G1's skinned guard ((phantom guard skin-draw)) ---------------------------
+    ;; Its own pipelines draw inside the extra draw with the world's fragment
+    ;; stage and the uniforms every world draw shares, set here as
+    ;; render-draw-guard! sets them. render-eye-position is the camera (a
+    ;; bytevector: x y z, then the fog distance while a draw is under way).
+    ;; world? #f sets only view_proj and eye (a pipeline with its own
+    ;; fragment stage, such as the torch's cone).
+    (define (render-world-fragment) WORLD-FRAGMENT)
+    (define (render-eye-position) *eye*)
+    (define (render-share-uniforms! pipe world?)
+      (f32! *eye* 3 *fog*)
+      (f32! *g-fog* 0 (if *lift* 0.0 BG-R)) (f32! *g-fog* 1 (if *lift* 0.0 BG-G))
+      (f32! *g-fog* 2 (if *lift* 0.0 BG-B)) (f32! *g-fog* 3 1.0)
+      (f32! *g-lift* 0 BG-R) (f32! *g-lift* 1 BG-G) (f32! *g-lift* 2 BG-B)
+      (f32! *g-lift* 3 (if *lift* 1.0 0.0))
+      (set-pipeline-uniform! pipe 'view_proj *vp*)
+      (set-pipeline-uniform! pipe 'eye *eye*)
+      (when world?
+        (set-pipeline-uniform! pipe 'retro *retro*)
+        (set-pipeline-uniform! pipe 'fog_color *g-fog*)
+        (set-pipeline-uniform! pipe 'lift *g-lift*)))
 
     ;; The title's room: built in design coordinates (no model turn), lit
     ;; by its own lights, the switchable circuits off (so the ambient is

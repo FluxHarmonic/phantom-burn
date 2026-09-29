@@ -10,7 +10,9 @@
 ;;;
 ;;; The page's events, besides the loader's keydown and keyup:
 ;;;   ("params", "k=v&...")  the page's query: floor, view, shot, hud,
-;;;                          dither, spread, bayer, palette, fog, card, snap, affine, trace, auto
+;;;                          dither, spread, bayer, palette, fog, card, snap, affine, trace, auto,
+;;;                          skin (G1's skin door: N skinned guards, (phantom
+;;;                          guard skin-draw)), skinfreeze F, skinlook X,Y,Z
 ;;;   ("look", "dx,dy")      pointer-locked mouse motion, CSS pixels
 ;;;   ("move", "x,y")        the left stick, -1..1, y down
 ;;;   ("lookstick", "x,y")   the right stick
@@ -44,7 +46,8 @@
           (phantom walker)
           (phantom floor replay)
           (phantom play mode)
-          (phantom sound game))
+          (phantom sound game)
+          (phantom guard skin-draw))
 
   (export web-main web-dispatch)
 
@@ -99,7 +102,17 @@
     ;; the floor's meshes and textures, and the guard's body (assets/guard, for
     ;; every floor: P1's play draws it)
     (define GUARD-SGM "guard/guard.sgm")
-    (define (asset-names) (cons GUARD-SGM (floor-asset-names)))
+    (define (asset-names) (append (if (> (skin-n) 0) (list SKIN-SGM) '()) (cons GUARD-SGM (floor-asset-names))))
+    ;; ?skin=N: G1's skin door, N guards (0 or absent: closed)
+    (define (skin-n) (let ((v (and (param "skin") (string->number (param "skin"))))) (if (and v (> v 0)) (exact v) 0)))
+    (define (skin-setup!)
+      (when (> (skin-n) 0)
+        (skin-door! (skin-n))
+        (skin-load! (lambda (layout) (load-mesh* layout SKIN-SGM)))
+        (let ((f (and (param "skinfreeze") (string->number (param "skinfreeze"))))) (when f (skin-freeze! (* 1.0 f))))
+        (let ((l (param "skinlook")))
+          (when l (let ((ns (map (lambda (v) (* 1.0 (or v 0))) (map string->number (string-split l ",")))))
+                    (when (= (length ns) 3) (apply skin-look-at! ns)))))))
     (define (floor-asset-names)
       (if (stand-in?)
           (append '("floor14.sgm" "city.sgm")
@@ -111,7 +124,7 @@
                   (filter (lambda (t) t) (map (lambda (p) (list-ref p 3)) (cdr (assq 'parts *info*)))))))
 
     (define (url name)
-      (cond ((string=? name GUARD-SGM) (string-append "assets/" name))
+      (cond ((or (string=? name GUARD-SGM) (string=? name SKIN-SGM)) (string-append "assets/" name))
             (else (floor-url name))))
     (define (floor-url name)
       (if (stand-in?)
@@ -198,6 +211,7 @@
       (set! *started* 'failed)
       (game-init! load-mesh* load-texture* (pbc1->collision (base64->bytevector *collide*)) *info*)
       (render-load-guard! (lambda (layout) (load-mesh* layout GUARD-SGM)))
+      (skin-setup!)
       (set! *collide* #f)
       (apply-params!)
       (when (and *play-text* *info*)

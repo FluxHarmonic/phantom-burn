@@ -41,7 +41,8 @@
           (phantom render)
           (phantom dither)
           (phantom text)
-          (phantom stand-in))
+          (phantom stand-in)
+          (phantom guard skin-draw))
 
   (export game-init! game-frame! game-reload!
           game-set-view! game-set-shot! game-set-hud! game-set-on! game-set-trace! game-set-auto! game-status
@@ -509,6 +510,8 @@
                                         (if (walker-crouching? w) "  CROUCH" "")
                                         (if (walker-mantling? w) "  MANTLE" "")
                                         "  " (surface-name (walker-surface w)))))
+               ;; G1's skin door: the posing cost ((phantom guard skin-draw))
+               (let ((l (skin-hud-line))) (if l (list l) '()))
                (if (= *hud* 2)
                    (list "WASD MOVE  SHIFT SNEAK  R RUN  C CROUCH  Q E LEAN  MOUSE LOOK"
                          "1 2 3 C1 C2 C3  4 EMERGENCY  5 SCREENS  6 CITY  0 ALL OFF  J K L DARK VIEWS  , . NIGHT  ; ' POOLS  G LIFT"

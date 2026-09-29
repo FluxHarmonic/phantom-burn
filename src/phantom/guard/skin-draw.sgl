@@ -1,0 +1,510 @@
+;;; (phantom guard skin-draw) - G1's skinned guard, behind the skin door
+;;; (?skin=N on the web, --skin N natively; N guards, 0 or absent is off and
+;;; the game draws its baked guard exactly as before).
+;;;
+;;; With the door open, (phantom guard body)'s guard-body-draw! hands its
+;;; guard here: the same inputs (the body's frame, metres walked, the alert
+;;; state, the light), drawn as a skinned mesh posed by (phantom guard skin)
+;;; from the walk clip in (phantom guard skin-data). On top of the walk:
+;;;   - the head turns toward a point: the camera, when it is within LOOK-M
+;;;     and in front of him (clamped to +-LOOK-YAW and +-LOOK-PITCH, turning
+;;;     at LOOK-RATE); standing, with nothing to look at, he scans as the
+;;;     baked guard does;
+;;;   - the torch arm is raised, and the torch is held level (an absolute
+;;;     override on the hand: its position follows the arm's swing, its
+;;;     aim does not), tipped down by TILT and swept +-SWEEP while he stands;
+;;;   - the torch's cone is drawn from the hand bone: its apex at the torch's
+;;;     tip and its axis along the torch, both carried by the hand's skin
+;;;     matrix, so the beam follows the arm's swing, the raise and the sweep.
+;;; Guards 1..N-1 are demo guards for the cost measurement: each replays the
+;;; first guard's recorded trail DELAY s later than the one before, so they
+;;; walk where it walked, stop where it stopped, and pose independently.
+;;;
+;;; What it measures (the HUD's SKIN line, and a console line every 2 s):
+;;; the CPU time of posing (all guards, and per guard), averaged over the
+;;; last 60 frames, and the GC's allocations while posing the first guard,
+;;; sampled once every 60 frames net of what gc-stats itself allocates
+;;; (about 100 a call, (phantom game)'s trace notes; counting every frame
+;;; would add that much garbage to every frame).
+;;;
+;;; The web's clock is Date.now(), whole milliseconds, so one pose (tens of
+;;; microseconds) cannot be timed on its own there. So BENCH-AFTER s after
+;;; the door opens, one frame poses a spare guard BENCH times in a row
+;;; (walk times spread over the cycle, the overrides on) and times the
+;;; batch, for both posing paths ((phantom guard skin): the fused one the
+;;; door draws with, and the sigil-geometry reference): the HUD's BENCH shows
+;;; microseconds per pose and allocations over the batch for each. The
+;;; per-frame POSE figure is kept, but on the web it is the 1 ms clock's
+;;; average. Why the fused path: on the native release build the reference
+;;; allocates about 368 objects a pose (calls of 4+ arguments into a
+;;; dependency run as bytecode there) and costs ~0.5 ms.
+
+(define-library (phantom guard skin-draw)
+  (import (sigil core)
+          (sigil math)
+          (sigil time)
+          (sigil gc)
+          (sigil graphics)
+          (sigil geometry)
+          (phantom render)
+          (phantom guard skin)
+          (phantom guard skin-data))
+
+  (export SKIN-SGM skin-door skin-door! skin-load! skin-ready?
+          skin-guard-draw! skin-hud-line skin-freeze! skin-look-at!
+          skin-pose-ms skin-guards-drawn skin-bench!)
+
+  (begin
+
+    (define SKIN-SGM "guard/guard-skin.sgm")
+    (define LOOK-M 9.0)        ; m: the head follows the camera inside this
+    (define LOOK-YAW 1.2)      ; rad (69 deg) either side
+    (define LOOK-PITCH 0.5)    ; rad (29 deg) up or down
+    (define LOOK-RATE 3.0)     ; rad/s the head turns
+    (define RAISE 1.35)        ; rad the forearm lifts to hold the torch level
+    (define SWEEP 0.6)         ; rad (34 deg) either side, standing
+    (define TILT 0.14)         ; rad (8 deg) the beam points down
+    (define SWEEP-PERIOD 3.2)  ; s, left and right
+    (define CYCLE 1.5)         ; m walked per walk cycle (the baked guard's)
+    (define EASE 0.3) (define SCAN-AFTER 0.6) (define SCAN-IN 0.5) (define SCAN-OUT 0.2)
+    (define SCAN-PERIOD 6.0) (define SCAN-YAW 0.66) (define STILL 0.12)
+    (define DELAY 2.5)         ; s between demo guards on the trail
+    (define MAX-GUARDS 16)
+    (define BENCH 1000) (define BENCH-AFTER 3.0)
+    (define TRAIL 2560)        ; samples kept, one every TRAIL-DT (42.7 s)
+    (define TF 11)             ; floats a sample: t x y z fx fy phase state r g b
+    (define CONE-LEN 7.0) (define CONE-HALF 0.32) (define CONE-SIDES 12)
+
+    (define *count* 0)
+    (define (skin-door) *count*)
+    (define (skin-door! n)
+      (set! *count* (max 0 (min MAX-GUARDS n)))
+      (when (> *count* 0) (ensure-skin!)))
+
+    (define *freeze* #f)       ; a fraction of the walk cycle held, for shots
+    (define (skin-freeze! f) (set! *freeze* f))
+    (define *look-at* #f)      ; a fixed point (vec3) to look at instead of the camera
+    (define (skin-look-at! x y z) (set! *look-at* (and x (vec3 x y z))))
+
+    (define (f32! bv i x) (bytevector-ieee-single-set! bv (* 4 i) x))
+    (define (f32 bv i) (bytevector-ieee-single-ref bv (* 4 i)))
+    (define (now) (/ (* 1.0 (current-jiffy)) (jiffies-per-second)))
+    (define (smooth x) (* x x (- 3.0 (* 2.0 x))))
+    (define (clamp x lo hi) (max lo (min hi x)))
+
+    ;; --- the skeleton, the clip, the rig -------------------------------------------
+
+    ;; Built when the door first opens (or the bench runs), so a closed door
+    ;; costs nothing at startup: the skeleton, the clip, the guards, the trail.
+    (define SKEL #f) (define WALK #f) (define NJ 0)
+    (define J-HEAD 0) (define J-HAND 0) (define J-FORE 0) (define HAND-BIND #f)
+    (define (ensure-skin!)
+      (unless SKEL
+        (set! SKEL (make-skeleton SKIN-JOINTS))
+        (set! WALK (let ((c (car SKIN-CLIPS))) (make-clip SKEL (cadr c) (caddr c))))
+        (set! NJ (skeleton-count SKEL))
+        (set! J-HEAD (skeleton-joint-index SKEL (rig 'eye_bone)))
+        (set! J-HAND (skeleton-joint-index SKEL (rig 'torch_bone)))
+        (set! J-FORE (skeleton-parent SKEL J-HAND))
+        ;; the hand's orientation in the bind pose (the torch level, forward)
+        (set! HAND-BIND (quat-from-mat4 (mat4-inverse (skeleton-inverse-bind SKEL J-HAND))))
+        (set! *guards* (let ((v (make-vector MAX-GUARDS #f)))
+                         (let f ((i 0)) (when (< i MAX-GUARDS) (vector-set! v i (make-guard)) (f (+ i 1))))
+                         v))
+        (set! *trail* (make-bytevector (* 4 TF TRAIL) 0))))
+    (define (rig key) (cadr (assq key SKIN-RIG)))
+    (define TORCH-TIP (apply vec3 (rig 'torch_tip)))
+    (define Z-AXIS (vec3 0.0 0.0 1.0))
+    (define X-AXIS (vec3 1.0 0.0 0.0))
+
+    ;; --- the pipelines ------------------------------------------------------------------
+
+    (define (vertex-src)
+      (string-append (glsl-header) "uniform mat4 view_proj;
+uniform mat4 model;
+uniform vec4 eye;           // xyz camera, w fog distance
+uniform vec4 retro;
+uniform vec4 light;         // rgb: the light where the guard stands
+uniform vec4 visor;         // rgb: the strip's glow
+uniform vec4 bones[" (number->string (* 3 NJ)) "];  // three rows of each joint's skin matrix
+in vec3 position;
+in vec4 normal8;
+in vec4 color;
+in uvec4 joints;
+in vec4 weights;
+out vec2 v_uv;
+out vec3 v_uvw;
+out vec3 v_color;
+out float v_fog;
+void main() {
+  vec4 q = vec4(position, 1.0);
+  vec3 p = vec3(0.0);
+  vec3 n = vec3(0.0);
+  for (int k = 0; k < 4; k++) {
+    int b = int(joints[k]) * 3;
+    vec4 r0 = bones[b];
+    vec4 r1 = bones[b + 1];
+    vec4 r2 = bones[b + 2];
+    p += weights[k] * vec3(dot(r0, q), dot(r1, q), dot(r2, q));
+    n += weights[k] * vec3(dot(r0.xyz, normal8.xyz), dot(r1.xyz, normal8.xyz), dot(r2.xyz, normal8.xyz));
+  }
+  vec3 wp = (model * vec4(p, 1.0)).xyz;
+  vec3 wn = normalize(mat3(model) * n);
+  vec3 to_eye = normalize(eye.xyz - wp);
+  float shade = 0.5 + 0.3 * max(wn.z, 0.0) + 0.4 * max(dot(wn, to_eye), 0.0);
+  v_color = color.a < 0.5 ? visor.rgb : color.rgb * light.rgb * shade;
+  v_uv = vec2(0.5);
+  v_fog = clamp(length(wp - eye.xyz) / eye.w, 0.0, 1.0);
+  vec4 clip = view_proj * vec4(wp, 1.0);
+  if (retro.x > 0.0 && clip.w > 0.0) {
+    vec2 cells = vec2(240.0, 135.0) / retro.x;
+    clip.xy = floor(clip.xy / clip.w * cells + 0.5) / cells * clip.w;
+  }
+  v_uvw = vec3(0.5 * clip.w, 0.5 * clip.w, clip.w);
+  gl_Position = clip;
+}
+"))
+
+    ;; The torch's cone: apex at the origin, axis +y, a ring at CONE-LEN; each
+    ;; vertex carries its distance along the axis (0 apex, 1 the ring).
+    (define CONE-VERTEX
+      "uniform mat4 view_proj;
+uniform mat4 model;
+uniform vec4 eye;
+in vec4 cone;               // xyz position, w distance along the axis (0..1)
+out float v_t;
+out float v_fog;
+void main() {
+  vec3 wp = (model * vec4(cone.xyz, 1.0)).xyz;
+  v_t = cone.w;
+  v_fog = clamp(length(wp - eye.xyz) / eye.w, 0.0, 1.0);
+  gl_Position = view_proj * vec4(wp, 1.0);
+}
+")
+    (define CONE-FRAGMENT
+      "uniform vec4 tint;          // rgb the torch's colour, a its strength at the apex
+in float v_t;
+in float v_fog;
+out vec4 frag_color;
+void main() {
+  float a = tint.a * (1.0 - v_t) * (1.0 - v_t) * (1.0 - v_fog);
+  frag_color = vec4(tint.rgb, a);
+}
+")
+
+    (define (make-cone-mesh)
+      (let* ((n CONE-SIDES) (bv (make-bytevector (* n 3 16) 0)) (r (* CONE-LEN (tan CONE-HALF))))
+        (let loop ((i 0))
+          (when (< i n)
+            (let* ((a0 (* 6.283185307179586 (/ i n))) (a1 (* 6.283185307179586 (/ (+ i 1) n)))
+                   (o (* i 12)))
+              (f32! bv o 0.0) (f32! bv (+ o 1) 0.0) (f32! bv (+ o 2) 0.0) (f32! bv (+ o 3) 0.0)
+              (f32! bv (+ o 4) (* r (cos a0))) (f32! bv (+ o 5) CONE-LEN) (f32! bv (+ o 6) (* r (sin a0))) (f32! bv (+ o 7) 1.0)
+              (f32! bv (+ o 8) (* r (cos a1))) (f32! bv (+ o 9) CONE-LEN) (f32! bv (+ o 10) (* r (sin a1))) (f32! bv (+ o 11) 1.0))
+            (loop (+ i 1))))
+        (make-mesh (make-vertex-layout '((cone float4))) bv)))
+
+    (define *mesh* #f)
+    (define *pipe* #f)
+    (define *cone* #f)
+    (define *cone-pipe* #f)
+
+    ;; (load layout) -> the mesh: the shell's loader for assets/guard/guard-skin.sgm
+    (define (skin-load! load)
+      (ensure-skin!)
+      (unless *pipe*
+        (set! *pipe* (make-pipeline (make-vertex-layout SKIN-LAYOUT) (vertex-src)
+                                    (string-append (glsl-header) (render-world-fragment))))
+        (set! *cone-pipe* (make-pipeline (make-vertex-layout '((cone float4)))
+                                         (string-append (glsl-header) CONE-VERTEX)
+                                         (string-append (glsl-header) CONE-FRAGMENT)
+                                         '(blend normal depth-write #f cull none)))
+        (set! *cone* (make-cone-mesh))
+        (set-pipeline-uniform! *cone-pipe* 'tint '(1.0 0.78 0.35 0.3)))
+      (when *mesh* (mesh-free! *mesh*))
+      (set! *mesh* (load (make-vertex-layout SKIN-LAYOUT))))
+    (define (skin-ready?) (and *mesh* *pipe* #t))
+
+    ;; --- per guard -------------------------------------------------------------------
+
+    ;; #(pose last-phase changed-at rest stood scan drawn-at yaw pitch sweep-t
+    ;;   head-q fore-q hand-q model cone-m tip light visor cursor), cursor the
+    ;; trail sample (a count from the first) a demo guard stands on
+    (define (make-guard)
+      (let ((p (make-skin-pose SKEL)) (hq (make-quat)) (fq (make-quat)) (wq (make-quat)))
+        (skin-override! p J-HEAD hq)
+        (skin-override! p J-FORE fq)
+        (skin-override-absolute! p J-HAND wq)
+        (vector p -1.0 0.0 1.0 0.0 0.0 #f 0.0 0.0 0.0 hq fq wq (make-mat4) (make-mat4) (make-vec3)
+                (make-bytevector 16 0) (make-bytevector 16 0) 0)))
+    (define *guards* #f)
+    (define QA (make-quat)) (define QB (make-quat))
+    (define TV (make-vec3)) (define TW (make-vec3))
+    (define TM (make-mat4)) (define TS (make-mat4))
+
+    ;; --- the trail the demo guards replay ------------------------------------------------
+
+    ;; One sample every TRAIL-DT s whatever the frame rate, so TRAIL samples
+    ;; always hold TRAIL * TRAIL-DT s (42.7 s: more than the last demo guard's
+    ;; 37.5 s delay). Times are seconds since the door opened: an absolute
+    ;; clock does not fit a float32 (the web's is Date.now(), ~1.8e9 s, where
+    ;; float32 steps are 128 s; found by the adversarial review).
+    (define TRAIL-DT (/ 1.0 60.0))
+    (define *trail* #f)
+    (define *trail-n* 0)       ; samples written in all
+    (define *trail-at* -1.0)   ; the time of the last sample
+    (define (trail-push! t model phase state r g b)
+      (when (or (< *trail-at* 0.0) (not (< (- t *trail-at*) TRAIL-DT)))
+        (set! *trail-at* t)
+        (trail-write! t model phase state r g b)))
+    (define (trail-write! t model phase state r g b)
+      (let ((o (* TF (modulo *trail-n* TRAIL))))
+        (f32! *trail* o t)
+        (f32! *trail* (+ o 1) (f32 model 12)) (f32! *trail* (+ o 2) (f32 model 13)) (f32! *trail* (+ o 3) (f32 model 14))
+        (f32! *trail* (+ o 4) (f32 model 4)) (f32! *trail* (+ o 5) (f32 model 5))
+        (f32! *trail* (+ o 6) phase) (f32! *trail* (+ o 7) (inexact state))
+        (f32! *trail* (+ o 8) r) (f32! *trail* (+ o 9) g) (f32! *trail* (+ o 10) b)
+        (set! *trail-n* (+ *trail-n* 1))))
+    (define (trail-time s) (f32 *trail* (* TF (modulo s TRAIL))))
+    ;; Demo guard g's sample for time t: its cursor moves forward only, to the
+    ;; newest sample at or before t, and never behind the oldest kept; the
+    ;; sample's float offset, or #f while t is before the first sample. Each
+    ;; frame moves it by about one sample, so the search is O(1).
+    (define (trail-seek! g t)
+      (let* ((oldest (max 0 (- *trail-n* TRAIL)))
+             (c (max oldest (vector-ref g 18))))
+        (vector-set! g 18 (advance c t))
+        (and (> *trail-n* 0) (not (> (trail-time (vector-ref g 18)) t))
+             (* TF (modulo (vector-ref g 18) TRAIL)))))
+    (define (advance c t)
+      (if (and (< (+ c 1) *trail-n*) (not (> (trail-time (+ c 1)) t)))
+          (advance (+ c 1) t)
+          c))
+
+    ;; the body's frame from a trail sample (as play mode's pose! makes it, upright)
+    (define (trail-model! m o)
+      (let ((fx (f32 *trail* (+ o 4))) (fy (f32 *trail* (+ o 5))))
+        (f32! m 0 fy) (f32! m 1 (- fx)) (f32! m 2 0.0) (f32! m 3 0.0)
+        (f32! m 4 fx) (f32! m 5 fy) (f32! m 6 0.0) (f32! m 7 0.0)
+        (f32! m 8 0.0) (f32! m 9 0.0) (f32! m 10 1.0) (f32! m 11 0.0)
+        (f32! m 12 (f32 *trail* (+ o 1))) (f32! m 13 (f32 *trail* (+ o 2))) (f32! m 14 (f32 *trail* (+ o 3))) (f32! m 15 1.0)))
+
+    ;; --- measuring -----------------------------------------------------------------------
+
+    (define *pose-acc* 0.0) (define *pose-frames* 0) (define *pose-ms* 0.0)
+    (define *alloc* 0) (define *drawn* 0) (define *drawn-frame* 0)
+    (define *stats-cost* #f)
+    (define *said-at* 0.0)
+    (define (allocations) (cdr (assq 'allocations (gc-stats))))
+    (define (skin-pose-ms) *pose-ms*)
+    (define (skin-guards-drawn) *drawn*)
+    (define (fixed2 x) (let* ((n (exact (round (* x 100.0)))) (s (number->string (abs n))))
+                         (let ((s (if (< (string-length s) 3) (string-append (make-string (- 3 (string-length s)) #\0) s) s)))
+                           (string-append (if (< n 0) "-" "") (substring s 0 (- (string-length s) 2)) "." (substring s (- (string-length s) 2) (string-length s))))))
+    (define (fixed3 x) (let* ((n (exact (round (* x 1000.0)))) (s (number->string n))
+                              (s (if (< (string-length s) 4) (string-append (make-string (- 4 (string-length s)) #\0) s) s)))
+                         (string-append (substring s 0 (- (string-length s) 3)) "." (substring s (- (string-length s) 3) (string-length s)))))
+    (define (skin-hud-line)
+      (and (> *count* 0)
+           (string-append "SKIN " (number->string *drawn*) " GUARDS  POSE " (fixed2 *pose-ms*) " MS  "
+                          (fixed3 (if (> *drawn* 0) (/ *pose-ms* *drawn*) 0.0)) " PER GUARD  ALLOC " (number->string *alloc*)
+                          (if *bench-ms*
+                              (string-append "  BENCH " (fixed3 (* 1000.0 *bench-ms*)) " US " (number->string *bench-alloc*) " ALLOC  REF "
+                                             (fixed3 (* 1000.0 *bench-ref-ms*)) " US " (number->string *bench-ref-alloc*) " ALLOC /" (number->string BENCH))
+                              ""))))
+
+    ;; --- the batch benchmark ----------------------------------------------------------
+    (define *opened-at* #f)
+    (define *bench-ms* #f)      ; ms per pose (fused), once measured
+    (define *bench-alloc* 0)    ; allocations over the batch, net of gc-stats
+    (define *bench-ref-ms* 0.0) (define *bench-ref-alloc* 0)   ; the reference path's
+    (define (bench-loop! pose! p i n)
+      (when (< i n)
+        (pose! p WALK (* (clip-duration WALK) (/ (modulo (* i 37) 1000) 1000.0)) 0.2)
+        (bench-loop! pose! p (+ i 1) n)))
+    ;; -> ms per pose and allocations over the batch
+    (define (time-batch! pose! p n cost)
+      (let* ((a0 (allocations)) (j0 (current-jiffy)))
+        (bench-loop! pose! p 0 n)
+        (let ((j1 (current-jiffy)) (a1 (allocations)))
+          (cons (/ (/ (* 1000.0 (- j1 j0)) (jiffies-per-second)) n) (- a1 a0 cost)))))
+    ;; n poses in a row, timed as one batch; also the native --skin-bench N
+    ;; (no window: posing needs no graphics)
+    (define (skin-bench! n0)
+      (ensure-skin!)
+      (let* ((n (max 1 (exact (round n0))))
+             (g (vector-ref *guards* (- MAX-GUARDS 1))) (p (vector-ref g 0)))
+        (aim-torch! g 1.0)
+        (quat-from-axis-angle! (vector-ref g 10) Z-AXIS 0.4)
+        (let* ((a (allocations)) (b (allocations)) (cost (- b a))
+               (fused (time-batch! skin-pose-fused! p n cost))
+               (ref (time-batch! skin-pose! p n cost)))
+          (set! *bench-ms* (car fused)) (set! *bench-alloc* (cdr fused))
+          (set! *bench-ref-ms* (car ref)) (set! *bench-ref-alloc* (cdr ref))
+          (display (string-append "phantom: skin bench " (number->string n) " poses: fused "
+                                  (fixed3 (* 1000.0 *bench-ms*)) " us a pose, " (number->string *bench-alloc*) " allocations; reference "
+                                  (fixed3 (* 1000.0 *bench-ref-ms*)) " us a pose, " (number->string *bench-ref-alloc*) " allocations"))
+          (newline))))
+
+    ;; --- drawing ---------------------------------------------------------------------------
+
+    ;; Called by (phantom guard body)'s guard-body-draw! with the door open,
+    ;; inside the world pass: the live guard, then the demo guards.
+    (define (skin-guard-draw! model phase state r g b)
+      (when (skin-ready?)
+        (let ((t (now)))
+          (unless *opened-at* (set! *opened-at* t))
+          (when (and (not *bench-ms*) (> (- t *opened-at*) BENCH-AFTER)) (skin-bench! BENCH))
+          (trail-push! (- t *opened-at*) model phase state r g b)
+          (set! *drawn-frame* 0)
+          (draw-one! (vector-ref *guards* 0) t model phase state r g b)
+          (draw-demo! t (- t *opened-at*) 1)
+          (set! *drawn* *drawn-frame*)
+          (when (> (- t *said-at*) 2.0)
+            (set! *said-at* t)
+            (display (string-append "phantom: skin guards " (number->string *drawn*) " pose-ms " (fixed3 *pose-ms*)
+                                    " per-guard " (fixed3 (if (> *drawn* 0) (/ *pose-ms* *drawn*) 0.0))
+                                    " alloc " (number->string *alloc*)
+                                    " at" (where model 0)))
+            (newline)))))
+
+    ;; " x,y" for the live guard (model) and each demo guard drawn this frame
+    ;; (its last trail model), for the console line: guard i should stand
+    ;; where guard 0 stood DELAY * i s before
+    (define (where model i)
+      (let ((m (if (= i 0) model (vector-ref (vector-ref *guards* i) 13))))
+        (if (>= i (min *count* *drawn*)) ""
+            (string-append " " (fixed2 (f32 m 12)) "," (fixed2 (f32 m 13)) (where model (+ i 1))))))
+
+    ;; t the clock (for easing), rel the door's time (for the trail)
+    (define (draw-demo! t rel i)
+      (when (< i *count*)
+        (let* ((g (vector-ref *guards* i))
+               (o (trail-seek! g (- rel (* i DELAY)))))
+          (when o
+            (trail-model! (vector-ref g 13) o)
+            (draw-one! g t (vector-ref g 13) (f32 *trail* (+ o 6)) (exact (round (f32 *trail* (+ o 7))))
+                       (f32 *trail* (+ o 8)) (f32 *trail* (+ o 9)) (f32 *trail* (+ o 10)))))
+        (draw-demo! t rel (+ i 1))))
+
+
+    (define (draw-one! g t model phase state r g0 b)
+      (let* ((dt (if (vector-ref g 6) (clamp (- t (vector-ref g 6)) 0.0 0.1) 0.0)))
+        (vector-set! g 6 t)
+        (unless (= phase (vector-ref g 1))
+          (vector-set! g 1 phase)
+          (vector-set! g 2 t))
+        ;; walking or standing, as the baked guard decides it (a frozen walk,
+        ;; for shots, is always walking: no scan, no sweep)
+        (cond
+          (*freeze*
+           (vector-set! g 3 0.0) (vector-set! g 4 0.0) (vector-set! g 5 0.0))
+          ((> (- t (vector-ref g 2)) STILL)
+           ;; standing: settle, then scan
+           (vector-set! g 3 (min 1.0 (+ (vector-ref g 3) (/ dt EASE))))
+           (if (< (vector-ref g 3) 1.0) (vector-set! g 4 0.0) (vector-set! g 4 (+ (vector-ref g 4) dt)))
+           (when (> (vector-ref g 4) SCAN-AFTER) (vector-set! g 5 (min 1.0 (+ (vector-ref g 5) (/ dt SCAN-IN))))))
+          (else
+           ;; walking: the head comes back first, then the legs move
+           (vector-set! g 4 0.0)
+           (if (> (vector-ref g 5) 0.0)
+               (vector-set! g 5 (max 0.0 (- (vector-ref g 5) (/ dt SCAN-OUT))))
+               (vector-set! g 3 (max 0.0 (- (vector-ref g 3) (/ dt EASE)))))))
+        (let* ((p (vector-ref g 0))
+               (clip-t (* (clip-duration WALK)
+                          (if *freeze* *freeze* (let ((c (/ phase CYCLE))) (- c (floor c))))))
+               (rest (if *freeze* 0.0 (smooth (vector-ref g 3))))
+               (sample? (and (eq? g (vector-ref *guards* 0)) (= *pose-frames* 0)))
+               (_ (when (and sample? (not *stats-cost*))
+                    (let* ((a (allocations)) (b (allocations))) (set! *stats-cost* (- b a)))))
+               (a0 (if sample? (allocations) 0))
+               (j0 (current-jiffy)))
+          ;; the head: toward the look point when it is in reach, else the scan
+          (aim-head! g model dt)
+          (aim-torch! g t)
+          (skin-pose-fused! p WALK clip-t rest)
+          (let ((ms (/ (* 1000.0 (- (current-jiffy) j0)) (jiffies-per-second))))
+            (when sample? (set! *alloc* (- (allocations) a0 *stats-cost*)))
+            (set! *pose-acc* (+ *pose-acc* ms))
+            (when (eq? g (vector-ref *guards* 0))
+              (set! *pose-frames* (+ *pose-frames* 1))
+              (when (>= *pose-frames* 60)
+                (set! *pose-ms* (/ *pose-acc* *pose-frames*))
+                (set! *pose-acc* 0.0) (set! *pose-frames* 0))))
+          (draw-body! g p model state r g0 b)
+          (draw-torch! g p model)
+          (set! *drawn-frame* (+ *drawn-frame* 1)))))
+
+    ;; The look point in the body's frame, relative to the head joint: yaw and
+    ;; pitch to turn toward it, or #f when it is out of reach or behind.
+    (define (aim-head! g model dt)
+      (let* ((p (vector-ref g 0))
+             (target (or *look-at* (render-eye-position)))
+             (dx (- (vec3-x target) (f32 model 12))) (dy (- (vec3-y target) (f32 model 13)))
+             (fx (f32 model 4)) (fy (f32 model 5))
+             ;; body frame: x right (fy, -fx), y forward (fx, fy), z up
+             (bx (- (* dx fy) (* dy fx))) (by (+ (* dx fx) (* dy fy)))
+             (bz (- (vec3-z target) (f32 model 14)))
+             (hz 1.6)
+             (d (sqrt (+ (* bx bx) (* by by))))
+             (yaw0 (atan (- bx) by))
+             (reach? (and (< d LOOK-M) (> d 0.3) (< (abs yaw0) (+ LOOK-YAW 0.6))))
+             (scan (vector-ref g 5))
+             (want-yaw (cond (reach? (clamp yaw0 (- LOOK-YAW) LOOK-YAW))
+                             ((> scan 0.0)
+                              (* SCAN-YAW (smooth scan)
+                                 (clamp (* 1.6 (sin (/ (* 6.283185307179586 (max 0.0 (- (vector-ref g 4) SCAN-AFTER))) SCAN-PERIOD))) -1.0 1.0)))
+                             (else 0.0)))
+             (want-pitch (if reach? (clamp (atan (- bz hz) d) (- LOOK-PITCH) LOOK-PITCH) 0.0))
+             (step (* LOOK-RATE (max dt 0.0))))
+        (vector-set! g 7 (+ (vector-ref g 7) (clamp (- want-yaw (vector-ref g 7)) (- step) step)))
+        (vector-set! g 8 (+ (vector-ref g 8) (clamp (- want-pitch (vector-ref g 8)) (- step) step)))
+        ;; head-q = yaw about the body's z, after pitch about its x
+        (quat-from-axis-angle! QA Z-AXIS (vector-ref g 7))
+        (quat-from-axis-angle! QB X-AXIS (vector-ref g 8))
+        (quat-mul! (vector-ref g 10) QA QB)))
+
+    ;; The torch: the forearm lifted by RAISE; the hand's aim set outright,
+    ;; the bind pose's (level, forward) tipped down by TILT and swept about
+    ;; the body's z while he stands.
+    (define (aim-torch! g t)
+      (let* ((standing (smooth (vector-ref g 3)))
+             (sweep (* SWEEP standing (sin (/ (* 6.283185307179586 t) SWEEP-PERIOD))))
+             (hq (vector-ref g 12)))
+        (quat-from-axis-angle! (vector-ref g 11) X-AXIS RAISE)
+        (quat-from-axis-angle! QA Z-AXIS sweep)
+        (quat-from-axis-angle! QB X-AXIS (- TILT))
+        (quat-mul! hq QA QB)
+        (quat-mul! hq hq HAND-BIND)))
+
+    (define (draw-body! g p model state r g0 b)
+      (let ((light (vector-ref g 16)) (visor (vector-ref g 17)))
+        (f32! light 0 r) (f32! light 1 g0) (f32! light 2 b) (f32! light 3 1.0)
+        (visor-color! visor state)
+        (render-share-uniforms! *pipe* #t)
+        (set-pipeline-uniform! *pipe* 'model model)
+        (set-pipeline-uniform! *pipe* 'light light)
+        (set-pipeline-uniform! *pipe* 'visor visor)
+        (set-pipeline-uniform! *pipe* 'bones (skin-pose-rows p))
+        (set-pipeline-uniform! *pipe* 'alpha 1.0)
+        (draw-mesh *pipe* *mesh*)))
+
+    ;; cyan calm, amber suspicious, orange searching, red hunting ((phantom guard body)'s VISOR-COLORS)
+    (define (visor-color! v state)
+      (case (max 0 (min 3 state))
+        ((0) (f32! v 0 0.302) (f32! v 1 0.949) (f32! v 2 0.851))
+        ((1) (f32! v 0 1.0) (f32! v 1 0.62) (f32! v 2 0.1))
+        ((2) (f32! v 0 1.0) (f32! v 1 0.42) (f32! v 2 0.1))
+        (else (f32! v 0 1.0) (f32! v 1 0.18) (f32! v 2 0.3)))
+      (f32! v 3 1.0))
+
+    ;; the cone's frame: model * the hand's skin matrix * a move to the torch's tip
+    (define (draw-torch! g p model)
+      (let ((m (vector-ref g 14)))
+        (mat4-translation! TM TORCH-TIP)
+        (skin-pose-skin! TS p J-HAND)
+        (mat4-mul! m TS TM)
+        (mat4-mul! m model m)
+        (render-share-uniforms! *cone-pipe* #f)
+        (set-pipeline-uniform! *cone-pipe* 'model m)
+        (draw-mesh *cone-pipe* *cone*)))))

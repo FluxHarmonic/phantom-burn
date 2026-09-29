@@ -22,6 +22,10 @@
 ;;; play mode sets it). One guard's easing state is kept here; a second guard
 ;;; will need it per guard.
 ;;;
+;;; With G1's skin door open ((phantom guard skin-draw): ?skin=N, --skin N)
+;;; and its mesh loaded, guard-body-draw! hands the guard to the skinned
+;;; path instead; closed, nothing here changes.
+;;;
 ;;; guard-preview-draw! is the native --guard preview (a guard walking a
 ;;; circle, no AI), for shots of the body without P1's play.
 
@@ -29,7 +33,8 @@
   (import (sigil core)
           (sigil math)
           (sigil time)
-          (phantom render))
+          (phantom render)
+          (phantom guard skin-draw))
 
   (export guard-body-draw! guard-pose guard-preview-set! guard-preview-draw!
           CYCLE POSES SCAN-PART VISOR-COLORS)
@@ -70,6 +75,11 @@
         (* POSES (- c (floor c)))))
 
     (define (guard-body-draw! model phase state r g b)
+      (if (and (> (skin-door) 0) (skin-ready?))
+          (skin-guard-draw! model phase state r g b)
+          (baked-body-draw! model phase state r g b)))
+
+    (define (baked-body-draw! model phase state r g b)
       (let* ((t (now))
              (dt (if *drawn-at* (max 0.0 (min 0.1 (- t *drawn-at*))) 0.0)))
         (set! *drawn-at* t)
