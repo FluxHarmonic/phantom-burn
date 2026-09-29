@@ -1,6 +1,6 @@
 #!/bin/sh
 # Stage phantomburn.net (a private preview): the placeholder root from site/,
-# and the game at /beta/ (David, 2026-09-26: "a memorable address").
+# and the game at /badge-in/ (David, 2026-09-29: the public path for 0.1, a sibling of Crash's /jack-in/).
 #
 #   PHANTOM_WEB_DIR=build/remote-web-<sha> scripts/stage-web build/site
 #
@@ -10,7 +10,7 @@
 #                     a missing path with the root page and a 200:
 #                     topics/cloudflare-pages-serves-index-for-a-missing-path)
 #   /robots.txt       disallows everything; _headers says noindex everywhere
-#   /_redirects       the game's first path, /p-<10>/*, 301s to /beta/:splat
+#   /_redirects       the game's earlier paths (/p-<10>/, /beta/, /play/) 301 to /badge-in/:splat
 #                     (links shared before the move keep working)
 #   /<game>/          the game's web build (page, bridges, assets/)
 #   /w/<sha16>/phantom-burn.wasm
@@ -23,7 +23,7 @@
 #                     it stays a plain file so check-site.mjs can serve it.
 #
 # The game's path is read from $PHANTOM_SITE_SLUG, else ~/.config/phantomburn/slug,
-# else it is beta; a short lowercase name. It is written into the manifest's
+# else it is badge-in; a short lowercase name. It is written into the manifest's
 # header (# game NAME), where check-site.mjs and verify-live.mjs read it.
 #
 # PHANTOM_WEB_DIR: the game build to stage (default build/web; a runner build
@@ -36,7 +36,7 @@ DIR="${1:?usage: stage-web DIR}"
 DIR="${DIR%/}"
 WEB="${PHANTOM_WEB_DIR:-build/web}"
 SLUG="${PHANTOM_SITE_SLUG:-$(cat "$HOME/.config/phantomburn/slug" 2>/dev/null || true)}"
-SLUG="${SLUG:-beta}"
+SLUG="${SLUG:-badge-in}"
 say() { echo "stage-web: $*" >&2; }
 printf '%s' "$SLUG" | grep -Eqx '[a-z][a-z0-9-]{1,31}' || { say "REFUSED: the game's path '$SLUG' is not a short lowercase name"; exit 1; }
 [ "$SLUG" != w ] || { say "REFUSED: /w/ is the wasm's route"; exit 1; }

@@ -21,7 +21,8 @@
 //   _redirects  the tree's root _redirects file: "FROM TO [STATUS]" per line,
 //               the first matching rule wins, a trailing /* in FROM carries
 //               the rest of the path into :splat in TO, the status defaults to
-//               302 (phantomburn.net keeps /p-<old>/* -> /beta/:splat 301)
+//               302, the query string kept as Pages keeps it (phantomburn.net:
+//               /p-<old>/*, /beta/* and /play/* -> /badge-in/:splat 301)
 //   hidden      _headers and _redirects are consumed, not served (404).
 import http from "node:http";
 import https from "node:https";
@@ -124,7 +125,10 @@ export function createHandler(root, onRequest = () => {}) {
       const splat = r.from.endsWith("/*") ? (urlPath.startsWith(r.from.slice(0, -1)) ? urlPath.slice(r.from.length - 1) : null)
                                           : (urlPath === r.from ? "" : null);
       if (splat !== null) {
-        res.writeHead(r.status, { location: r.to.replace(":splat", splat) }).end(); onRequest(method, urlPath, r.status); return;
+        // the query string goes along, as Pages does (wrangler pages dev, 2026-09-29:
+        // /play/?go=14 -> /badge-in/?go=14)
+        const q = new URL(req.url || "/", "http://x").search;
+        res.writeHead(r.status, { location: r.to.replace(":splat", splat) + q }).end(); onRequest(method, urlPath, r.status); return;
       }
     }
     if (base === "index.html") {

@@ -20,7 +20,8 @@
 //               under --wrangler-dev it is allowed and named (the local server
 //               need not compress).
 // redirect      every _redirects rule answers its status and Location (the
-//               game's first path 301s to /beta/, the rest of the path kept).
+//               game's earlier paths 301 to /badge-in/, the rest of the path and
+//               the query string kept: /play/?go=14 -> /badge-in/?go=14).
 // missing       a missing page, a missing file under the game, the old
 //               /<game>/phantom-burn.wasm, /_headers and /_redirects answer 404 with the
 //               staged 404.html byte for byte; a missing wasm key answers the
@@ -124,10 +125,11 @@ else {
     const tail = r.from.endsWith("/*") ? "assets/sigil-web-app.js" : "";
     const from = r.from.endsWith("/*") ? r.from.slice(0, -1) + tail : r.from;
     const want = r.to.replace(":splat", tail);
-    const g = await fetch(BASE + from, { redirect: "manual" });
+    // with a query string: it must survive the move (?go=14 still goes to floor 14)
+    const g = await fetch(BASE + from + "?go=14", { redirect: "manual" });
     await g.arrayBuffer();
     const loc = (g.headers.get("location") || "").replace(BASE, "");
-    if (g.status !== r.status || loc !== want) why.push(`${from}: ${g.status} -> ${loc} (want ${r.status} -> ${want})`);
+    if (g.status !== r.status || loc !== want + "?go=14") why.push(`${from}?go=14: ${g.status} -> ${loc} (want ${r.status} -> ${want}?go=14)`);
   }
   if (!rules.length) fail("redirect", "no _redirects rules in the tree");
   else if (why.length) fail("redirect", why.join("; "));

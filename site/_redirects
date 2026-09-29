@@ -1,6 +1,12 @@
 # phantomburn.net's redirects (Cloudflare Pages _redirects: FROM TO STATUS).
-# The game moved from its first, unguessable path to /beta/ (David,
-# 2026-09-26: "a memorable address"); links shared to the old path keep
-# working. scripts/check-site.mjs and verify-live.mjs follow every rule here.
-/p-wuypeb4rqy/* /beta/:splat 301
-/p-wuypeb4rqy /beta/ 301
+# The game lives at /badge-in/ (David, 2026-09-29: the public path for 0.1, a
+# sibling of Crash's /jack-in/). Its earlier paths keep working: its first,
+# unguessable one; /beta/, where the previews were; and /play/, the path
+# everyone guesses. scripts/check-site.mjs and verify-live.mjs follow every
+# rule here, with a query string (?go=14 must survive the move).
+/p-wuypeb4rqy/* /badge-in/:splat 301
+/p-wuypeb4rqy /badge-in/ 301
+/beta/* /badge-in/:splat 301
+/beta /badge-in/ 301
+/play/* /badge-in/:splat 301
+/play /badge-in/ 301

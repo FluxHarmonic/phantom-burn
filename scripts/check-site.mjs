@@ -18,7 +18,8 @@
 //              under the game; /_headers and /_redirects are not served
 //   slash      /<game> redirects (308) to /<game>/
 //   redirect   every _redirects rule answers its status and Location (the
-//              game's first path 301s to /beta/, the rest of the path kept)
+//              game's earlier paths 301 to /badge-in/, the rest of the path and
+//              the query string kept)
 //   wasm       exactly one wasm, at w/<sha16>/phantom-burn.wasm, named by its
 //              own sha256; the page's data-wasm names it; the old
 //              /<game>/phantom-burn.wasm is gone (a 404) (t-5b3251: in
@@ -68,7 +69,9 @@ for (const f of ["index.html", "404.html", "robots.txt", "_headers", "_redirects
   if (!fs.existsSync(path.join(DIR, f))) { bad("old-path", `${f} is missing from the tree`); continue; }
   if (f === "_redirects") continue;
   const t = fs.readFileSync(path.join(DIR, f), "utf8");
-  const named = OLD.filter((p) => t.includes(p));
+  // as a path (/NAME), not a substring: "display" does not name /play/
+  // (redirect sources are plain lowercase names: no regex characters to escape)
+  const named = OLD.filter((p) => new RegExp("/" + p + "(?![A-Za-z0-9_-])").test(t));
   named.length ? bad("old-path", `${f} names ${named.join(" ")}`) : ok("old-path", `${f} names no old path`);
 }
 for (const p of OLD) fs.existsSync(path.join(DIR, p)) ? bad("old-path", `${p} exists in the tree`) : ok("old-path", `/${p}/ is only a redirect`);
@@ -134,8 +137,9 @@ for (const r of REDIRECTS) {
   const tail = r.from.endsWith("/*") ? "assets/sigil-web-app.js" : "";
   const from = r.from.endsWith("/*") ? r.from.slice(0, -1) + tail : r.from;
   const want = r.to.replace(":splat", tail);
-  const g = await get(from + (tail ? "?x=1" : ""));
-  g.status === r.status && g.location === want ? ok("redirect", `${from} ${r.status} -> ${want}`) : bad("redirect", `${from}: ${g.status} -> ${g.location} (want ${r.status} -> ${want})`);
+  // with a query string, which Pages keeps (?go=14 must survive the move)
+  const g = await get(from + "?go=14");
+  g.status === r.status && g.location === want + "?go=14" ? ok("redirect", `${from}?go=14 ${r.status} -> ${want}?go=14`) : bad("redirect", `${from}?go=14: ${g.status} -> ${g.location} (want ${r.status} -> ${want}?go=14)`);
 }
 if (!REDIRECTS.some((r) => r.to.startsWith(`/${SLUG}/`))) bad("redirect", `no rule sends anything to /${SLUG}/`);
 
