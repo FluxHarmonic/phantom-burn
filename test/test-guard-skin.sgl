@@ -1,0 +1,320 @@
+;;; Posing a skeleton for skinning ((phantom guard skin), G1): a tiny
+;;; skeleton with known answers, and the guard's own (the generated
+;;; (phantom guard skin-data)). Run from the repo root.
+;;;
+;;; The tiny skeleton is the one sigil-graphics' test/test-gltf builds and
+;;; converts, in glTF's Y-up frame: an armature moved +0.5 x and turned 90
+;;; deg about y (the root's base), a chain root -> mid -> tip up +y 1 m apart
+;;; (tip turned 30 deg about z at rest) and two side joints on mid. Its clip
+;;; turns mid about z 0 -> 90 -> 180 deg at 0, 0.5, 1 s (linear) and moves
+;;; root +0.25 y at 0.5 s (step), and scales side.L 1 -> 2 along its y over
+;;; 1 s (linear), so both posing paths' scale branches run.
+
+(import (sigil test)
+        (sigil math)
+        (sigil gc)
+        (sigil geometry)
+        (phantom guard skin)
+        (phantom guard skin-data))
+
+(define (near? a b eps) (< (abs (- a b)) eps))
+(define (v3-near? v x y z eps)
+  (and (near? (vec3-x v) x eps) (near? (vec3-y v) y eps) (near? (vec3-z v) z eps)))
+(define (mat-near? a b eps)
+  (let loop ((i 0)) (or (= i 16) (and (near? (mat4-ref a (quotient i 4) (modulo i 4)) (mat4-ref b (quotient i 4) (modulo i 4)) eps) (loop (+ i 1))))))
+(define (identity? m eps) (mat-near? m (make-mat4) eps))
+(define (floats m) (let loop ((i 15) (acc '())) (if (< i 0) acc (loop (- i 1) (cons (mat4-ref m (quotient i 4) (modulo i 4)) acc)))))
+
+;; --- the tiny skeleton, built here from its definition -----------------------------
+
+(define S45 (sqrt 0.5))
+(define (qz deg) (let ((h (* deg (/ 3.141592653589793 360.0)))) (list 0.0 0.0 (sin h) (cos h))))
+(define BASE (mat4-from-trs (vec3 0.5 0.0 0.0) (quat 0.0 S45 0.0 S45) (vec3 1.0 1.0 1.0)))
+(define REST ; name parent t r
+  (list (list "root" -1 '(0.0 0.0 0.0) '(0.0 0.0 0.0 1.0))
+        (list "mid" 0 '(0.0 1.0 0.0) '(0.0 0.0 0.0 1.0))
+        (list "tip" 1 '(0.0 1.0 0.0) (qz 30.0))
+        (list "side.L" 1 '(0.5 0.0 0.0) '(0.0 0.0 0.0 1.0))
+        (list "side.R" 1 '(-0.5 0.0 0.0) '(0.0 0.0 0.0 1.0))))
+(define (local j) (let ((r (list-ref REST j)))
+                    (mat4-from-trs (apply vec3 (list-ref r 2)) (apply quat (list-ref r 3)) (vec3 1.0 1.0 1.0))))
+(define GLOBAL-REST
+  (let loop ((j 0) (acc '()))
+    (if (= j 5) (list->vector (reverse acc))
+        (let ((p (cadr (list-ref REST j))))
+          (loop (+ j 1) (cons (mat4-mul (if (< p 0) BASE (list-ref (reverse acc) p)) (local j)) acc))))))
+(define TINY
+  (make-skeleton
+   (map (lambda (r j)
+          (list (car r) (cadr r) (caddr r) (cadddr r) '(1.0 1.0 1.0)
+                (floats (mat4-inverse (vector-ref GLOBAL-REST j)))
+                (and (< (cadr r) 0) (floats BASE))))
+        REST '(0 1 2 3 4))))
+(define BEND
+  (make-clip TINY 1.0
+             (list (list 1 'rotation 'linear '(0.0 0.5 1.0) (append (qz 0.0) (qz 90.0) (qz 180.0)))
+                   (list 0 'translation 'step '(0.0 0.5) '(0.0 0.0 0.0 0.0 0.25 0.0))
+                   (list 3 'scale 'linear '(0.0 1.0) '(1.0 1.0 1.0 1.0 2.0 1.0)))))
+(define P (make-skin-pose TINY))
+(define TMP (make-vec3))
+;; the tip's origin in armature space when mid has turned a degrees and root moved dy
+(define (tip-at a dy)
+  (let ((r (* a (/ 3.141592653589793 180.0))))
+    (mat4-transform-point (vector-ref GLOBAL-REST 0) ; root's rest global is BASE
+                          (vec3 (- (sin r)) (+ 1.0 dy (cos r)) 0.0))))
+(define TIP-BIND (mat4-get-translation (vector-ref GLOBAL-REST 2)))
+
+(test-group "a tiny skeleton"
+  (test "at the rest pose every skin matrix is the identity"
+    (skin-pose! P #f 0.0 0.0)
+    (assert-true (identity? (skin-pose-skin P 0) 1e-5))
+    (assert-true (identity? (skin-pose-skin P 2) 1e-5))
+    (assert-true (identity? (skin-pose-skin P 4) 1e-5)))
+
+  (test "a known pose at a key time: t 0.5 is mid turned 90 deg, root moved 0.25 (the step's second key)"
+    (skin-pose! P BEND 0.5 0.0)
+    (let ((want (tip-at 90.0 0.25)))
+      (assert-true (v3-near? (mat4-get-translation (skin-pose-global P 2)) (vec3-x want) (vec3-y want) (vec3-z want) 1e-5))))
+
+  (test "slerp between keys: t 0.25 is 45 deg (the step holds its first key), t 0.75 is 135 deg"
+    (skin-pose! P BEND 0.25 0.0)
+    (let ((want (tip-at 45.0 0.0)))
+      ;; a vertex at the tip's bind origin, bound to the tip alone, lands on the posed tip
+      (skin-pose-point! TMP P 2 TIP-BIND)
+      (assert-true (v3-near? TMP (vec3-x want) (vec3-y want) (vec3-z want) 1e-5)))
+    (skin-pose! P BEND 0.75 0.0)
+    (let ((want (tip-at 135.0 0.25)))
+      (skin-pose-point! TMP P 2 TIP-BIND)
+      (assert-true (v3-near? TMP (vec3-x want) (vec3-y want) (vec3-z want) 1e-5))))
+
+  (test "the hierarchy product: tip's global is base * root * mid * tip, and its skin that times the inverse bind"
+    (skin-pose! P BEND 0.3 0.0)
+    (let* ((a (* 54.0 (/ 3.141592653589793 180.0)))   ; 0.3 s is 60% of the way from 0 to 90
+           (mid (mat4-from-trs (vec3 0.0 1.0 0.0) (quat 0.0 0.0 (sin (/ a 2.0)) (cos (/ a 2.0))) (vec3 1.0 1.0 1.0)))
+           (want (mat4-mul (mat4-mul (mat4-mul BASE (local 0)) mid) (local 2))))
+      (assert-true (mat-near? (skin-pose-global P 2) want 1e-5))
+      (assert-true (mat-near? (skin-pose-skin P 2) (mat4-mul want (mat4-inverse (vector-ref GLOBAL-REST 2))) 1e-5))
+      ;; the side joints ride mid: side.L's global is mid's times its own local
+      ;; (scaled 1.3 along y at 0.3 s by the clip's scale channel)
+      (let ((r (list-ref REST 3)))
+        (assert-true (mat-near? (skin-pose-global P 3)
+                                (mat4-mul (skin-pose-global P 1)
+                                          (mat4-from-trs (apply vec3 (list-ref r 2)) (apply quat (list-ref r 3)) (vec3 1.0 1.3 1.0)))
+                                1e-5)))))
+
+  (test "a scale channel: side.L's y axis is 1.5 long at t 0.5, and 1.25 halfway to rest"
+    (let ((len (lambda (m) (sqrt (+ (* (mat4-ref m 1 0) (mat4-ref m 1 0)) (* (mat4-ref m 1 1) (mat4-ref m 1 1)) (* (mat4-ref m 1 2) (mat4-ref m 1 2)))))))
+      (skin-pose! P BEND 0.5 0.0)
+      (assert-true (near? (len (skin-pose-global P 3)) 1.5 1e-5))
+      (assert-true (near? (len (skin-pose-global P 2)) 1.0 1e-5))   ; tip is not scaled
+      (skin-pose! P BEND 0.5 0.5)
+      (assert-true (near? (len (skin-pose-global P 3)) 1.25 1e-5))))
+
+  (test "rest 1 is the rest pose whatever the clip says; rest 0.5 is halfway"
+    (skin-pose! P BEND 0.5 1.0)
+    (assert-true (identity? (skin-pose-skin P 2) 1e-5))
+    (skin-pose! P BEND 0.5 0.5)          ; mid at 45 deg, root at 0.125
+    (let ((want (tip-at 45.0 0.125)))
+      (assert-true (v3-near? (mat4-get-translation (skin-pose-global P 2)) (vec3-x want) (vec3-y want) (vec3-z want) 1e-5))))
+
+  (test "an override turns a joint about its own origin in the skeleton's frame"
+    ;; turning mid 90 deg about the world's z (in the rest pose) carries the tip
+    ;; around mid's origin; mid itself stays put
+    (let ((q (quat-from-axis-angle (vec3 0.0 0.0 1.0) (/ 3.141592653589793 2.0))))
+      (skin-override! P 1 q)
+      (skin-pose! P #f 0.0 0.0)
+      (skin-clear-overrides! P)
+      (let* ((m (mat4-get-translation (vector-ref GLOBAL-REST 1)))
+             (d (vec3-sub TIP-BIND m))
+             (want (vec3-add m (quat-rotate-vec3 q d))))
+        (assert-true (v3-near? (mat4-get-translation (skin-pose-global P 1)) (vec3-x m) (vec3-y m) (vec3-z m) 1e-5))
+        (assert-true (v3-near? (mat4-get-translation (skin-pose-global P 2)) (vec3-x want) (vec3-y want) (vec3-z want) 1e-5))))))
+
+;; --- the guard's own skeleton -----------------------------------------------------------
+
+(define GUARD (make-skeleton SKIN-JOINTS))
+(define WALK (let ((c (car SKIN-CLIPS))) (make-clip GUARD (cadr c) (caddr c))))
+(define GP (make-skin-pose GUARD))
+(define (rig key) (cadr (assq key SKIN-RIG)))
+
+(define (origin p j) (mat4-get-translation (skin-pose-global p j)))
+(define (bone-length p j) (vec3-distance (origin p j) (origin p (skeleton-parent GUARD j))))
+;; the largest change in any bone's length over n times through the walk
+(define (worst-stretch n)
+  (skin-pose! GP #f 0.0 0.0)
+  (let ((rest (let loop ((j 1) (acc '())) (if (= j (skeleton-count GUARD)) (list->vector (reverse acc)) (loop (+ j 1) (cons (bone-length GP j) acc))))))
+    (let loop ((k 0) (worst 0.0))
+      (if (= k n) worst
+          (begin
+            (skin-pose! GP WALK (* (clip-duration WALK) (/ (+ k 0.5) n)) 0.0)
+            (loop (+ k 1)
+                  (let jl ((j 1) (w worst))
+                    (if (= j (skeleton-count GUARD)) w
+                        (jl (+ j 1) (max w (abs (- (bone-length GP j) (vector-ref rest (- j 1))))))))))))))
+
+(test-group "the guard's skeleton"
+  (test "16 joints, the walk's 17 keys over 1.333 s, the torch in the right hand"
+    (assert-equal 16 (skeleton-count GUARD))
+    (assert-true (near? (clip-duration WALK) 1.3333334 1e-5))
+    (assert-equal 9 (skeleton-joint-index GUARD "hand.R"))
+    (assert-equal "hand.R" (rig 'torch_bone)))
+
+  (test "at the rest pose every skin matrix is the identity"
+    (skin-pose! GP #f 0.0 0.0)
+    (let loop ((j 0))
+      (when (< j 16)
+        (assert-true (identity? (skin-pose-skin GP j) 1e-4))
+        (loop (+ j 1)))))
+
+  (test "no shrinking limbs: every bone keeps its length through the walk, between keys too"
+    ;; 64 times, each halfway between two samples (never on a key)
+    (assert-true (< (worst-stretch 64) 1e-4)))
+
+  (test "the walk is the baked walk: at key k the pelvis is lifted as guard.py grounded pose k"
+    (let ((lift (rig 'pelvis_lift)))
+      (let loop ((k 0))
+        (when (< k 16)
+          (skin-pose! GP WALK (* k (/ 2.0 24.0)) 0.0)
+          (assert-true (near? (vec3-z (origin GP 0)) (+ 0.9 (list-ref lift k)) 1e-4))
+          (loop (+ k 1))))))
+
+  (test "the head turned toward a point: an override about the body's z turns the visor's point about the head joint"
+    (let* ((h (skeleton-joint-index GUARD "head"))
+           (q (quat-from-axis-angle (vec3 0.0 0.0 1.0) (/ 3.141592653589793 4.0)))
+           (eye (apply vec3 (rig 'eye))))
+      (skin-override! GP h q)
+      (skin-pose! GP #f 0.0 0.0)
+      (skin-clear-overrides! GP)
+      (skin-pose-point! TMP GP h eye)
+      (let* ((o (origin GP h)) (want (vec3-add o (quat-rotate-vec3 q (vec3-sub eye o)))))
+        (assert-true (v3-near? TMP (vec3-x want) (vec3-y want) (vec3-z want) 1e-4))
+        ;; facing +y at rest, the visor now looks 45 deg to the left (toward -x)
+        (assert-true (< (vec3-x TMP) -0.05)))))
+
+  (test "the rows are each skin matrix's top three rows, for every joint (a walk pose and a turned head: rotations about every axis)"
+    (let ((h (skeleton-joint-index GUARD "head")) (q (quat-from-axis-angle (vec3 0.3 0.5 0.8) 0.7)))
+      (skin-override! GP h q)
+      (skin-pose! GP WALK 0.41 0.0)
+      (skin-clear-overrides! GP)
+      (let ((rows (skin-pose-rows GP)))
+        (assert-equal (* 16 48) (bytevector-length rows))
+        (let jl ((j 0) (bad 0))
+          (if (= j 16)
+              (assert-equal 0 bad)
+              (let ((S (skin-pose-skin GP j)))
+                (jl (+ j 1)
+                    (let kl ((k 0) (bad bad))
+                      (if (= k 12) bad
+                          (kl (+ k 1) (if (near? (bytevector-ieee-single-ref rows (* 4 (+ (* 12 j) k))) (mat4-ref S (modulo k 4) (quotient k 4)) 1e-7)
+                                          bad (+ bad 1)))))))))
+        ;; the head's skin matrix is a general turn, so a transposed row would show
+        (let ((S (skin-pose-skin GP h)))
+          (assert-true (> (abs (- (mat4-ref S 1 0) (mat4-ref S 0 1))) 0.1))))))
+
+  (test "an absolute override holds the torch level whatever the arm does"
+    (let* ((h (skeleton-joint-index GUARD "hand.R"))
+           (bind (quat-from-mat4 (mat4-inverse (skeleton-inverse-bind GUARD h))))
+           (tip (apply vec3 (rig 'torch_tip)))
+           (dir (apply vec3 (rig 'torch_dir)))
+           (out (make-vec3)))
+      (skin-override-absolute! GP h bind)
+      (let loop ((k 0) (worst 0.0))
+        (if (= k 16)
+            (begin (skin-clear-overrides! GP) (assert-true (< worst 1e-4)))
+            (begin
+              (skin-pose! GP WALK (* (clip-duration WALK) (/ (+ k 0.5) 16)) 0.0)
+              (skin-pose-direction! out GP h dir)
+              ;; the torch's direction is the bind pose's: +y, level
+              (loop (+ k 1) (max worst (abs (vec3-x out)) (abs (- (vec3-y out) 1.0)) (abs (vec3-z out)))))))))
+
+  ;; Without overrides the two paths agree to float32 rounding (1.8e-7 measured).
+  ;; With overrides on deep joints they differ by up to 5.4e-5 m: the reference
+  ;; takes the parent's rotation from its float32 global matrix, the fused path
+  ;; carries it as a quaternion; against the exact answer (the next test) the
+  ;; fused path is the closer of the two (6.8e-6 against 1.6e-5 m, measured).
+  (test "the fused pose is the reference's with no overrides: every row float, tiny skeleton and guard, rest 0 to 1"
+    (let* ((A (make-skin-pose GUARD)) (B (make-skin-pose GUARD)) (TA (make-skin-pose TINY)) (TB (make-skin-pose TINY))
+           (worst (lambda (pa pb n)
+                    (let loop ((k 0) (m 0.0))
+                      (if (= k (* 12 n)) m
+                          (loop (+ k 1) (max m (abs (- (bytevector-ieee-single-ref (skin-pose-rows pa) (* 4 k))
+                                                       (bytevector-ieee-single-ref (skin-pose-rows pb) (* 4 k)))))))))))
+      (let loop ((k 0) (m 0.0))
+        (if (= k 40)
+            (assert-true (< m 1e-6))
+            (let ((t (* (/ k 40.0) (clip-duration WALK))) (r (* 0.25 (modulo k 5))))
+              (skin-pose! A WALK t r) (skin-pose-fused! B WALK t r)
+              (skin-pose! TA BEND (/ k 40.0) r) (skin-pose-fused! TB BEND (/ k 40.0) r)
+              (loop (+ k 1) (max m (worst A B 16) (worst TA TB 5))))))))
+
+  (test "an override turns the joint's children about it by exactly Q, in both paths"
+    (let* ((fore (skeleton-joint-index GUARD "forearm.R")) (hand (skeleton-joint-index GUARD "hand.R"))
+           (bind-origin (lambda (j) (mat4-get-translation (mat4-inverse (skeleton-inverse-bind GUARD j)))))
+           (bf (bind-origin fore)) (bh (bind-origin hand))
+           (q (quat-from-axis-angle (vec3 1.0 0.0 0.0) 1.35))
+           (at (lambda (pp j b) (let ((v (make-vec3))) (skin-pose-point! v pp j b) v)))
+           (err (lambda (pose!)
+                  (let ((P0 (make-skin-pose GUARD)) (P1 (make-skin-pose GUARD)))
+                    (skin-override! P1 fore q)
+                    (let loop ((k 0) (m 0.0))
+                      (if (= k 40) m
+                          (let ((t (* (/ k 40.0) (clip-duration WALK))))
+                            (pose! P0 WALK t 0.0) (pose! P1 WALK t 0.0)
+                            (let* ((f0 (at P0 fore bf)) (h0 (at P0 hand bh)) (h1 (at P1 hand bh))
+                                   (want (vec3-add f0 (quat-rotate-vec3 q (vec3-sub h0 f0)))))
+                              (loop (+ k 1) (max m (vec3-distance h1 want)))))))))))
+      (let ((er (err skin-pose!)) (ef (err skin-pose-fused!)))
+        (display (string-append "skin: override against exact: reference " (number->string er) " fused " (number->string ef))) (newline)
+        (assert-true (< er 5e-5))
+        (assert-true (< ef 5e-5)))))
+
+  (test "the fused pose is the reference's with overrides relative and absolute (to 1e-4 m, see above)"
+    (let* ((h (skeleton-joint-index GUARD "head")) (f (skeleton-joint-index GUARD "forearm.R")) (w (skeleton-joint-index GUARD "hand.R"))
+           (qh (quat-from-axis-angle (vec3 0.3 0.5 0.8) 0.7)) (qf (quat-from-axis-angle (vec3 1.0 0.0 0.0) 1.35))
+           (qw (quat-from-axis-angle (vec3 0.0 0.0 1.0) 0.4))
+           (A (make-skin-pose GUARD)) (B (make-skin-pose GUARD))
+           (TA (make-skin-pose TINY)) (TB (make-skin-pose TINY))
+           (qm (quat-from-axis-angle (vec3 0.0 0.0 1.0) 0.5))
+           (worst (lambda (pa pb n)
+                    (let loop ((k 0) (m 0.0))
+                      (if (= k (* 12 n)) m
+                          (loop (+ k 1) (max m (abs (- (bytevector-ieee-single-ref (skin-pose-rows pa) (* 4 k))
+                                                       (bytevector-ieee-single-ref (skin-pose-rows pb) (* 4 k)))))))))))
+      (for-each (lambda (pp) (skin-override! pp h qh) (skin-override! pp f qf) (skin-override-absolute! pp w qw)) (list A B))
+      (for-each (lambda (pp) (skin-override! pp 1 qm)) (list TA TB))
+      (let loop ((k 0) (m 0.0))
+        (if (= k 40)
+            (begin
+              (display (string-append "skin: fused against reference, worst row difference " (number->string m))) (newline)
+              (assert-true (< m 1e-4)))
+            (let ((t (* (/ k 40.0) (clip-duration WALK))) (r (* 0.25 (modulo k 5))))
+              (skin-pose! A WALK t r) (skin-pose-fused! B WALK t r)
+              (skin-pose! TA BEND (/ k 40.0) r) (skin-pose-fused! TB BEND (/ k 40.0) r)
+              (loop (+ k 1) (max m (worst A B 16) (worst TA TB 5))))))))
+
+  (test "skin-pose-fused! allocates nothing (200 calls, overrides on)"
+    (let* ((allocs (lambda () (cdr (assq 'allocations (gc-stats)))))
+           (FP (make-skin-pose GUARD))
+           (_ (skin-override! FP 3 (quat-from-axis-angle (vec3 0.0 0.0 1.0) 0.3)))
+           (_ (skin-override-absolute! FP 9 (quat-from-axis-angle (vec3 0.0 0.0 1.0) 0.2)))
+           (run (lambda (f) (let ((a (allocs))) (let loop ((i 0)) (when (< i 200) (f i) (loop (+ i 1)))) (- (allocs) a))))
+           (empty (run (lambda (i) #f)))
+           (posing (run (lambda (i) (skin-pose-fused! FP WALK 0.37 0.25)))))
+      (display (string-append "skin: fused allocations over 200 calls: empty " (number->string empty) " skin-pose-fused! " (number->string posing)))
+      (newline)
+      (assert-true (<= (- posing empty) 2))))
+
+  (test "skin-pose! allocates nothing (200 calls, against an allocating control)"
+    (let* ((allocs (lambda () (cdr (assq 'allocations (gc-stats)))))
+           (q (quat-from-axis-angle (vec3 0.0 0.0 1.0) 0.3))
+           (run (lambda (f) (let ((a (allocs))) (let loop ((i 0)) (when (< i 200) (f i) (loop (+ i 1)))) (- (allocs) a))))
+           (empty (run (lambda (i) #f)))
+           (control (run (lambda (i) (make-bytevector 16 0))))
+           (_ (skin-override! GP 3 q))
+           (posing (run (lambda (i) (skin-pose! GP WALK 0.37 0.25)))))
+      (skin-clear-overrides! GP)
+      (display (string-append "skin: allocations over 200 calls: empty " (number->string empty)
+                              " control " (number->string control) " skin-pose! " (number->string posing)))
+      (newline)
+      (assert-true (>= (- control empty) 180))   ; one bytevector a call
+      (assert-true (<= (- posing empty) 2)))))

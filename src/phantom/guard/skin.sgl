@@ -1,0 +1,437 @@
+;;; (phantom guard skin) - Posing a skeleton for skinning (G1): sample a
+;;; clip, walk the hierarchy, multiply by the inverse binds, and pack the
+;;; result for a vertex shader. The data comes from sigil-graphics'
+;;; scripts/gltf-to-sgm.mjs (its sidecar, compiled into (phantom guard
+;;; skin-data) by scripts/skin-data.mjs); nothing here knows about the guard.
+;;; It starts in the game and moves out when a second game uses it
+;;; (Harkfell's D6).
+;;;
+;;; Per joint j, per frame:
+;;;   local    = T * R * S, from the clip at time t (the rest pose where the
+;;;              clip has no channel), each blended toward the rest pose by
+;;;              `rest` (0 the clip, 1 the rest pose); rotations by slerp
+;;;   override = an optional rotation in the skeleton's frame (the body's:
+;;;              the frame the base matrix maps into), turning joint j about
+;;;              its own origin on top of the clip: R' = qp^-1 * Q * qp * R,
+;;;              qp the parent's rotation in that frame. An absolute
+;;;              override sets the joint's rotation in that frame outright
+;;;              (R' = qp^-1 * Q): its position still follows its parents,
+;;;              its orientation does not (a torch held level while the arm
+;;;              swings)
+;;;   global   = (root ? base : global[parent]) * local
+;;;   skin     = global * inverse-bind
+;;; Parents come before children (the converter refuses any other order),
+;;; so one pass in order poses the whole skeleton.
+;;;
+;;; Two implementations of the same pose, which test-guard-skin checks agree:
+;;;   skin-pose!        the reference, in sigil-geometry's forms: quat-slerp!,
+;;;                     mat4-from-trs!, two mat4-mul! per joint
+;;;   skin-pose-fused!  the same maths with each joint's transforms as 3x4
+;;;                     rows and its global rotation as a quaternion, so a
+;;;                     joint costs about 50 float reads and 40 writes
+;;;                     instead of about 140 and 100 (the web measured the
+;;;                     reference at 0.35-0.42 ms a pose for 16 joints)
+;;; Both fill the rows; only the reference fills the mat4 globals and skins
+;;; (skin-pose-global, skin-pose-skin). skin-pose-point! and
+;;; skin-pose-direction! read the rows, so they work after either.
+;;;
+;;; skin-pose-rows is what the shader reads: three vec4 rows per joint
+;;; (the top three rows of each skin matrix; the fourth is 0 0 0 1): N joints
+;;; are `uniform vec4 bones[3N]`, 3N uniform vectors. The guard's shader has
+;;; 12 more (two mat4s, four vec4s), so under sigil-graphics 0.12-0.13's 1 KiB
+;;; (64 vectors) a skeleton can have at most 17 joints; under 0.14's 192
+;;; vectors, 60.
+;;;
+;;; Allocation: skin-pose! allocates nothing. Every temporary lives in the
+;;; pose; loops are top-level procedures (a named let conses under native
+;;; codegen, see sigil-geometry's README); test/test-guard-skin.sgl counts
+;;; the GC's allocations over 200 calls against a positive control.
+;;;
+;;; The shapes (vectors, so a record costs nothing to reach):
+;;;   skeleton  #(skeleton n names parents rest-t rest-r rest-s ibm base)
+;;;             rest-t/rest-s: vector of vec3, rest-r: vector of quat (x y z
+;;;             w), ibm: vector of mat4, base: vector of mat4 or #f per joint
+;;;   clip      #(clip duration channels): channels a vector, per joint, of
+;;;             #(rotation translation scale), each #f or a channel
+;;;   channel   #(channel nkeys times values step?) (times and values
+;;;             float32 bytevectors; values 4 floats a key for a rotation,
+;;;             3 otherwise)
+;;;   pose      see make-skin-pose
+
+(define-library (phantom guard skin)
+  (import (sigil core)
+          (sigil math)
+          (sigil geometry))
+
+  (export make-skeleton skeleton-count skeleton-joint-index skeleton-parent skeleton-inverse-bind
+          make-clip clip-duration
+          make-skin-pose skin-pose! skin-pose-fused! skin-pose-rows skin-pose-skin skin-pose-global skin-pose-skin!
+          skin-override! skin-override-absolute! skin-clear-overrides! skin-pose-point! skin-pose-direction!)
+
+  (begin
+
+    (define (f@ bv i) (bytevector-ieee-single-ref bv (* 4 i)))
+    (define (f! bv i x) (bytevector-ieee-single-set! bv (* 4 i) x))
+
+    (define (floats->bytevector xs)
+      (let ((bv (make-bytevector (* 4 (length xs)) 0)))
+        (let loop ((i 0) (xs xs))
+          (unless (null? xs)
+            (f! bv i (inexact (car xs)))
+            (loop (+ i 1) (cdr xs))))
+        bv))
+
+    ;; --- the skeleton ------------------------------------------------------------
+
+    ;; joints: a list of (name parent (tx ty tz) (qx qy qz qw) (sx sy sz)
+    ;; (16 inverse-bind floats, column-major) base), base being 16 floats
+    ;; for a root joint (parent -1) and #f otherwise.
+    (define (make-skeleton joints)
+      (let* ((n (length joints))
+             (jv (list->vector joints))
+             (field (lambda (k) (vector-map (lambda (j) (list-ref j k)) jv))))
+        (vector-for-each
+         (lambda (j)
+           (let ((p (list-ref j 1)) (i (vector-index-of jv j)))
+             (unless (< p i) (error "make-skeleton: a joint comes before its parent" (list-ref j 0)))
+             (when (and (< p 0) (not (list-ref j 6))) (error "make-skeleton: a root joint has no base" (list-ref j 0)))))
+         jv)
+        (let* ((ibm (vector-map (lambda (j) (floats->bytevector (list-ref j 5))) jv))
+               (base (vector-map (lambda (j) (and (list-ref j 6) (floats->bytevector (list-ref j 6)))) jv))
+               (ibm34 (make-bytevector (* 48 n) 0))
+               (base34 (make-bytevector (* 48 n) 0))
+               (baseq (make-bytevector (* 16 n) 0)))
+          (let fill ((j 0))
+            (when (< j n)
+              (mat4->rows! ibm34 (* 12 j) (vector-ref ibm j))
+              (when (vector-ref base j)
+                (mat4->rows! base34 (* 12 j) (vector-ref base j))
+                (let ((q (quat-from-mat4 (vector-ref base j))))
+                  (let copy ((k 0)) (when (< k 4) (f! baseq (+ (* 4 j) k) (f@ q k)) (copy (+ k 1))))))
+              (fill (+ j 1))))
+          (vector 'skeleton n
+                  (field 0) (field 1)
+                  (vector-map (lambda (j) (floats->bytevector (list-ref j 2))) jv)
+                  (vector-map (lambda (j) (floats->bytevector (list-ref j 3))) jv)
+                  (vector-map (lambda (j) (floats->bytevector (list-ref j 4))) jv)
+                  ibm base ibm34 base34 baseq))))
+
+    ;; the top three rows of a column-major mat4, row-major, at float o
+    (define (mat4->rows! dst o m)
+      (let loop ((k 0))
+        (when (< k 12)
+          (f! dst (+ o k) (f@ m (+ (* 4 (modulo k 4)) (quotient k 4))))
+          (loop (+ k 1)))))
+
+    (define (vector-index-of v x)
+      (let loop ((i 0)) (cond ((= i (vector-length v)) -1) ((eq? (vector-ref v i) x) i) (else (loop (+ i 1))))))
+
+    (define (skeleton-count s) (vector-ref s 1))
+    (define (skeleton-parent s j) (vector-ref (vector-ref s 3) j))
+    (define (skeleton-inverse-bind s j) (vector-ref (vector-ref s 7) j))
+    (define (skeleton-joint-index s name)
+      (let ((names (vector-ref s 2)))
+        (let loop ((i 0))
+          (cond ((= i (vector-length names)) (error "skeleton: no joint" name))
+                ((string=? (vector-ref names i) name) i)
+                (else (loop (+ i 1)))))))
+
+    ;; --- clips ---------------------------------------------------------------------
+
+    ;; channels: a list of (joint path interpolation times values), path
+    ;; 'rotation 'translation or 'scale, interpolation 'linear or 'step,
+    ;; times and values lists of numbers (as the sidecar has them).
+    (define (make-clip skeleton duration channels)
+      (let ((per (make-vector (skeleton-count skeleton) #f)))
+        (let fill ((j 0)) (when (< j (vector-length per)) (vector-set! per j (vector #f #f #f)) (fill (+ j 1))))
+        (for-each
+         (lambda (c)
+           (let* ((j (list-ref c 0)) (path (list-ref c 1)) (times (list-ref c 3)) (values (list-ref c 4))
+                  (w (if (eq? path 'rotation) 4 3))
+                  (slot (case path ((rotation) 0) ((translation) 1) ((scale) 2) (else (error "make-clip: path" path)))))
+             (unless (= (length values) (* w (length times))) (error "make-clip: values do not match the keys" j path))
+             (when (null? times) (error "make-clip: a channel with no keys" j path))
+             (vector-set! (vector-ref per j) slot
+                          (vector 'channel (length times) (floats->bytevector times) (floats->bytevector values)
+                                  (eq? (list-ref c 2) 'step)))))
+         channels)
+        (vector 'clip (inexact duration) per)))
+
+    (define (clip-duration c) (vector-ref c 1))
+
+    ;; --- a pose ----------------------------------------------------------------------
+
+    ;; #(pose skeleton globals skins rows overrides q qa qb qp qo t ta tb s L absolute?
+    ;;   g34 gq Q Lb T): the fused path's 3x4 globals, global rotations, and scratch
+    (define (make-skin-pose skeleton)
+      (let* ((n (skeleton-count skeleton))
+             (mats (lambda () (let ((v (make-vector n #f))) (let f ((i 0)) (when (< i n) (vector-set! v i (make-mat4)) (f (+ i 1)))) v))))
+        (vector 'pose skeleton (mats) (mats) (make-bytevector (* n 48) 0) (make-vector n #f)
+                (make-quat) (make-quat) (make-quat) (make-quat) (make-quat)
+                (make-vec3) (make-vec3) (make-vec3) (make-vec3) (make-mat4) (make-vector n #f)
+                (make-bytevector (* 48 n) 0) (make-bytevector (* 16 n) 0) (make-bytevector 16 0) (make-bytevector 48 0)
+                (make-bytevector 16 0))))
+
+    (define (skin-pose-rows p) (vector-ref p 4))
+    (define (skin-pose-skin p j) (vector-ref (vector-ref p 3) j))
+    (define (skin-pose-global p j) (vector-ref (vector-ref p 2) j))
+
+    ;; A rotation (a quat, the caller's: it is read, not copied, at each
+    ;; skin-pose!) turning joint j about its origin in the skeleton's frame;
+    ;; #f removes it.
+    (define (skin-override! p j q) (vector-set! (vector-ref p 5) j q) (vector-set! (vector-ref p 16) j #f))
+    ;; q is joint j's whole rotation in the skeleton's frame (for the bind
+    ;; pose's orientation, q is the rotation of the inverse of its inverse bind)
+    (define (skin-override-absolute! p j q) (vector-set! (vector-ref p 5) j q) (vector-set! (vector-ref p 16) j #t))
+    (define (skin-clear-overrides! p) (vector-fill! (vector-ref p 5) #f) (vector-fill! (vector-ref p 16) #f))
+
+    ;; A point / direction given in the bind pose's frame (a vertex's frame),
+    ;; carried by joint j's skin matrix into the posed frame: what a vertex
+    ;; bound to j alone would do. dst is a vec3.
+    (define (skin-pose-point! dst p j v) (rows-apply! dst (vector-ref p 4) (* 12 j) v 1.0))
+    (define (skin-pose-direction! dst p j v) (rows-apply! dst (vector-ref p 4) (* 12 j) v 0.0))
+    (define (rows-apply! dst rows o v w)
+      (let ((x (f@ v 0)) (y (f@ v 1)) (z (f@ v 2)))
+        (vec3-set! dst
+                   (+ (* (f@ rows o) x) (* (f@ rows (+ o 1)) y) (* (f@ rows (+ o 2)) z) (* (f@ rows (+ o 3)) w))
+                   (+ (* (f@ rows (+ o 4)) x) (* (f@ rows (+ o 5)) y) (* (f@ rows (+ o 6)) z) (* (f@ rows (+ o 7)) w))
+                   (+ (* (f@ rows (+ o 8)) x) (* (f@ rows (+ o 9)) y) (* (f@ rows (+ o 10)) z) (* (f@ rows (+ o 11)) w)))))
+    ;; joint j's skin matrix as a mat4 (from the rows; the fourth row 0 0 0 1)
+    (define (skin-pose-skin! dst p j)
+      (let ((r (vector-ref p 4)) (o (* 12 j)))
+        (f! dst 0 (f@ r o)) (f! dst 4 (f@ r (+ o 1))) (f! dst 8 (f@ r (+ o 2))) (f! dst 12 (f@ r (+ o 3)))
+        (f! dst 1 (f@ r (+ o 4))) (f! dst 5 (f@ r (+ o 5))) (f! dst 9 (f@ r (+ o 6))) (f! dst 13 (f@ r (+ o 7)))
+        (f! dst 2 (f@ r (+ o 8))) (f! dst 6 (f@ r (+ o 9))) (f! dst 10 (f@ r (+ o 10))) (f! dst 14 (f@ r (+ o 11)))
+        (f! dst 3 0.0) (f! dst 7 0.0) (f! dst 11 0.0) (f! dst 15 1.0)
+        dst))
+
+    ;; The key before t (the last key whose time <= t), searched from i.
+    (define (key-at times n t i)
+      (if (and (< (+ i 1) n) (not (< t (f@ times (+ i 1)))))
+          (key-at times n t (+ i 1))
+          i))
+
+    ;; channel at t into dst (a quat for a rotation, else a vec3)
+    (define (sample-rotation! dst ch t qa qb)
+      (let* ((n (vector-ref ch 1)) (times (vector-ref ch 2)) (vals (vector-ref ch 3))
+             (i (key-at times n t 0)))
+        (quat-set! qa (f@ vals (* 4 i)) (f@ vals (+ (* 4 i) 1)) (f@ vals (+ (* 4 i) 2)) (f@ vals (+ (* 4 i) 3)))
+        (if (or (vector-ref ch 4) (= (+ i 1) n) (< t (f@ times 0)))
+            (quat-copy! dst qa)
+            (let ((j (+ i 1)))
+              (quat-set! qb (f@ vals (* 4 j)) (f@ vals (+ (* 4 j) 1)) (f@ vals (+ (* 4 j) 2)) (f@ vals (+ (* 4 j) 3)))
+              (quat-slerp! dst qa qb (/ (- t (f@ times i)) (- (f@ times j) (f@ times i))))))))
+
+    (define (sample-vec3! dst ch t va vb)
+      (let* ((n (vector-ref ch 1)) (times (vector-ref ch 2)) (vals (vector-ref ch 3))
+             (i (key-at times n t 0)))
+        (vec3-set! va (f@ vals (* 3 i)) (f@ vals (+ (* 3 i) 1)) (f@ vals (+ (* 3 i) 2)))
+        (if (or (vector-ref ch 4) (= (+ i 1) n) (< t (f@ times 0)))
+            (vec3-copy! dst va)
+            (let ((j (+ i 1)))
+              (vec3-set! vb (f@ vals (* 3 j)) (f@ vals (+ (* 3 j) 1)) (f@ vals (+ (* 3 j) 2)))
+              (vec3-lerp! dst va vb (/ (- t (f@ times i)) (- (f@ times j) (f@ times i))))))))
+
+    ;; Pose p from clip (or #f for the rest pose) at time t (seconds, clamped
+    ;; to the clip's keys; loop it yourself), blended toward the rest pose by
+    ;; rest (0..1). Fills the globals, the skins and the rows.
+    (define (skin-pose! p clip t rest)
+      (pose-joint! p (vector-ref p 1) (and clip (vector-ref clip 2)) (inexact t) (inexact rest) 0))
+
+    (define (pose-joint! p sk chans t rest j)
+      (when (< j (vector-ref sk 1))
+        (let ((q (vector-ref p 6)) (qa (vector-ref p 7)) (qb (vector-ref p 8))
+              (qp (vector-ref p 9)) (qo (vector-ref p 10))
+              (tr (vector-ref p 11)) (va (vector-ref p 12)) (vb (vector-ref p 13))
+              (sc (vector-ref p 14)) (L (vector-ref p 15))
+              (rest-t (vector-ref (vector-ref sk 4) j))
+              (rest-r (vector-ref (vector-ref sk 5) j))
+              (rest-s (vector-ref (vector-ref sk 6) j))
+              (ch (and chans (vector-ref chans j)))
+              (parent (vector-ref (vector-ref sk 3) j))
+              (G (vector-ref (vector-ref p 2) j)))
+          ;; rotation
+          (if (and ch (vector-ref ch 0))
+              (begin (sample-rotation! q (vector-ref ch 0) t qa qb)
+                     (when (> rest 0.0) (quat-slerp! q q rest-r rest)))
+              (quat-copy! q rest-r))
+          ;; translation and scale
+          (if (and ch (vector-ref ch 1))
+              (begin (sample-vec3! tr (vector-ref ch 1) t va vb)
+                     (when (> rest 0.0) (vec3-lerp! tr tr rest-t rest)))
+              (vec3-copy! tr rest-t))
+          (if (and ch (vector-ref ch 2))
+              (begin (sample-vec3! sc (vector-ref ch 2) t va vb)
+                     (when (> rest 0.0) (vec3-lerp! sc sc rest-s rest)))
+              (vec3-copy! sc rest-s))
+          (let ((pm (if (< parent 0) (vector-ref (vector-ref sk 8) j) (vector-ref (vector-ref p 2) parent)))
+                (o (vector-ref (vector-ref p 5) j)))
+            ;; an override turns the joint about its origin in the skeleton's frame
+            (when o
+              (quat-from-mat4! qp pm)
+              (quat-conjugate! qo qp)
+              (if (vector-ref (vector-ref p 16) j)
+                  (quat-mul! q qo o)
+                  (begin
+                    (quat-mul! qo qo o)
+                    (quat-mul! qo qo qp)
+                    (quat-mul! q qo q))))
+            (mat4-from-trs! L tr q sc)
+            (mat4-mul! G pm L))
+          (let ((S (vector-ref (vector-ref p 3) j)))
+            (mat4-mul! S G (vector-ref (vector-ref sk 7) j))
+            (write-rows! (vector-ref p 4) (* j 12) S)))
+        (pose-joint! p sk chans t rest (+ j 1))))
+
+    ;; --- the fused path --------------------------------------------------------------
+
+    (define (skin-pose-fused! p clip t rest)
+      (fused-joint! p (vector-ref p 1) (and clip (vector-ref clip 2)) (inexact t) (inexact rest) 0))
+
+    ;; slerp of two quaternions given as numbers into Q (4 floats)
+    (define (slerp4! Q ax ay az aw bx by bz bw u)
+      (let* ((d (+ (* ax bx) (* ay by) (* az bz) (* aw bw)))
+             (sign (if (< d 0.0) -1.0 1.0))
+             (c (* sign d)))
+        (if (> c 0.9995)
+            (let* ((x (+ ax (* u (- (* sign bx) ax)))) (y (+ ay (* u (- (* sign by) ay))))
+                   (z (+ az (* u (- (* sign bz) az)))) (w (+ aw (* u (- (* sign bw) aw))))
+                   (l (sqrt (+ (* x x) (* y y) (* z z) (* w w)))))
+              (f! Q 0 (/ x l)) (f! Q 1 (/ y l)) (f! Q 2 (/ z l)) (f! Q 3 (/ w l)))
+            (let* ((th (acos (min 1.0 c))) (is (/ 1.0 (sin th)))
+                   (wa (* (sin (* (- 1.0 u) th)) is)) (wb (* sign (sin (* u th)) is)))
+              (f! Q 0 (+ (* wa ax) (* wb bx))) (f! Q 1 (+ (* wa ay) (* wb by)))
+              (f! Q 2 (+ (* wa az) (* wb bz))) (f! Q 3 (+ (* wa aw) (* wb bw)))))))
+
+    ;; channel ch (w floats a key: 4 for a rotation, slerped; 3 otherwise,
+    ;; lerped) at t into Q. No loops and no set! on locals: a named let or a
+    ;; mutated local can allocate under native codegen.
+    (define (sample! Q ch t w)
+      (let* ((n (vector-ref ch 1)) (times (vector-ref ch 2)) (vals (vector-ref ch 3))
+             (i (key-at times n t 0)) (a (* w i)))
+        (if (or (vector-ref ch 4) (= (+ i 1) n) (< t (f@ times 0)))
+            (begin
+              (f! Q 0 (f@ vals a)) (f! Q 1 (f@ vals (+ a 1))) (f! Q 2 (f@ vals (+ a 2)))
+              (when (= w 4) (f! Q 3 (f@ vals (+ a 3)))))
+            (let ((b (+ a w)) (u (/ (- t (f@ times i)) (- (f@ times (+ i 1)) (f@ times i)))))
+              (if (= w 4)
+                  (slerp4! Q (f@ vals a) (f@ vals (+ a 1)) (f@ vals (+ a 2)) (f@ vals (+ a 3))
+                           (f@ vals b) (f@ vals (+ b 1)) (f@ vals (+ b 2)) (f@ vals (+ b 3)) u)
+                  (begin
+                    (f! Q 0 (+ (f@ vals a) (* u (- (f@ vals b) (f@ vals a)))))
+                    (f! Q 1 (+ (f@ vals (+ a 1)) (* u (- (f@ vals (+ b 1)) (f@ vals (+ a 1))))))
+                    (f! Q 2 (+ (f@ vals (+ a 2)) (* u (- (f@ vals (+ b 2)) (f@ vals (+ a 2))))))))))))
+
+    ;; Q = Q + r * (v - Q), three floats (toward the rest pose)
+    (define (lerp3-toward! Q v r)
+      (f! Q 0 (+ (f@ Q 0) (* r (- (f@ v 0) (f@ Q 0)))))
+      (f! Q 1 (+ (f@ Q 1) (* r (- (f@ v 1) (f@ Q 1)))))
+      (f! Q 2 (+ (f@ Q 2) (* r (- (f@ v 2) (f@ Q 2))))))
+    (define (copy3! Q v) (f! Q 0 (f@ v 0)) (f! Q 1 (f@ v 1)) (f! Q 2 (f@ v 2)))
+
+    ;; dst (3x4 rows at do) = a (at ao) * b (at bo), both affine 3x4 row-major
+    (define (affine-mul! dst do a ao b bo)
+      (let ((a00 (f@ a ao)) (a01 (f@ a (+ ao 1))) (a02 (f@ a (+ ao 2))) (a03 (f@ a (+ ao 3)))
+            (a10 (f@ a (+ ao 4))) (a11 (f@ a (+ ao 5))) (a12 (f@ a (+ ao 6))) (a13 (f@ a (+ ao 7)))
+            (a20 (f@ a (+ ao 8))) (a21 (f@ a (+ ao 9))) (a22 (f@ a (+ ao 10))) (a23 (f@ a (+ ao 11)))
+            (b00 (f@ b bo)) (b01 (f@ b (+ bo 1))) (b02 (f@ b (+ bo 2))) (b03 (f@ b (+ bo 3)))
+            (b10 (f@ b (+ bo 4))) (b11 (f@ b (+ bo 5))) (b12 (f@ b (+ bo 6))) (b13 (f@ b (+ bo 7)))
+            (b20 (f@ b (+ bo 8))) (b21 (f@ b (+ bo 9))) (b22 (f@ b (+ bo 10))) (b23 (f@ b (+ bo 11))))
+        (f! dst do (+ (* a00 b00) (* a01 b10) (* a02 b20)))
+        (f! dst (+ do 1) (+ (* a00 b01) (* a01 b11) (* a02 b21)))
+        (f! dst (+ do 2) (+ (* a00 b02) (* a01 b12) (* a02 b22)))
+        (f! dst (+ do 3) (+ (* a00 b03) (* a01 b13) (* a02 b23) a03))
+        (f! dst (+ do 4) (+ (* a10 b00) (* a11 b10) (* a12 b20)))
+        (f! dst (+ do 5) (+ (* a10 b01) (* a11 b11) (* a12 b21)))
+        (f! dst (+ do 6) (+ (* a10 b02) (* a11 b12) (* a12 b22)))
+        (f! dst (+ do 7) (+ (* a10 b03) (* a11 b13) (* a12 b23) a13))
+        (f! dst (+ do 8) (+ (* a20 b00) (* a21 b10) (* a22 b20)))
+        (f! dst (+ do 9) (+ (* a20 b01) (* a21 b11) (* a22 b21)))
+        (f! dst (+ do 10) (+ (* a20 b02) (* a21 b12) (* a22 b22)))
+        (f! dst (+ do 11) (+ (* a20 b03) (* a21 b13) (* a22 b23) a23))))
+
+    (define (fused-joint! p sk chans t rest j)
+      (when (< j (vector-ref sk 1))
+        (let* ((Q (vector-ref p 19)) (Lb (vector-ref p 20)) (T (vector-ref p 21))
+               (g34 (vector-ref p 17)) (gq (vector-ref p 18))
+               (rest-r (vector-ref (vector-ref sk 5) j))
+               (ch (and chans (vector-ref chans j)))
+               (parent (vector-ref (vector-ref sk 3) j))
+               (qpv (if (< parent 0) (vector-ref sk 11) gq))
+               (qpo (* 4 (if (< parent 0) j parent))))
+          ;; the local rotation into Q: the clip's (or the rest pose's), toward rest
+          (if (and ch (vector-ref ch 0))
+              (begin (sample! Q (vector-ref ch 0) t 4)
+                     (when (> rest 0.0)
+                       (slerp4! Q (f@ Q 0) (f@ Q 1) (f@ Q 2) (f@ Q 3)
+                                (f@ rest-r 0) (f@ rest-r 1) (f@ rest-r 2) (f@ rest-r 3) rest)))
+              (begin (f! Q 0 (f@ rest-r 0)) (f! Q 1 (f@ rest-r 1)) (f! Q 2 (f@ rest-r 2)) (f! Q 3 (f@ rest-r 3))))
+          (let ((o (vector-ref (vector-ref p 5) j)))
+            (when o (override! Q qpv qpo o (vector-ref (vector-ref p 16) j))))
+          ;; the global rotation qp * q, for the children's overrides
+          (quat-mul-into! gq (* 4 j) qpv qpo Q 0)
+          ;; the local 3x4, then global = parent (or base) * local, skin = global * inverse bind
+          (local-trs! Lb Q T ch t rest (vector-ref (vector-ref sk 4) j) (vector-ref (vector-ref sk 6) j))
+          (let ((go (* 12 j)))
+            (if (< parent 0)
+                (affine-mul! g34 go (vector-ref sk 10) go Lb 0)
+                (affine-mul! g34 go g34 (* 12 parent) Lb 0))
+            (affine-mul! (vector-ref p 4) go g34 go (vector-ref sk 9) go)))
+        (fused-joint! p sk chans t rest (+ j 1))))
+
+    ;; dst[do..] = a[ao..] * b[bo..], quaternions (x y z w)
+    (define (quat-mul-into! dst do a ao b bo)
+      (let ((ax (f@ a ao)) (ay (f@ a (+ ao 1))) (az (f@ a (+ ao 2))) (aw (f@ a (+ ao 3)))
+            (bx (f@ b bo)) (by (f@ b (+ bo 1))) (bz (f@ b (+ bo 2))) (bw (f@ b (+ bo 3))))
+        (f! dst do (- (+ (* aw bx) (* ax bw) (* ay bz)) (* az by)))
+        (f! dst (+ do 1) (+ (- (* aw by) (* ax bz)) (* ay bw) (* az bx)))
+        (f! dst (+ do 2) (+ (- (+ (* aw bz) (* ax by)) (* ay bx)) (* az bw)))
+        (f! dst (+ do 3) (- (* aw bw) (* ax bx) (* ay by) (* az bz)))))
+
+    ;; Q (the local rotation) under an override O, qp the parent's global
+    ;; rotation at qv[qo..]: relative qp^-1 * O * qp * Q, absolute qp^-1 * O
+    (define (override! Q qv qo O absolute?)
+      (let* ((px (- (f@ qv qo))) (py (- (f@ qv (+ qo 1)))) (pz (- (f@ qv (+ qo 2)))) (pw (f@ qv (+ qo 3)))   ; qp^-1
+             (ox (f@ O 0)) (oy (f@ O 1)) (oz (f@ O 2)) (ow (f@ O 3))
+             (cx (- (+ (* pw ox) (* px ow) (* py oz)) (* pz oy)))                ; c = qp^-1 * O
+             (cy (+ (- (* pw oy) (* px oz)) (* py ow) (* pz ox)))
+             (cz (+ (- (+ (* pw oz) (* px oy)) (* py ox)) (* pz ow)))
+             (cw (- (* pw ow) (* px ox) (* py oy) (* pz oz))))
+        (if absolute?
+            (begin (f! Q 0 cx) (f! Q 1 cy) (f! Q 2 cz) (f! Q 3 cw))
+            (let* ((qx (- px)) (qy (- py)) (qz (- pz)) (qw pw)                    ; qp
+                   (dx (- (+ (* cw qx) (* cx qw) (* cy qz)) (* cz qy)))           ; d = c * qp
+                   (dy (+ (- (* cw qy) (* cx qz)) (* cy qw) (* cz qx)))
+                   (dz (+ (- (+ (* cw qz) (* cx qy)) (* cy qx)) (* cz qw)))
+                   (dw (- (* cw qw) (* cx qx) (* cy qy) (* cz qz)))
+                   (rx (f@ Q 0)) (ry (f@ Q 1)) (rz (f@ Q 2)) (rw (f@ Q 3)))
+              (f! Q 0 (- (+ (* dw rx) (* dx rw) (* dy rz)) (* dz ry)))           ; Q = d * Q
+              (f! Q 1 (+ (- (* dw ry) (* dx rz)) (* dy rw) (* dz rx)))
+              (f! Q 2 (+ (- (+ (* dw rz) (* dx ry)) (* dy rx)) (* dz rw)))
+              (f! Q 3 (- (* dw rw) (* dx rx) (* dy ry) (* dz rz)))))))
+
+    ;; the local 3x4 T * R * S into Lb: R from Q, T and S sampled (via the
+    ;; scratch T) or the rest pose's, blended toward rest
+    (define (local-trs! Lb Q T ch t rest rest-t rest-s)
+      (if (and ch (vector-ref ch 1))
+          (begin (sample! T (vector-ref ch 1) t 3) (when (> rest 0.0) (lerp3-toward! T rest-t rest)))
+          (copy3! T rest-t))
+      (let ((tx (f@ T 0)) (ty (f@ T 1)) (tz (f@ T 2)))
+        (if (and ch (vector-ref ch 2))
+            (begin (sample! T (vector-ref ch 2) t 3) (when (> rest 0.0) (lerp3-toward! T rest-s rest)))
+            (copy3! T rest-s))
+        (let* ((sx (f@ T 0)) (sy (f@ T 1)) (sz (f@ T 2))
+               (qx (f@ Q 0)) (qy (f@ Q 1)) (qz (f@ Q 2)) (qw (f@ Q 3))
+               (x2 (+ qx qx)) (y2 (+ qy qy)) (z2 (+ qz qz))
+               (xx (* qx x2)) (yy (* qy y2)) (zz (* qz z2))
+               (xy (* qx y2)) (xz (* qx z2)) (yz (* qy z2))
+               (wx (* qw x2)) (wy (* qw y2)) (wz (* qw z2)))
+          (f! Lb 0 (* sx (- 1.0 (+ yy zz)))) (f! Lb 1 (* sy (- xy wz))) (f! Lb 2 (* sz (+ xz wy))) (f! Lb 3 tx)
+          (f! Lb 4 (* sx (+ xy wz))) (f! Lb 5 (* sy (- 1.0 (+ xx zz)))) (f! Lb 6 (* sz (- yz wx))) (f! Lb 7 ty)
+          (f! Lb 8 (* sx (- xz wy))) (f! Lb 9 (* sy (+ yz wx))) (f! Lb 10 (* sz (- 1.0 (+ xx yy)))) (f! Lb 11 tz))))
+
+    ;; rows r = 0..2 of S (column-major: element c*4+r) at float o
+    (define (write-rows! rows o S)
+      (f! rows o (f@ S 0)) (f! rows (+ o 1) (f@ S 4)) (f! rows (+ o 2) (f@ S 8)) (f! rows (+ o 3) (f@ S 12))
+      (f! rows (+ o 4) (f@ S 1)) (f! rows (+ o 5) (f@ S 5)) (f! rows (+ o 6) (f@ S 9)) (f! rows (+ o 7) (f@ S 13))
+      (f! rows (+ o 8) (f@ S 2)) (f! rows (+ o 9) (f@ S 6)) (f! rows (+ o 10) (f@ S 10)) (f! rows (+ o 11) (f@ S 14)))))
