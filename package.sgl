@@ -20,7 +20,7 @@
 
 (package
   name: "phantom-burn"
-  version: "0.0.1"
+  version: "0.1.0"
   sigil: "0.22.10"
   description: "A first-person stealth and hacking game in Crash The Stack's world"
   license: "GPL-3.0-or-later"
