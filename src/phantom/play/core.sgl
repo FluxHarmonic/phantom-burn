@@ -31,7 +31,7 @@
           play-data play-guard play-guard-world
           play-light play-light-01 play-visibility play-shape play-light-state
           play-badge? play-learned-tier play-way-out play-near-lift? play-lift-tier play-best-after
-          play-torch TORCH-RANGE TORCH-COS TORCH-LIGHT
+          play-torch TORCH-RANGE TORCH-COS TORCH-LIGHT play-ignored-kinds
           play-outcome play-ticks play-start-walker
           play-near-exit? GUARD-START-LEG PICKUP-REACH EXIT-REACH
           play-hearing play-take-steps! play-last-heard play-runner-room
@@ -95,7 +95,14 @@
     ;;  lift (the service lift, called with the deck), else #f
     ;;  42 the patrol's flashlight (Phantom 0.1, item 4): #(on? x y z dx dy
     ;;  dz), the lamp and its unit beam, from the guard's pose at the tick's start
-    (define (play? p) (and (vector? p) (= (vector-length p) 43) (eq? (vector-ref p 0) 'play)))
+    ;;  43 the distractions the unit noticed (item 7: STAFF commands work
+    ;;  once): ((kind . INDEX-or-#f) ...), INDEX the device whose sounding it
+    ;;  noticed while that goes on, then #f: the kind is ignored from then on
+    (define (play? p) (and (vector? p) (= (vector-length p) 44) (eq? (vector-ref p 0) 'play)))
+    ;; the device kinds the unit ignores now (Gibson patched them)
+    (define (play-ignored-kinds p)
+      (let loop ((l (vector-ref p 43)) (acc '()))
+        (cond ((null? l) (reverse acc)) ((cdr (car l)) (loop (cdr l) acc)) (else (loop (cdr l) (cons (car (car l)) acc))))))
     (define (play-torch p) (vector-ref p 42))
     (define (play-way-out p) (vector-ref p 41))
     ;; within reach of the service lift's call point (by your last place)
@@ -183,7 +190,7 @@
                         (make-devices data) (make-deck) (device-approaches data gw) 0.0
                         (make-vector (device-count data) 0.0) (camera-views data)
                         (let ((ts (terminal-targets data))) (vector #f 0 -1 0.0 '(idle) 0.0 ts -1 ts)) #f
-                        units 0 #f #f #f (vector #f 0.0 0.0 0.0 0.0 1.0 0.0))))
+                        units 0 #f #f #f (vector #f 0.0 0.0 0.0 0.0 1.0 0.0) '())))
         p))
 
     ;; PRACTICE: a capture in the sim resets only its room (D38). The runner
@@ -261,6 +268,7 @@
       (vector-set! p 40 #f)
       (vector-set! p 41 #f)
       (vector-set! p 42 (vector #f 0.0 0.0 0.0 0.0 1.0 0.0))
+      (vector-set! p 43 '())
       p)
 
     ;; The path from the guard to you (for playback: how much of the guard
@@ -496,10 +504,22 @@
       (when (vector-ref p 23)
         (let* ((data (vector-ref p 1)) (dv (vector-ref p 29)) (g (vector-ref p 3))
                (ds (play-devices data)))
+          ;; a noticed distraction that has stopped sounding: its kind is
+          ;; ignored from now on (not in the sim: its lessons repeat)
+          (when (= (lesson-count data) 0)
+            (for-each (lambda (e)
+                        (when (and (cdr e) (not (memq (devices-state dv (cdr e)) '(ringing running))))
+                          (set-cdr! e #f)))
+                      (vector-ref p 43)))
           (let loop ((i 0))
             (when (< i (vector-length ds))
-              (let ((level (play-device-level p i)))
-                (when (> level (+ (vector-ref p 20) (vector-ref p 32)))
+              (let* ((level (play-device-level p i))
+                     (seen (assq (device-kind (vector-ref ds i)) (vector-ref p 43))))
+                (when (and (> level (+ (vector-ref p 20) (vector-ref p 32)))
+                           ;; a kind it was fooled by once, it ignores (design section 5)
+                           (or (not seen) (eqv? (cdr seen) i)))
+                  (unless (or seen (> (lesson-count data) 0))
+                    (vector-set! p 43 (cons (cons (device-kind (vector-ref ds i)) i) (vector-ref p 43))))
                   (let* ((d (vector-ref ds i))
                          (room (device-room d))
                          (fz (room-floor (vector-ref (play-rooms data) room)))
@@ -720,8 +740,8 @@
         (camera-saw "CAMERA COVERAGE EXTENDED" "Smile. You were on my camera.")
         (dark-room "EMERGENCY LIGHTING: ~" "You like the dark. I've fixed the dark.")
         ;; P3 (the device API, §5), drafts for David (D18)
-        (phone-rang "PHONES MUTED ON THIS FLOOR" "Nobody was calling. I know who dialled.")
-        (printer-ran "PRINTERS LOCKED" "Print jobs from nobody. Cute.")
+        (phone-rang "PATROLS IGNORE PHONES" "Nobody was calling. I know who dialled.")
+        (printer-ran "PATROLS IGNORE PRINTERS" "Print jobs from nobody. Cute.")
         (vent-running "HVAC OVERRIDES REVOKED" "Loud in here, wasn't it? Not anymore.")
         (blinds-moved "BLINDS LOCKED" "Keeping the city out? It's my city.")))
     (define DUCT-PATCH '("DUCT GRATES BOLTED" "Crawling through my walls? I've bolted them."))

@@ -308,3 +308,40 @@
   (test "by the lifts, out of its view, it sees nothing"
     (let ((r (stair-camera-after ALL-ON 2.0 2.0 3)))
       (assert-true (< (car r) 0.05)))))
+
+;;; STAFF commands work once (Phantom 0.1, item 7; design section 5: "a
+;;; distraction (a printer, a phone): guards ignore that kind of device").
+;;; The meeting room's phone rings and the patrol goes to it; once it has
+;;; stopped ringing the patrol ignores phones for the rest of the attempt,
+;;; and the patch note says PATROLS IGNORE PHONES. A printer still works.
+
+(test-group "STAFF works once"
+  (test "the phone pulls the patrol once; rung again it is ignored; a printer still pulls it"
+    (let* ((p (fresh14)) (w (stand 19.6 11.5)) (g (play-guard p)) (dv (play-devices-state p))
+           (phone (device-index DATA14 'meeting-phone)) (printer (device-index DATA14 'print-printer))
+           (tick (lambda () (play-tick! p w ALL-ON 1.0 2.0))))
+      (devices-run! dv phone 'ring)
+      ;; the first ring: noticed; answered or rung out; then the kind is patched
+      (let loop ((k 0) (hi 0))
+        (if (and (< k (* 60 120))
+                 (not (and (memq 'phone (play-ignored-kinds p)) (= (guard-state g) CALM))))
+            (begin (tick) (loop (+ k 1) (max hi (guard-state g))))
+            (begin (display (list 'first-ring 'hi hi 'secs (/ k 60.0) 'ignored (play-ignored-kinds p))) (newline)
+                   (assert-true (>= hi SEARCHING))
+                   (assert-true (equal? (play-ignored-kinds p) '(phone))))))
+      ;; the second ring: ignored
+      (devices-run! dv phone 'ring)
+      (let loop ((k 0) (hi 0))
+        (if (< k (* 60 12))
+            (begin (tick) (loop (+ k 1) (max hi (guard-state g))))
+            (begin (display (list 'second-ring 'hi hi)) (newline)
+                   (assert-equal CALM hi))))
+      (assert-true (equal? (car (car (play-patches p))) "PATROLS IGNORE PHONES"))
+      ;; a printer, near the unit, still pulls it
+      (guard-place! g 17.0 6.5 0.0 1.0)
+      (devices-run! dv printer 'print)
+      (let loop ((k 0) (hi 0))
+        (if (< k (* 60 6))
+            (begin (tick) (loop (+ k 1) (max hi (guard-state g))))
+            (begin (display (list 'printer 'hi hi)) (newline)
+                   (assert-true (>= hi SEARCHING))))))))

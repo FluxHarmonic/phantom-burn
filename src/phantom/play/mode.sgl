@@ -172,6 +172,19 @@
 
     (define (say! line) (set! *message* line) (set! *message-t* 2.5))
 
+    ;; STAFF works once (Phantom 0.1, item 7): when the unit starts ignoring a
+    ;; kind of device, say so, once
+    (define *ignored-said* '())
+    (define (say-ignored!)
+      (for-each (lambda (k)
+                  (unless (memq k *ignored-said*)
+                    (set! *ignored-said* (cons k *ignored-said*))
+                    (say! (case k
+                            ((phone) "GIBSON PATCHED IT: PATROLS IGNORE PHONES NOW")
+                            ((printer) "GIBSON PATCHED IT: PATROLS IGNORE PRINTERS NOW")
+                            (else "GIBSON PATCHED IT")))))
+                (play-ignored-kinds *core*)))
+
     ;; --- the deck (P3, the device API §3) -----------------------------------------
 
     ;; The game's 6th hook, once a frame before the ticks: whether the deck
@@ -366,6 +379,7 @@
            (set! *use* #f)
            (apply-use! (play-use! *core* w render-circuit-on?)))
          (set! *message-t* (max 0.0 (- *message-t* TICK)))
+         (if (null? (play-ignored-kinds *core*)) (set! *ignored-said* '()) (say-ignored!))
          (if (play-terminal-open? *core*)
              (apply-deck! (note-command! (play-terminal-step! *core* render-circuit-on?) 'terminal))
              (apply-deck! (note-command! (play-deck! *core* w *deck-held* render-circuit-on?) 'deck)))

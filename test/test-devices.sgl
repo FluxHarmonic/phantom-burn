@@ -205,7 +205,7 @@
         (assert-true (memq 'robot-searching kinds))
         (assert-true (memq 'robot-lost kinds))
         (assert-true (memq 'robot-back kinds)))
-      (assert-true (equal? (car (car (play-patches p))) "PHONES MUTED ON THIS FLOOR"))))
+      (assert-true (equal? (car (car (play-patches p))) "PATROLS IGNORE PHONES"))))
   (test "a print job pulls the unit to the printer, off its route"
     (let* ((with (run-pull PRINTER #t (* 60 45) 2))
            (without (run-pull PRINTER #f (* 60 45) 2)))
