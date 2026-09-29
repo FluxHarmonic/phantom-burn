@@ -6,8 +6,8 @@
 #   PHANTOM_WEB_DIR=build/remote-web-<sha> scripts/stage-web build/site
 #
 # The tree:
-#   /                 site/ as it is (the landing, style.css, fonts/, shots/,
-#                     the icons, the Flux Harmonic mark), copied whole
+#   /                 site/'s tracked files (the landing, style.css, fonts/,
+#                     shots/, the icons, the Flux Harmonic mark)
 #   /404.html         a real 404 for any missing path (without it Pages answers
 #                     a missing path with the root page and a 200:
 #                     topics/cloudflare-pages-serves-index-for-a-missing-path)
@@ -63,8 +63,16 @@ VERSION="$(sed -n 's/^  version: "\([0-9][0-9.]*\)".*/\1/p' package.sgl | head -
 case "$VERSION" in [0-9]*.[0-9]*.[0-9]*) ;; *) say "REFUSED: cannot read the package version from package.sgl ('$VERSION')"; exit 1 ;; esac
 grep -c 'data-wasm="phantom-burn"' "$WEB/index.html" | grep -qx 1 || { say "REFUSED: $WEB/index.html does not say data-wasm=\"phantom-burn\" exactly once; the page changed shape"; exit 1; }
 
+# site/'s TRACKED files only: an untracked file there (an editor backup, a
+# stray shot) would otherwise be staged, verified and published with the rest.
+# (A tracked file with local changes is copied as it is on disk; publish-web
+# refuses a checkout with tracked changes.)
 mkdir -p "$DIR"
-cp -r site/. "$DIR/"
+git ls-files site | while IFS= read -r f; do
+  mkdir -p "$DIR/$(dirname "${f#site/}")"
+  cp "$f" "$DIR/${f#site/}"
+done
+[ "$(find "$DIR" -type f | wc -l)" = "$(git ls-files site | wc -l)" ] || { say "REFUSED: copied $(find "$DIR" -type f | wc -l) of site/'s $(git ls-files site | wc -l) tracked files"; exit 1; }
 mkdir -p "$DIR/$SLUG"
 cp "$WEB/index.html" "$DIR/$SLUG/"
 SHA16="$(sha256sum "$WEB/phantom-burn.wasm" | cut -c1-16)"
