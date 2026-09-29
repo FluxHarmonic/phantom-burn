@@ -150,6 +150,7 @@
     (define C-GIBSON (hex "#B36BFF"))
     (define CHAT-COLS 52)
     (define CHAT-HOLD 4.0)
+    (define TYPE-CPS 45.0)          ; a typed line's characters a second
     (define (wrap text cols)          ; -> list of strings, broken at spaces
       (let loop ((words (split-words text)) (line "") (out '()))
         (cond ((null? words) (reverse (if (string=? line "") out (cons line out))))
@@ -166,10 +167,16 @@
              (bottom (+ oy (* 228 k))))   ; above the prompt and its HOLD TO RUN
         (let loop ((ls lines) (y bottom) (n 0))
           (unless (null? ls)
-            (let* ((e (car ls)) (text (car e)) (age (cadr e))
+            (let* ((e (car ls)) (full (car e)) (age (cadr e))
                    (speaker (if (pair? (cddr e)) (caddr e) 'crash))
+                   ;; typed out (Phantom 0.1: the transmission on arrival): the
+                   ;; first TYPE-CPS a second of it so far
+                   (typed? (and (pair? (cddr e)) (pair? (cdddr e)) (cadddr e)))
+                   (text (if typed?
+                             (substring full 0 (max 0 (min (string-length full) (exact (floor (* age TYPE-CPS))))))
+                             full))
                    (gib? (eq? speaker 'gibson))
-                   (hold (+ CHAT-HOLD (/ (string-length text) 16.0)))
+                   (hold (+ CHAT-HOLD (/ (string-length full) 16.0)))
                    (a (* (max 0.0 (min 1.0 (- (+ hold 1.0) age))) (if (= n 0) 1.0 0.75)))
                    (label (if gib? "# " "CRASH  "))
                    (rows (wrap text (- CHAT-COLS (string-length label))))

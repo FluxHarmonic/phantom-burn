@@ -43,7 +43,10 @@
           play-hold? play-after-tick! play-frame! play-hud!
           play-held! play-mode-devices play-mode-deck play-mode-terminal
           play-mode-practice? play-mode-crash play-mode-lesson play-mode-practice-done?
-          play-sounding play-mode-set-best! play-mode-set-on-record! play-mode-phase play-mode-show-end!)
+          play-sounding play-mode-set-best! play-mode-set-on-record! play-mode-phase play-mode-show-end!
+          play-mode-pause! play-mode-resume! play-mode-paused? play-mode-tap!
+          play-mode-set-on-resume! play-mode-set-on-fullscreen! play-mode-set-on-quit!
+          play-mode-set-practiced! play-mode-set-touch! play-mode-transmission)
 
   (begin
 
@@ -109,7 +112,11 @@
         (render-hide-part! 'badge (play-badge-drawer? data))
         (set! *phase* 'play)
         (set! *timer* 0.0)
-        (set! *fade-in* FADE-IN)))
+        (set! *fade-in* FADE-IN)
+        ;; Crash's transmission on a real floor, once a load
+        (set! *tx-time* (if *practice* -1.0 0.0))
+        (set! *tx-dismissed* #f) (set! *tx-said* #f)
+        (set! *paused* #f)))
 
     ;; The runner at the arrival spot, every circuit on: the floor as it
     ;; was when you arrived (D12).
@@ -140,7 +147,99 @@
       (set! *use* #f)
       (practice-reset-room! *practice* *core*))
 
-    (define (play-hold?) (or (not (eq? *phase* 'play)) (and *core* (play-terminal-open? *core*))))
+    (define (play-hold?) (or *paused* (not (eq? *phase* 'play)) (and *core* (play-terminal-open? *core*))))
+
+    ;; --- the pause panel (Phantom 0.1: David, "remove the HTML instructions
+    ;; overlay"): in the canvas, the objective in a line, the controls, and
+    ;; RESUME, FULLSCREEN and (in the site's flow) QUIT TO TITLE. The game holds
+    ;; while it is up. Escape (or P, or the phone's PAUSE) opens it; on the web
+    ;; the page also opens it when the pointer lock is lost in play, which is
+    ;; what Escape does there. Opening it while open does nothing.
+    (define *paused* #f)
+    (define *pause-sel* 0)
+    (define *pause-rows* '())        ; ((label x0 y0 x1 y1) ...), as last drawn, for taps
+    (define *on-resume* #f)          ; the shell's (the web page takes the pointer again)
+    (define *on-fullscreen* #f)      ; the shell's toggle
+    (define *on-quit* #f)            ; the shell's way back to the title (the flow)
+    (define *touch* #f)              ; a phone: its controls in the panel
+    (define (play-mode-set-on-resume! f) (set! *on-resume* f))
+    (define (play-mode-set-on-fullscreen! f) (set! *on-fullscreen* f))
+    (define (play-mode-set-on-quit! f) (set! *on-quit* f))
+    (define (play-mode-set-touch! on?) (set! *touch* on?))
+    (define (play-mode-paused?) *paused*)
+    (define (play-mode-pause!)
+      (when (and *core* (not *paused*) (memq *phase* '(play caught)))
+        (set! *paused* #t) (set! *pause-sel* 0)
+        (display "phantom-burn: paused") (newline)))
+    (define (play-mode-resume!)
+      (when *paused*
+        (set! *paused* #f)
+        (display "phantom-burn: resumed") (newline)
+        (when *on-resume* (*on-resume*))))
+    (define (pause-items)
+      (append '("RESUME")
+              (if *on-fullscreen* '("FULLSCREEN") '())
+              (if *on-quit* '("QUIT TO TITLE") '())))
+    (define (pause-choose! label)
+      (cond ((string=? label "RESUME") (play-mode-resume!))
+            ((string=? label "FULLSCREEN") (when *on-fullscreen* (*on-fullscreen*)))
+            ((string=? label "QUIT TO TITLE") (set! *paused* #f) (when *on-quit* (*on-quit*)))))
+    (define (pause-key! k)
+      (let ((items (pause-items)))
+        (case k
+          ((w up) (set! *pause-sel* (max 0 (- *pause-sel* 1))))
+          ((s down) (set! *pause-sel* (min (- (length items) 1) (+ *pause-sel* 1))))
+          ((escape p pause) (play-mode-resume!))
+          ((return enter space f use e) (pause-choose! (list-ref items (min *pause-sel* (- (length items) 1)))))
+          (else #f))
+        #t))
+    ;; a tap or click at (x y) in canvas pixels: a pause row, or dismissing
+    ;; Crash's transmission. #t when taken.
+    (define (play-mode-tap! x y)
+      (cond (*paused*
+             (let ((hit (let look ((rs *pause-rows*))
+                          (cond ((null? rs) #f)
+                                ((let ((r (car rs))) (and (>= x (list-ref r 1)) (<= x (list-ref r 3))
+                                                          (>= y (list-ref r 2)) (<= y (list-ref r 4))))
+                                 (car rs))
+                                (else (look (cdr rs)))))))
+               (when hit (pause-choose! (car hit)))
+               #t))
+            ((transmission-showing?) (set! *tx-dismissed* #t) #t)
+            (else #f)))
+
+    ;; --- Crash's transmission on arrival (Phantom 0.1): the objective, in his
+    ;; voice, typed out on the deck like his lines in the sim; it does not
+    ;; hold the game, fades on its own, and ENTER (or a tap) dismisses it. A
+    ;; player who has not finished PRACTICE gets one line suggesting it first.
+    (define TX-LINES
+      '("Floor 14. Offices. Nothing opens up there without FACILITIES."
+        "The FM keeps a badge in the desk drawer and the password under the monitor. And somebody left a session open in the server closet."
+        "Then get out. The stairwell takes the badge. The service lift behind the kitchen takes FACILITIES."))
+    (define TX-NEW "New to this? Run the sim first. Gibson doesn't give lessons.")
+    (define TX-START 1.5)            ; s after arrival
+    (define TX-GAP 1.0)              ; s between one line typed and the next
+    (define TX-CPS 45.0)             ; characters a second
+    (define *practiced* #t)
+    (define (play-mode-set-practiced! on?) (set! *practiced* on?))
+    (define *tx-time* -1.0)          ; s since arrival, or -1: no transmission
+    (define *tx-dismissed* #f)
+    (define *tx-said* #f)
+    (define (tx-lines) (if *practiced* TX-LINES (cons TX-NEW TX-LINES)))
+    ;; ((text age crash typed) ...), newest first, the lines begun so far
+    (define (play-mode-transmission)
+      (if (or (< *tx-time* 0.0) *tx-dismissed*)
+          '()
+          (let loop ((ls (tx-lines)) (t0 TX-START) (acc '()))
+            (if (or (null? ls) (< *tx-time* t0))
+                acc
+                (loop (cdr ls) (+ t0 (/ (string-length (car ls)) TX-CPS) TX-GAP)
+                      (cons (list (car ls) (- *tx-time* t0) 'crash #t) acc))))))
+    (define (transmission-showing?)
+      (let ((ls (play-mode-transmission)))
+        (and (pair? ls)
+             (let* ((e (car ls)) (hold (+ 4.0 (/ (string-length (car e)) 16.0))))   ; the HUD's CHAT-HOLD
+               (< (cadr e) (+ hold 1.0))))))
 
     ;; --- keys: use, and the light keys ------------------------------------------
 
@@ -155,6 +254,9 @@
     (define (play-mode-set-dev! on?) (set! *dev* on?))
     (define (play-press! k)
       (cond ((not *core*) #f)
+            (*paused* (pause-key! k))
+            ((memq k '(escape p pause)) (play-mode-pause!) #t)
+            ((and (memq k '(return enter)) (transmission-showing?)) (set! *tx-dismissed* #t) #t)
             ;; at the terminal: W/S or up/down select, F (USE) runs, C closes
             ((and (eq? *phase* 'play) (play-terminal-open? *core*))
              (case k
@@ -381,6 +483,11 @@
     (define (play-after-tick! w)
       (set! *timer* (+ *timer* TICK))
       (set! *fade-in* (max 0.0 (- *fade-in* TICK)))
+      (when (>= *tx-time* 0.0)
+        (set! *tx-time* (+ *tx-time* TICK))
+        (when (and (not *tx-said*) (>= *tx-time* TX-START))
+          (set! *tx-said* #t)
+          (display "phantom-burn: transmission ") (display (car (tx-lines))) (newline)))
       (set! *badge-flash* (max 0.0 (- *badge-flash* TICK)))
       (set! *eye-flash* (max 0.0 (- *eye-flash* TICK)))
       (cond
@@ -567,10 +674,12 @@
           ;; the deck's prompt, bottom left (the shell's draw)
           ;; Crash's lines, stacked above the deck's prompt (the shell's draw)
           (when *practice* (crash-lines-draw! w h k (play-mode-crash)))
+          (unless *practice* (crash-lines-draw! w h k (play-mode-transmission)))
           (cond ((and (eq? *phase* 'play) (play-terminal-open? *core*))
                  (terminal-draw! w h k (play-mode-terminal) (play-mode-devices)))
                 ((not (play-hold?)) (deck-hud-draw! w h k (play-mode-deck))))
-          (draw-fades! w h ts))))
+          (draw-fades! w h ts)
+          (when *paused* (draw-pause! w h ts)))))
 
     ;; The eye (design §3): one glyph that opens in five steps with how
     ;; visible you are (light x stance x motion).
@@ -725,6 +834,48 @@
          (set-color 0.0 0.0 0.0 (/ *fade-in* FADE-IN))
          (with-blend-mode 'normal (draw-filled-rect 0 0 w h))
          (set-color 1.0 1.0 1.0))))
+
+    ;; The pause panel: a dark box in the middle, PAUSED, the floor's aim in a
+    ;; line, the controls (the phone's or the keyboard's), and the rows.
+    (define (draw-pause! w h ts)
+      (let* ((lines (append
+                     (list (if *practice* "PRACTICE: CRASH'S SIM. HIS LINES SHOW YOU HOW"
+                               "GET FACILITIES, THEN OUT: THE STAIRWELL OR THE SERVICE LIFT")
+                           "")
+                     (if *touch*
+                         '("LEFT THUMB MOVES   RIGHT THUMB LOOKS"
+                           "C CROUCHES   USE USES   HOLD DECK TO COMMAND"
+                           "PAUSE, TOP RIGHT, TO COME BACK HERE")
+                         '("WASD MOVE   MOUSE LOOKS   SHIFT SNEAKS   C CROUCHES"
+                           "Q AND E LEAN   F USES   T OR RIGHT MOUSE: THE DECK"
+                           "ESC PAUSES"))))
+             (items (pause-items))
+             (lh (* 12 ts))
+             (bw (+ (apply max (map (lambda (l) (text-width l ts)) lines)) (* 24 ts)))
+             (bh (+ (* lh (+ 3 (length lines) (length items))) (* 12 ts)))
+             (x0 (/ (- w bw) 2)) (y0 (/ (- h bh) 2))
+             (tx (+ x0 (* 12 ts))))
+        (set-color 0.0 0.0 0.0 0.5)
+        (with-blend-mode 'normal (draw-filled-rect 0 0 w h))
+        (set-color 0.05 0.04 0.1 0.92)
+        (with-blend-mode 'normal (draw-filled-rect x0 y0 bw bh))
+        (set-color 0.8 0.85 1.0)
+        (draw-text "PAUSED" tx (+ y0 (* 8 ts)) ts)
+        (let loop ((ls lines) (i 2))
+          (unless (null? ls)
+            (set-color 0.6 0.66 0.8)
+            (draw-text (car ls) tx (+ y0 (* 8 ts) (* i lh)) ts)
+            (loop (cdr ls) (+ i 1))))
+        (set! *pause-rows*
+              (let loop ((is items) (i 0) (acc '()))
+                (if (null? is)
+                    (reverse acc)
+                    (let ((y (+ y0 (* 8 ts) (* (+ 3 (length lines) i) lh))))
+                      (if (= i *pause-sel*) (set-color 0.302 0.949 0.851) (set-color 0.8 0.85 1.0))
+                      (draw-text (string-append (if (= i *pause-sel*) "> " "  ") (car is)) tx y ts)
+                      (loop (cdr is) (+ i 1)
+                            (cons (list (car is) x0 (- y (* 2 ts)) (+ x0 bw) (+ y (* 10 ts))) acc))))))
+        (set-color 1.0 1.0 1.0)))
 
     ;; m:ss
     (define (clock secs)

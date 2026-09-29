@@ -56,16 +56,11 @@
     #lights button { color: #CCE6FF; background: rgba(13, 10, 26, 0.72); border: 1px solid rgba(204, 230, 255, 0.4);
                      border-radius: 6px; font: inherit; padding: 0 8px; height: 40px; }
     #lights button.down { background: rgba(204, 230, 255, 0.35); }
-    /* play: how to play, over the bottom of the frame until the first input */
-    #how { display: none; position: fixed; left: 50%; bottom: 64px; transform: translateX(-50%); z-index: 3;
-           max-width: min(92vw, 640px); padding: 10px 14px; box-sizing: border-box; pointer-events: none;
-           color: #CCE6FF; background: rgba(13, 10, 26, 0.82); border: 1px solid rgba(204, 230, 255, 0.35);
-           border-radius: 6px; font: 13px/1.45 ui-monospace, monospace; transition: opacity 0.6s; }
-    #how b { font-weight: bold; color: #E6F2FF; }
-    #how .phone { display: none; }
-    #how .start { display: none; color: #4DF2D9; font-weight: bold; }
-    body.ontitle #how .start { display: inline; }
-    @media (pointer: coarse) { #how .phone { display: inline; } #how .desk { display: none; } }
+    /* Substratic's fullscreen button (substratic.js, 8630cc5; the same as
+       Harkfell's), top left here: the phone's crouch button is top right */
+    #sub-fs{position:fixed;left:10px;top:10px;z-index:3;width:36px;height:36px;border-radius:6px;border:1px solid rgba(220,235,255,.35);
+            background:rgba(10,12,20,.45);color:rgba(220,235,255,.8);padding:0;display:flex;align-items:center;justify-content:center;opacity:.6}
+    body.dev #sub-fs{left:64px}
   </style>
 </head>
 <body>
@@ -73,7 +68,7 @@
   <div class="ring" id="lring"></div><div class="knob" id="lknob"></div>
   <div class="ring" id="rring"></div><div class="knob" id="rknob"></div>
   <div id="crouch">C</div>
-  <div id="lights"><button data-k="deck" data-hold="1">DECK</button><button data-k="use">USE</button></div>
+  <div id="lights"><button data-k="deck" data-hold="1">DECK</button><button data-k="use">USE</button><button data-k="pause">PAUSE</button></div>
   <div id="lab">
     <button id="labbtn">LAB</button>
     <div id="labgrid">
@@ -88,13 +83,6 @@
     </div>
   </div>
   <div id="status"></div>
-  <div id="how">
-    <span class="start">Choose PRACTICE (your first run: Crash walks you through it) or INFILTRATE: arrows or W/S, then any key; or tap one.<br></span>
-    <b>Get the FACILITIES badge from the FM office desk, then leave by the stairwell door under the mezzanine. One of Gibson's security units patrols; if it hunts you down, the floor restarts.</b><br>
-    <span class="deck"><b>Your deck:</b> <span class="desk">aim at a phone, a printer, a vent, the blinds or a ceiling light and hold the right mouse button (or T).</span><span class="phone">aim at a phone, a printer, a vent, the blinds or a ceiling light and hold DECK.</span> The prompt at the bottom left says what it will do; STAFF can ring and print, the badge makes you FACILITIES. The camera by the lifts watches the lit floor it tints.<br></span>
-    <span class="desk">Click, then WASD and mouse. Shift sneaks (it hears you on hard floors), C crouches, Q and E lean. F uses: the corridor's light panel (it wants the badge; the dark hides you) and the stairwell door's card reader. A ringing phone or a running printer draws the guard to look. The eye at the bottom shows how visible you are.</span>
-    <span class="phone">Left thumb moves, right thumb looks, C crouches. Walk to the badge to take it. USE (top right) works the corridor's light panel (it wants the badge; the dark hides you) and the stairwell door's card reader. A ringing phone or a running printer draws the guard to look. The eye at the bottom shows how visible you are.</span>
-  </div>
   <script>
   // Phantom Burn's page. The generic loader (sigil-web-app.js) boots the
   // wasm, forwards keydown/keyup and runs the frame loop. This page adds:
@@ -189,8 +177,7 @@
       };
     })();
     // P1's game (the guard, the badge, the exit) is the default (?play=0 for
-    // the walk alone; never on the title screen), with a how-to-play line
-    // that goes away a moment after the first key, click or touch.
+    // the walk alone; never on the title screen).
     var playing = params.get("play") !== "0" && !params.has("title");
     if (playing) document.body.classList.add("playing");
     // The flow (the site's front door): the title in the root-console room,
@@ -200,27 +187,72 @@
     // exactly what they did.
     var flow = playing && flowQuery;
     if (flow) document.body.classList.add("flow");
-    var how = document.getElementById("how");
-    var hideTimer = null;
-    function showHow() {
-      if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
-      how.style.display = "block"; how.style.opacity = "1";
-      ["keydown", "mousedown", "touchstart"].forEach(function (ev) {
-        window.addEventListener(ev, function once() {
-          window.removeEventListener(ev, once, true);
-          if (!hideTimer) hideTimer = setTimeout(function () { how.style.opacity = "0";
-            hideTimer = setTimeout(function () { how.style.display = "none"; hideTimer = null; }, 600); }, 2500);
-        }, true);
+    // (Phantom 0.1, David: no HTML instructions over the game. PRACTICE
+    // teaches the controls, Crash's transmission gives floor 14's aim, and
+    // the pause panel in the canvas lists the controls.)
+
+    // Fullscreen: Substratic's button (substratic.js 8630cc5, its fullscreen
+    // section as is; Harkfell has the same one), and the pause panel's
+    // FULLSCREEN row through phantomFullscreen(). Entering it in play takes
+    // the pointer again (browsers drop it on the change) and, on a phone,
+    // asks for landscape where the browser allows it.
+    var FS_ENTER = "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5";
+    var FS_EXIT = "M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5";
+    function fsIcon(d) {
+      var ns = "http://www.w3.org/2000/svg";
+      var svg = document.createElementNS(ns, "svg");
+      svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("width", "20"); svg.setAttribute("height", "20");
+      svg.setAttribute("aria-hidden", "true");
+      var p = document.createElementNS(ns, "path");
+      p.setAttribute("d", d); p.setAttribute("fill", "none"); p.setAttribute("stroke", "currentColor");
+      p.setAttribute("stroke-width", "2"); p.setAttribute("stroke-linecap", "square");
+      svg.appendChild(p);
+      return svg;
+    }
+    function inPlay() { return document.body.classList.contains("playing") && !document.body.classList.contains("ontitle"); }
+    function phantomLock() {
+      var c = document.getElementById("stage");
+      if (inPlay() && c && c.requestPointerLock && document.pointerLockElement !== c && !document.body.classList.contains("touch")) {
+        try { var r = c.requestPointerLock(); if (r && r.catch) r.catch(function () {}); } catch (err) { /* no gesture: the next click locks */ }
+      }
+    }
+    function phantomFullscreen() {
+      if (!document.documentElement.requestFullscreen) return;
+      if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen().catch(function () {});
+    }
+    if (document.documentElement.requestFullscreen) {
+      var fs = document.createElement("button");
+      fs.id = "sub-fs";
+      var fsShow = function () {
+        var on = !!document.fullscreenElement;
+        fs.replaceChildren(fsIcon(on ? FS_EXIT : FS_ENTER));
+        fs.title = on ? "Leave fullscreen" : "Fullscreen";
+        fs.setAttribute("aria-label", fs.title);
+      };
+      fsShow();
+      document.addEventListener("fullscreenchange", fsShow);
+      fs.addEventListener("click", phantomFullscreen);
+      document.body.appendChild(fs);
+      document.addEventListener("fullscreenchange", function () {
+        if (!document.fullscreenElement) return;
+        phantomLock();
+        if (screen.orientation && screen.orientation.lock && document.body.classList.contains("touch")) screen.orientation.lock("landscape").catch(function () {});
       });
     }
-    if (playing) showHow();
-    // the game says which part of the flow it is in; back on the title, the
-    // how-to line and its start line show again
+
+    // the game says which part of the flow it is in
     (function () {
       var log1 = console.log.bind(console);
       console.log = function () {
         var line = Array.prototype.join.call(arguments, " ");
-        if (line === "phantom-burn: mode title") { document.body.classList.add("ontitle"); showHow(); }
+        if (line === "phantom-burn: mode title") document.body.classList.add("ontitle");
+        // the pause panel: taps go to its rows while it is up
+        if (line === "phantom-burn: paused") document.body.classList.add("paused");
+        if (line === "phantom-burn: resumed") document.body.classList.remove("paused");
+        // the game's RESUME takes the pointer again (a desktop in play), and
+        // its FULLSCREEN row toggles fullscreen, in the input's own task
+        if (line === "phantom-burn: lock") phantomLock();
+        if (line === "phantom-burn: fullscreen") phantomFullscreen();
         if (line === "phantom-burn: mode game") document.body.classList.remove("ontitle");
         // the menu picked the floor that is not loaded: reload onto it
         if (line.indexOf("phantom-burn: go ") === 0) {
@@ -364,12 +396,23 @@
       // on the title: where the tap or click landed, in canvas pixels (the
       // menu's items are targets); in the game it is the pointer lock's click
       canvas.addEventListener("pointerdown", function (e) {
-        if (!flow || !document.body.classList.contains("ontitle")) return;
+        if (!flow || !(document.body.classList.contains("ontitle") || document.body.classList.contains("paused"))) return;
         var r = canvas.getBoundingClientRect();
         app.dispatch("tap", Math.round((e.clientX - r.left) * canvas.width / r.width) + "," + Math.round((e.clientY - r.top) * canvas.height / r.height));
       });
       canvas.addEventListener("click", function () {
+        // (paused, a click is for the panel's rows: RESUME takes the pointer)
+        if (document.body.classList.contains("paused")) return;
         if (document.pointerLockElement !== canvas && canvas.requestPointerLock) canvas.requestPointerLock();
+      });
+      // the pointer let go in play (Escape, or leaving fullscreen with
+      // Escape: one change, so one pause): the pause panel. The game ignores
+      // a pause while paused.
+      var hadLock = false;
+      document.addEventListener("pointerlockchange", function () {
+        var locked = document.pointerLockElement === canvas;
+        if (hadLock && !locked && inPlay()) app.dispatch("pause", "lock");
+        hadLock = locked;
       });
       document.addEventListener("mousemove", function (e) {
         if (document.pointerLockElement === canvas && (e.movementX || e.movementY)) {

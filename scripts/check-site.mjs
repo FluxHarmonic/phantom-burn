@@ -24,6 +24,10 @@
 //              own sha256; the page's data-wasm names it; the old
 //              /<game>/phantom-burn.wasm is gone (a 404) (t-5b3251: in
 //              production the wasm is in R2)
+//   overlay    the page has no HTML instructions overlay (#how)
+//   transmission  floor 14 (?go=14, the flow) prints Crash's transmission
+//   fullscreen Substratic's button, and the page's "phantom-burn: fullscreen"
+//              line (the pause panel's row), each call requestFullscreen
 //   boots      the game at /<game>/ and its title (?title=1) boot in headless
 //              Chrome through this same server with no console error, and
 //              fetched the wasm from /w/<sha16>/ and nowhere else
@@ -158,6 +162,32 @@ for (const [q, want] of [["hud=0", "game"], ["title=1", "title"]]) {
   const out = r.out;
   r.status === 0 && /shot ->/.test(out) ? ok("boots", `the ${want} boots at /${SLUG}/?${q} with no console error`)
     : bad("boots", `the ${want} at /${SLUG}/?${q}: rc ${r.status}: ${out.split("\n").filter((l) => !/^retry/.test(l)).slice(0, 3).join(" | ").slice(0, 300)}`);
+}
+// Phantom 0.1 (David): no HTML instructions over the game; Crash's
+// transmission on floor 14 instead; Substratic's fullscreen button, and the
+// pause panel's FULLSCREEN row through the page's line.
+{
+  const page = fs.readFileSync(path.join(DIR, SLUG, "index.html"), "utf8");
+  /id="how"/.test(page) ? bad("overlay", "the page still has the #how instructions overlay") : ok("overlay", "no HTML instructions overlay");
+  const con = "/tmp/phantom-check-site-floor14.console";
+  // the spy: requestFullscreen counted, never entered (headless Chrome refuses without a gesture anyway)
+  const spy = "(() => { let n = 0; Element.prototype.requestFullscreen = function () { n++; return Promise.resolve(); };" +
+              " const b = document.getElementById('sub-fs'); if (b) b.click(); console.log('phantom-burn: fullscreen'); return (b ? 'button ' : 'nobutton ') + n; })()";
+  const r = await new Promise((resolve) => {
+    const ch = spawn("node", [path.join(REPO, "scripts/shot-web.mjs"), DIR, "/tmp/phantom-check-site-floor14.png",
+      "--url", `${BASE}/${SLUG}/`, "--query", "go=14", "--wait", "6000", "--console", con, "--eval", spy]);
+    let o = "";
+    ch.stdout.on("data", (d) => { o += d; }); ch.stderr.on("data", (d) => { o += d; });
+    const kill = setTimeout(() => ch.kill("SIGKILL"), 200000);
+    ch.on("close", (code) => { clearTimeout(kill); resolve({ status: code, out: o }); });
+  });
+  const lines = fs.existsSync(con) ? fs.readFileSync(con, "utf8").split("\n") : [];
+  const tx = lines.find((l) => l.includes("phantom-burn: transmission "));
+  tx ? ok("transmission", `floor 14 (?go=14): ${tx.replace(/^.*phantom-burn: transmission /, "").slice(0, 60)}`)
+     : bad("transmission", `floor 14 (?go=14): no transmission line (rc ${r.status})`);
+  const ev = (r.out.match(/eval: "([^"]*)"/) || [])[1] || "";
+  ev === "button 2" ? ok("fullscreen", "Substratic's button and the pause panel's line each request fullscreen")
+                    : bad("fullscreen", `the fullscreen spy: ${ev || "no result"} (want button 2)`);
 }
 server.close();
 if (m) {
