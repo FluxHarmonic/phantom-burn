@@ -4,7 +4,7 @@
 //
 //   node scripts/webgl-check.mjs --url BASE --mode off|webgl1|late|on
 //                                [--query Q] [--ready RE] [--wait MS]
-//                                [--shot OUT.png] [--cdp N]
+//                                [--shot OUT.png]
 //
 // BASE is the game's page on a server that is already running (e.g.
 // check-site's serve-site on a staged tree: http://127.0.0.1:PORT/badge-in/).
@@ -38,7 +38,6 @@ const MODE = opt("--mode");
 const QUERY = opt("--query", "");
 const READY = new RegExp(opt("--ready", "phantom-burn: ready"));
 const WAIT = parseInt(opt("--wait", "4000"), 10);
-const CDP = parseInt(opt("--cdp", String(9500 + Math.floor(Math.random() * 400))), 10);
 if (!BASE || !["off", "webgl1", "late", "on"].includes(MODE)) {
   console.log("SETUP-FAILED: usage: webgl-check.mjs --url BASE --mode off|webgl1|late|on [--query Q] [--ready RE] [--wait MS] [--shot OUT.png]");
   process.exit(2);
@@ -67,7 +66,7 @@ const gl = MODE === "off"
   : ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--enable-webgl", "--ignore-gpu-blocklist"];
 const chrome = spawn("google-chrome", [
   "--headless=new", "--no-sandbox", "--disable-dev-shm-usage", "--mute-audio", ...gl,
-  `--remote-debugging-port=${CDP}`, `--user-data-dir=${udd}`, "--window-size=960,540", "about:blank",
+  "--remote-debugging-port=0", `--user-data-dir=${udd}`, "--window-size=960,540", "about:blank",
 ], { stdio: "ignore", detached: true, env: { ...process.env, PULSE_SINK: "worker-null" } });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function killChromeGroup(sig) { try { process.kill(-chrome.pid, sig); } catch { /* gone */ } }
@@ -85,9 +84,12 @@ setTimeout(() => {
   shutdown(2);
 }, 150000).unref();
 
-let pageWs = null;
+// Chrome picks its own DevTools port and writes it to DevToolsActivePort in
+// its profile, so this Chrome is the one driven, whatever else is running
+let pageWs = null, CDP = 0;
 for (let i = 0; i < 80 && !pageWs; i++) {
-  try { const ts = await (await fetch(`http://127.0.0.1:${CDP}/json`)).json(); const p = ts.find((t) => t.type === "page"); if (p && p.webSocketDebuggerUrl) pageWs = p.webSocketDebuggerUrl; } catch { /* not up yet */ }
+  try { if (!CDP) CDP = parseInt(fs.readFileSync(udd + "/DevToolsActivePort", "utf8").split("\n")[0], 10) || 0; } catch { /* not written yet */ }
+  if (CDP) try { const ts = await (await fetch(`http://127.0.0.1:${CDP}/json`)).json(); const p = ts.find((t) => t.type === "page"); if (p && p.webSocketDebuggerUrl) pageWs = p.webSocketDebuggerUrl; } catch { /* not up yet */ }
   await sleep(250);
 }
 if (!pageWs) { console.log("SETUP-FAILED: no chrome page target"); shutdown(2); await new Promise(() => {}); }
@@ -136,7 +138,7 @@ const st = await evalJS(`(() => {
     loaderOff: document.querySelectorAll('script[data-substratic-off]').length,
     loader: !!globalThis.SigilWebApp,
     started: !!(globalThis.SigilWebApp && globalThis.SigilWebApp.started),
-    failedText: /Failed to start/.test(document.body.innerText),
+    failedText: /Failed to start|sigil_wasm_start failed/.test(document.body.innerText),
     body: document.body.innerText.slice(0, 400),
   };
 })()`).catch((e) => ({ error: String(e) }));
@@ -165,6 +167,7 @@ if (MODE === "off" || MODE === "webgl1") {
 } else if (MODE === "late") {
   check(st.panel === "late", `the message is up with data-webgl "late" (got ${JSON.stringify(st.panel)})`);
   check(st.visible, "the message is visible");
+  check(/couldn.t give the game a WebGL 2 context/.test(st.text), "it gives the late reason (a context the game could not get)");
   check(wasmReqs.length >= 1, `the wasm was requested (the probe passed: ${wasmReqs.length})`);
   check(lines.some((l) => /no WebGL2 context/.test(l)), "the game said \"no WebGL2 context\"");
   check(!st.failedText, "no \"Failed to start\" left on the page");
