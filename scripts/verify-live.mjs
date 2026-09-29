@@ -7,13 +7,20 @@
 //
 // files         every file of DIR.manifest (but _headers and the @ lines,
 //               functions/ and wrangler.jsonc) is 200 and byte for byte the
-//               staged file, with X-Robots-Tag: noindex, and nothing but .html
-//               comes back as html. The wasm, w/<sha16>/phantom-burn.wasm, is
-//               fetched through the Pages Function (from R2) like any file.
-//               The edge can serve the previous deployment for up to a
-//               minute, so a mismatch is retried for 90 s before it counts.
+//               staged file, with no X-Robots-Tag: noindex (public from 0.1),
+//               and nothing but .html comes back as html. The wasm,
+//               w/<sha16>/phantom-burn.wasm, is fetched through the Pages
+//               Function (from R2) like any file. The edge can serve the
+//               previous deployment for up to a minute, so a mismatch is
+//               retried for 90 s before it counts; every retry is logged.
 // wasm-headers  the wasm: application/wasm, an immutable cache, CORP
 //               same-origin, COEP require-corp (the Function's own headers).
+//               A 404 from the wasm route right after a deploy is retried
+//               after 2, 4 and 8 s, each retry logged, before it counts
+//               (Harkfell's t-975606: twice on 2026-09-29 the R2-backed wasm
+//               answered 404 just after a deploy and 200 seconds later, which
+//               failed a publish whose production was already live).
+// version       /version.json is served no-store as JSON.
 // wasm-wire     the wasm arrives br- or gzip-encoded (a raw request that does
 //               not decompress, asking as a browser asks) and decompresses to
 //               the wasm its name promises. Identity is a FAIL on a deployment;
@@ -46,6 +53,21 @@ const SLUG = (fs.readFileSync(DIR + ".manifest", "utf8").match(/^# game (\S+)$/m
 if (!SLUG) { console.log("SETUP-FAILED: the manifest names no game path (# game)"); process.exit(2); }
 const hide = (s) => s;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// t-975606: the wasm route can answer 404 for a few seconds after a deploy.
+// Fetch it again after 2, 4 and 8 s while it says 404, and say so each time;
+// any other status is returned at once (only the known race is waited out).
+const WASM_BACKOFF = [2000, 4000, 8000];
+async function fetchWasm(url, init, leg) {
+  let r = await fetch(url, init);
+  for (const ms of WASM_BACKOFF) {
+    if (r.status !== 404) break;
+    await r.arrayBuffer();
+    console.log(`  retry ${leg}: ${url.replace(BASE, "")} answered 404; again in ${ms / 1000} s`);
+    await sleep(ms);
+    r = await fetch(url, init);
+  }
+  return r;
+}
 let failed = 0;
 const pass = (leg, what) => console.log(`  ok   ${leg}: ${what}`);
 const fail = (leg, what) => { failed++; console.log(`  FAIL ${leg}: ${hide(what)}`); };
@@ -61,22 +83,26 @@ async function check(f, wantSha) {
   if (r.status !== 200) why.push(`status ${r.status}`);
   if (sha(body) !== wantSha) why.push("bytes differ");
   if (!f.endsWith(".html") && type.startsWith("text/html")) why.push(`served as ${type}`);
-  if (!/noindex/.test(r.headers.get("x-robots-tag") || "")) why.push("no noindex");
+  // the wasm's Function says noindex on purpose (a binary is no page); the site's files must not
+  if (!f.startsWith("w/") && /noindex/.test(r.headers.get("x-robots-tag") || "")) why.push(`X-Robots-Tag: ${r.headers.get("x-robots-tag")}`);
   return why;
 }
 let bad = 0;
 for (const { h, f } of entries) {
   let why = await check(f, h);
-  for (let t = 0; why.length && t < 9; t++) { await sleep(10000); why = await check(f, h); }
+  for (let t = 0; why.length && t < 9; t++) {
+    console.log(`  retry files: ${f}: ${why.join(", ")}; again in 10 s (${t + 1} of 9)`);
+    await sleep(10000); why = await check(f, h);
+  }
   if (why.length) { bad++; fail("files", `${f}: ${why.join(", ")}`); }
 }
-if (!bad) pass("files", `${entries.length} files byte for byte with noindex (the wasm through the Function)`);
+if (!bad) pass("files", `${entries.length} files byte for byte, none noindex (the wasm through the Function)`);
 
 // ---- the wasm -------------------------------------------------------------------------
 const wasm = entries.find((e) => /^w\/[0-9a-f]{16}\/phantom-burn\.wasm$/.test(e.f));
 if (!wasm) fail("wasm-headers", "the manifest names no w/<sha16>/phantom-burn.wasm");
 else {
-  const r = await fetch(`${BASE}/${wasm.f}`, { headers: { "accept-encoding": "br, gzip" } });
+  const r = await fetchWasm(`${BASE}/${wasm.f}`, { headers: { "accept-encoding": "br, gzip" } }, "wasm-headers");
   await r.arrayBuffer();
   const h = (n) => r.headers.get(n) || "";
   const detail = [];
@@ -88,7 +114,7 @@ else {
   else pass("wasm-headers", `${h("content-type")}, ${h("cache-control")}, CORP same-origin, COEP require-corp`);
 
   const url = new URL(`${BASE}/${wasm.f}`);
-  const raw = await new Promise((resolve, reject) => {
+  const rawGet = () => new Promise((resolve, reject) => {
     const lib = url.protocol === "https:" ? https : http;
     const req = lib.get(url, { headers: { "accept-encoding": "br, gzip" } }, (res) => {
       const chunks = [];
@@ -99,6 +125,13 @@ else {
     req.on("error", reject);
     req.setTimeout(120000, () => req.destroy(new Error("timed out after 120 s")));
   }).catch((e) => ({ error: e.message }));
+  let raw = await rawGet();
+  for (const ms of WASM_BACKOFF) {   // t-975606, as fetchWasm
+    if (raw.status !== 404) break;
+    console.log(`  retry wasm-wire: /${wasm.f} answered 404; again in ${ms / 1000} s`);
+    await sleep(ms);
+    raw = await rawGet();
+  }
   const want = wasm.f.split("/")[1];
   if (raw.error) fail("wasm-wire", `${wasm.f}: ${raw.error}`);
   else if (raw.status !== 200) fail("wasm-wire", `${wasm.f} answered ${raw.status}`);
@@ -113,6 +146,16 @@ else {
       else pass("wasm-wire", `${raw.enc}: ${raw.body.length} bytes on the wire for ${decoded.length} (${(100 * raw.body.length / decoded.length).toFixed(1)}%), the wasm its name promises`);
     }
   }
+}
+
+// ---- version --------------------------------------------------------------------------
+{
+  const r = await fetch(`${BASE}/version.json`);
+  await r.arrayBuffer();
+  const cc = r.headers.get("cache-control") || "", ct = r.headers.get("content-type") || "";
+  r.status === 200 && /no-store/.test(cc) && /^application\/json/.test(ct)
+    ? pass("version", `/version.json 200, ${ct}, cache-control ${cc}`)
+    : fail("version", `/version.json ${r.status}, content-type "${ct}", cache-control "${cc}" (want 200 application/json no-store)`);
 }
 
 // ---- redirect -------------------------------------------------------------------------

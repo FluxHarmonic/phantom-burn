@@ -87,7 +87,7 @@ while read -r kw h g; do
   NGATE=$((NGATE+1))
   [ -f "$g" ] && [ "$(sha256sum "$g" | cut -d' ' -f1)" = "$h" ] || { say "REFUSED: $g is not the file that checked $DIR; rerun check-site.mjs"; exit 1; }
 done < "$DIR.verified"
-[ "$NGATE" -ge 3 ] || { say "REFUSED: $DIR.verified names $NGATE gate files, not 3"; exit 1; }
+[ "$NGATE" -ge 4 ] || { say "REFUSED: $DIR.verified names $NGATE gate files, not 4 (check-site.mjs, check-site-pages.mjs, serve-site.mjs, tree-manifest)"; exit 1; }
 HEAD_FULL="$(git rev-parse HEAD)"
 grep -qx "gate-head $HEAD_FULL" "$DIR.verified" || { say "REFUSED: $DIR was checked at another commit; rerun check-site.mjs at HEAD"; exit 1; }
 grep -qx "gate-clean yes" "$DIR.verified" || { say "REFUSED: $DIR was checked from a checkout with tracked changes"; exit 1; }

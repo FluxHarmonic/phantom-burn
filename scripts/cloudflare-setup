@@ -43,10 +43,10 @@
 # publish-web ever deletes an object: keys are content-named and kept, so a
 # cached page always finds the wasm it was built against.
 #
-# The site is a private preview: robots.txt disallows everything, every
-# response says X-Robots-Tag: noindex, and the game lives at a path that is
-# not in the repo (~/.config/phantomburn/slug). A pages.dev preview URL is
-# public too, so the same rules hold there.
+# The site is public from 0.1 (David, 2026-09-29): robots.txt allows
+# everything, only the 404 page says noindex, and the game lives at /badge-in/
+# (/play/, /beta/ and the first unguessable path redirect there). A pages.dev
+# preview URL is public too; it serves the same tree.
 set -eu
 # Credentials: from the environment, or sourced from $PHANTOM_ENV_FILE when
 # that is set (the old default ~/Ops/.env-phantomburn is gone: tokens live in
