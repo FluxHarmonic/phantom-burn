@@ -165,7 +165,11 @@
     (define *touch* #f)              ; a phone: its controls in the panel
     (define (play-mode-set-on-resume! f) (set! *on-resume* f))
     (define (play-mode-set-on-fullscreen! f) (set! *on-fullscreen* f))
-    (define (play-mode-set-on-quit! f) (set! *on-quit* f))
+    (define *quit-label* "QUIT TO TITLE")
+    ;; f the shell's way out; label its row (natively there is no title: QUIT)
+    (define (play-mode-set-on-quit! f . label)
+      (set! *on-quit* f)
+      (when (pair? label) (set! *quit-label* (car label))))
     (define (play-mode-set-touch! on?) (set! *touch* on?))
     (define (play-mode-paused?) *paused*)
     (define (play-mode-pause!)
@@ -180,11 +184,13 @@
     (define (pause-items)
       (append '("RESUME")
               (if *on-fullscreen* '("FULLSCREEN") '())
-              (if *on-quit* '("QUIT TO TITLE") '())))
+              (if *on-quit* (list *quit-label*) '())))
     (define (pause-choose! label)
       (cond ((string=? label "RESUME") (play-mode-resume!))
             ((string=? label "FULLSCREEN") (when *on-fullscreen* (*on-fullscreen*)))
-            ((string=? label "QUIT TO TITLE") (set! *paused* #f) (when *on-quit* (*on-quit*)))))
+            ((string=? label *quit-label*)
+             (set! *paused* #f) (display "phantom-burn: resumed") (newline)
+             (when *on-quit* (*on-quit*)))))
     (define (pause-key! k)
       (let ((items (pause-items)))
         (case k
@@ -657,7 +663,42 @@
             (skin-guard-frame! (vector-ref t 0) (vector-ref t 4) (vector-ref t 5) (vector-ref t 6)
                                (guard-attending? g) (guard-attend-x g) (guard-attend-y g) (guard-attend-z g)))
           (guard-body-draw! *model* (guard-phase g) (guard-state g)
-                            (light-r ls) (light-g ls) (light-b ls)))))
+                            (light-r ls) (light-g ls) (light-b ls))
+          (draw-cleaners! ls))))
+
+    ;; The night cleaners (item 6): G1's skinned robot, recoloured (grey-green
+    ;; overalls, an amber visor), one body each, made once the skin has loaded;
+    ;; posed where the core has it, its walk phase the metres it has walked,
+    ;; lit by the light where it stands, always calm.
+    (define *cleaner-bodies* #f)
+    (define *cleaner-walked* #f)     ; #((metres last-x last-y) ...)
+    (define *cleaner-model* (make-bytevector 64 0))
+    (define (draw-cleaners! ls)
+      (let* ((st (play-cleaners-state *core*)) (n (vector-length st)) (data (play-data *core*)))
+        (when (and (> n 0) (skin-ready?))
+          (unless (and *cleaner-bodies* (= (vector-length *cleaner-bodies*) n))
+            (set! *cleaner-bodies* (make-vector n #f))
+            (set! *cleaner-walked* (make-vector n #f))
+            (let loop ((i 0))
+              (when (< i n)
+                (let ((b (make-skin-body)))
+                  (skin-body-palette! b 0.75 0.95 0.7 1.0 0.62 0.1)
+                  (vector-set! *cleaner-bodies* i b))
+                (loop (+ i 1)))))
+          (let loop ((i 0))
+            (when (< i n)
+              (let ((c (vector-ref st i)))
+                (when c
+                  (let* ((x (vector-ref c 0)) (y (vector-ref c 1))
+                         (wk (or (vector-ref *cleaner-walked* i) (vector 0.0 x y)))
+                         (m (+ (vector-ref wk 0) (sqrt (+ (expt (- x (vector-ref wk 1)) 2) (expt (- y (vector-ref wk 2)) 2))))))
+                    (vector-set! wk 0 m) (vector-set! wk 1 x) (vector-set! wk 2 y)
+                    (vector-set! *cleaner-walked* i wk)
+                    (light-rgb-at! ls data x y 0.0)
+                    (pose! *cleaner-model* x y 0.0 (vector-ref c 2) (vector-ref c 3) 0.0 0.0 0.0)
+                    (skin-body-draw! (vector-ref *cleaner-bodies* i) *cleaner-model* m 0
+                                     (light-r ls) (light-g ls) (light-b ls)))))
+              (loop (+ i 1)))))))
 
     ;; --- the HUD ---------------------------------------------------------------
 
@@ -863,7 +904,7 @@
                          '("LEFT THUMB MOVES   RIGHT THUMB LOOKS"
                            "C CROUCHES   USE USES   HOLD DECK TO COMMAND"
                            "PAUSE, TOP RIGHT, TO COME BACK HERE")
-                         '("WASD MOVE   MOUSE LOOKS   SHIFT SNEAKS   C CROUCHES"
+                         '("WASD MOVES   THE MOUSE LOOKS   SHIFT SNEAKS   C CROUCHES"
                            "Q AND E LEAN   F USES   T OR RIGHT MOUSE: THE DECK"
                            "ESC PAUSES"))))
              (items (pause-items))

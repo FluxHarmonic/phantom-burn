@@ -161,6 +161,7 @@
             ((string=? k "Control") 'control)
             ((string=? k "deck") 'deck)
             ((string=? k "Enter") 'enter)
+            ((string=? k "Escape") 'escape)     ; the pause panel (unlocked: in play the page sends "pause")
             ((string=? k " ") 'space)
             ((= (string-length k) 1) (string->symbol (string (char-downcase (string-ref k 0)))))
             (else #f)))
@@ -221,6 +222,14 @@
         (game-set-play! (vector play-hold? play-after-tick! play-frame! play-hud! play-press! play-held!))
         (play-mode-set-dev! (and (param "dev") #t))
         (when (param "flow") (play-mode-set-on-win! (lambda () (set! *want-title* #t))))
+        ;; the pause panel's rows (Phantom 0.1): RESUME takes the pointer again,
+        ;; FULLSCREEN is the page's, and in the flow QUIT TO TITLE
+        (play-mode-set-on-resume! (lambda () (display "phantom-burn: lock") (newline)))
+        (play-mode-set-on-fullscreen! (lambda () (display "phantom-burn: fullscreen") (newline)))
+        (when (param "flow") (play-mode-set-on-quit! (lambda () (set! *want-title* #t))))
+        ;; Crash suggests the sim to a player who has not finished PRACTICE
+        (play-mode-set-practiced! (and (param "practiced") #t))
+        (when (param "touch") (play-mode-set-touch! #t))
         ;; the floor's best (Phantom 0.1): the page's localStorage, as &best=SECS_INCIDENTS;
         ;; a finish goes back to it as a line
         (play-mode-set-best! (best-param (param "best")))
@@ -344,11 +353,16 @@
       (apply-params!)
       (set! *pressed* '())
       (set! *tap* #f)
-      (set! *menu-sel* (if (string=? *floor* "sim") 0 1))
-      (title-set-menu! MENU-ITEMS *menu-sel* (if (param "practiced") #f "NEW HERE? START WITH PRACTICE"))
+      ;; PRACTICE finished (now or before): the menu points at INFILTRATE
+      (set! *menu-sel* (if (and (string=? *floor* "sim") (not (practiced?))) 0 1))
+      (title-set-menu! MENU-ITEMS *menu-sel* (menu-hint))
       (set! *t-time* 0.0)
       (set! *mode* 'title)
       (display "phantom-burn: mode title") (newline))
+
+    ;; practiced: on this browser before (the page's localStorage), or just now
+    (define (practiced?) (or (and (param "practiced") #t) *said-practiced* (play-mode-practice-done?)))
+    (define (menu-hint) (if (practiced?) #f "NEW HERE? START WITH PRACTICE"))
 
     (define (flow-to-title!)
       (sound-game-stop!)
@@ -380,7 +394,7 @@
         (when *tap*
           (let ((hit (title-menu-hit (gles3-canvas-width) (gles3-canvas-height) (car *tap*) (cdr *tap*))))
             (when hit (set! *menu-sel* hit) (set! go? #t))))
-        (title-set-menu! MENU-ITEMS *menu-sel* (if (param "practiced") #f "NEW HERE? START WITH PRACTICE"))
+        (title-set-menu! MENU-ITEMS *menu-sel* (menu-hint))
         (when go?
           (let ((want (list-ref MENU-FLOORS *menu-sel*)))
             (cond ((string=? want *floor*) (flow-to-game!))
@@ -454,6 +468,10 @@
                  (set! *look-x* 0)
                  (set! *look-y* 0)
                  (set! *pressed* '())
+                 ;; a tap in play: the pause panel's rows, or dismissing Crash's transmission
+                 (when (and *tap* (eq? *mode* 'game))
+                   (play-mode-tap! (car *tap*) (cdr *tap*))
+                   (set! *tap* #f))
                  (game-frame! dt (gles3-canvas-width) (gles3-canvas-height)
                               (make-controls held? pressed dx dy *move-x* *move-y* *stick-x* *stick-y*))
                  ;; the sound: P2's feed for this frame (steps, events, you, the guard)
@@ -547,6 +565,14 @@
              0)
             ((string=? type "tap")
              (let ((p (split-pair payload))) (set! *tap* p))
+             0)
+            ;; the page: the pointer lock was lost in play (Escape): the pause panel
+            ((string=? type "pause")
+             (when (eq? *mode* 'game) (play-mode-pause!))
+             0)
+            ;; the page: a touch screen (the pause panel lists the phone's controls)
+            ((string=? type "touch")
+             (play-mode-set-touch! #t)
              0)
             ((string=? type "params")
              (set! *params* (split-query payload))
