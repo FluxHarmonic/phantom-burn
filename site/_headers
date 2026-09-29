@@ -1,7 +1,19 @@
-# Cloudflare Pages headers for phantomburn.net (a private preview): nothing
-# is to be indexed, anywhere. The game needs no cross-origin isolation (no
-# SharedArrayBuffer, no audio worklet), so there is no COOP/COEP.
+# phantomburn.net's Cloudflare Pages headers. scripts/stage-web copies this to
+# the root of the deploy tree; scripts/serve-site.mjs applies the same rules
+# locally, so check-site.mjs sees what Pages sends.
+#
+# Public from 0.1 (David, 2026-09-29): the site is indexed, so there is no
+# X-Robots-Tag here any more. The 404 page carries its own
+# <meta name="robots" content="noindex">, and the wasm's Function (whose
+# responses never get these headers) says noindex itself.
+#
+# The game needs no cross-origin isolation (no SharedArrayBuffer, no audio
+# worklet), so there is no COOP/COEP on /badge-in/.
 /*
-  X-Robots-Tag: noindex, nofollow
-  Referrer-Policy: no-referrer
+  Referrer-Policy: strict-origin-when-cross-origin
   X-Content-Type-Options: nosniff
+
+# The version a newer build would announce (Harkfell's D38 shape): never
+# answered from a cache.
+/version.json
+  Cache-Control: no-store

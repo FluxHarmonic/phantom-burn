@@ -3,22 +3,129 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="robots" content="noindex, nofollow">
   <title>Phantom Burn</title>
-  <link rel="icon" href="data:,">
-  <style>
-    html, body { margin: 0; height: 100%; background: #0D0A1A; }
-    body { display: flex; align-items: center; justify-content: center; }
-    h1 { position: relative; margin: 0; padding: 0 4vw; font: italic 900 clamp(40px, 11vw, 132px)/1 ui-monospace, "DejaVu Sans Mono", monospace;
-         letter-spacing: 0.06em; transform: skewX(-12deg);
-         background: linear-gradient(#4DF2D9 0%, #4DF2D9 30%, #DBE0E6 70%, #F0F0FA 100%);
-         -webkit-background-clip: text; background-clip: text; color: transparent; }
-    /* the burn: a magenta stroke through the letters' top third */
-    h1::after { content: ""; position: absolute; left: 0; right: 0; top: 30%; height: 0.07em;
-                background: #FF59D9; box-shadow: 0 0 0.25em #FF59D9; mix-blend-mode: screen; }
-  </style>
+  <meta name="description" content="Phantom Burn is a first-person stealth game set in Crash The Stack's world: one runner, one corporate tower, climbed floor by floor. Free to play in your browser.">
+  <meta name="theme-color" content="#0d0a1a">
+  <meta property="og:title" content="Phantom Burn">
+  <meta property="og:description" content="Get root. Don't get caught. A first-person stealth game in Crash The Stack's world.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://phantomburn.net/">
+  <meta property="og:image" content="https://phantomburn.net/shots/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="The title PHANTOM BURN in slanted cyan block letters with a magenta line burned through them, over a dark room where a console glows violet.">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Phantom Burn">
+  <meta name="twitter:description" content="Get root. Don't get caught. A first-person stealth game in Crash The Stack's world.">
+  <meta name="twitter:image" content="https://phantomburn.net/shots/og.png">
+  <meta name="twitter:image:alt" content="The title PHANTOM BURN in slanted cyan block letters with a magenta line burned through them, over a dark room where a console glows violet.">
+  <link rel="icon" type="image/png" href="/favicon.png">
+  <link rel="preload" href="/fonts/JetBrainsMono-Regular.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="alternate" type="application/rss+xml" title="Phantom Burn news" href="/news/feed.xml">
+  <link rel="alternate" type="application/feed+json" title="Phantom Burn news" href="/news/feed.json">
+  <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-  <h1>PHANTOM BURN</h1>
+  <main>
+    <header>
+      <h1 class="name">PHANTOM BURN</h1>
+      <p class="tagline">Get root. Don't get caught.</p>
+    </header>
+
+    <div class="carousel" data-interval="6000">
+      <div class="frames">
+        <img class="shot shown" src="/shots/floor-14.png" width="480" height="270"
+             alt="Floor 14's lobby from the entrance: a marble floor under the ceiling lights, and a stair with a glass rail climbing to the mezzanine.">
+        <img class="shot" src="/shots/lobby-dark.png" width="480" height="270" aria-hidden="true"
+             alt="The same lobby with its lights off: a patrol robot's torch throws a warm beam across the dark marble.">
+        <img class="shot" src="/shots/fm-desk.png" width="480" height="270" aria-hidden="true"
+             alt="The facilities manager's office in the dark, lit only by two monitors left on.">
+        <img class="shot" src="/shots/practice.png" width="480" height="270" aria-hidden="true"
+             alt="PRACTICE: Crash's simulation of the tower, drawn in cyan lines, with a patrol unit in a doorway while Crash explains that units hear marble from a room away.">
+      </div>
+      <p class="caption" aria-live="polite">Floor 14, the lobby</p>
+      <div class="dots" role="group" aria-label="Pictures of Phantom Burn">
+        <button type="button" aria-label="Floor 14, the lobby" aria-current="true"></button>
+        <button type="button" aria-label="The lobby in the dark, with the patrol's torch"></button>
+        <button type="button" aria-label="The FM's office, lights off"></button>
+        <button type="button" aria-label="PRACTICE, Crash's simulation"></button>
+      </div>
+    </div>
+
+    <div class="pitch">
+      <p>Phantom Burn is a first-person stealth game set in the world of <a href="https://crashthestack.com/">Crash The Stack</a>. While Crash takes Gibson apart in the Net, Burn walks into Gibson's tower in person, with a visitor badge, a deck and no weapon. The one machine that can change Gibson is on the top floor, and it isn't on any network.</p>
+      <p>So you climb. Every floor, you steal a little more of the building: a badge, a password, a session someone forgot to log out of. Stay in the dark, listen to what's under your feet, and don't get caught. The building is watching, too: whatever its guards and cameras notice, Gibson patches on the floors above!</p>
+    </div>
+
+    <div class="play">
+      <a href="/badge-in/">BADGE IN</a>
+      <span class="how">Free, in your browser, on a computer or a phone.</span>
+    </div>
+
+    <p class="early">This is 0.1, the first floor of the climb: floor 14, the offices, with one robot on patrol, two cameras, and a night cleaner who will tell on you. If you've never played, start with PRACTICE, where Crash runs you through a simulation of the tower first.</p>
+
+    <section class="controls">
+      <h2>Controls</h2>
+      <dl>
+        <dt>WASD, mouse</dt><dd>move and look</dd>
+        <dt>Shift</dt><dd>hold to sneak</dd>
+        <dt>F</dt><dd>use a door, a drawer, a terminal</dd>
+        <dt>T or right mouse</dt><dd>hold to point your deck at a device</dd>
+      </dl>
+      <p>On a phone, the game draws its own buttons, DECK included.</p>
+    </section>
+
+    <p class="news-line">Read what's new in each release on the <a href="/news/">news page</a>.</p>
+
+    <section class="made">
+      <h2>How it was made</h2>
+      <p>I designed Phantom Burn and I direct every part of how it's made. AI agents write the code, the floors, the 3D models, the music and the sound from my direction, and I play every build, listen to every sound, and decide what stays. No image generator was used: the models are built in Blender by scripts an agent wrote, and everything you see is drawn by the game's own renderer. If the use of AI is a dealbreaker for you, I understand! The source and the commit history are public, so you can see exactly how it was made.</p>
+    </section>
+  </main>
+
+  <footer>
+    <a class="mark" href="https://fluxharmonic.com/"><img src="/mark.png" width="380" height="188" alt="Flux Harmonic"></a>
+    <p>Made by David Wilson at Flux Harmonic. Written in <a href="https://usesigil.org/">Sigil</a>.</p>
+    <p>Also from Flux Harmonic: <a href="https://crashthestack.com/">Crash The Stack</a> and <a href="https://harkfell.com/">Harkfell</a></p>
+    <p>The source is on <a href="https://github.com/FluxHarmonic/phantom-burn">GitHub</a> and <a href="https://code.usesigil.org/phantom-burn/">Sigil Forge</a>.</p>
+    <p>The code is licensed <a href="https://github.com/FluxHarmonic/phantom-burn/blob/master/LICENSE">GPL-3.0-or-later</a>; the models, art, music and sound are <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>. The Flux Harmonic mark is not covered by either.</p>
+    <p>Set in JetBrains Mono, under the <a href="/fonts/OFL.txt">SIL Open Font License</a>. <a href="/news/feed.xml">RSS</a> / <a href="/news/feed.json">JSON Feed</a></p>
+  </footer>
+  <script>
+    // The pictures: one at a time, crossfading every data-interval ms, with
+    // the caption following. The dots pick one; the pointer over the
+    // pictures pauses them; a reader who asked for reduced motion gets no
+    // automatic change. Without this script the first picture simply stays.
+    (function () {
+      var c = document.querySelector(".carousel");
+      if (!c) return;
+      var imgs = c.querySelectorAll(".frames img");
+      var dots = c.querySelectorAll(".dots button");
+      var cap = c.querySelector(".caption");
+      var every = Number(c.getAttribute("data-interval")) || 6000;
+      var still = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      var at = 0, timer = null;
+      function show(n) {
+        at = (n + imgs.length) % imgs.length;
+        for (var k = 0; k < imgs.length; k++) {
+          imgs[k].classList.toggle("shown", k === at);
+          if (k === at) imgs[k].removeAttribute("aria-hidden"); else imgs[k].setAttribute("aria-hidden", "true");
+          if (dots[k]) { if (k === at) dots[k].setAttribute("aria-current", "true"); else dots[k].removeAttribute("aria-current"); }
+        }
+        if (cap && dots[at]) cap.textContent = dots[at].getAttribute("aria-label");
+      }
+      function start() { if (!still && !timer && !document.hidden) timer = setInterval(function () { show(at + 1); }, every); }
+      function stop() { clearInterval(timer); timer = null; }
+      for (var k = 0; k < dots.length; k++) (function (k) {
+        dots[k].addEventListener("click", function () { stop(); show(k); start(); });
+      })(k);
+      c.querySelector(".frames").addEventListener("mouseenter", stop);
+      c.querySelector(".frames").addEventListener("mouseleave", start);
+      document.addEventListener("visibilitychange", function () { document.hidden ? stop() : start(); });
+      c.classList.add("live");
+      start();
+    })();
+  </script>
 </body>
 </html>
