@@ -16,7 +16,7 @@ set -u
 cd "$(dirname "$0")/.." || exit 1
 PUBLISH="${1:-scripts/publish-web}"
 GAME=phantom-burn
-GATES="scripts/check-site.mjs scripts/check-site-pages.mjs scripts/serve-site.mjs scripts/shot-web.mjs scripts/tree-manifest"
+GATES="scripts/check-site.mjs scripts/check-site-pages.mjs scripts/serve-site.mjs scripts/shot-web.mjs scripts/webgl-check.mjs scripts/tree-manifest"
 BUCKET="$(sed -n 's/.*"bucket_name": "\([^"]*\)".*/\1/p' wrangler.jsonc | head -1)"
 [ -n "$BUCKET" ] || { echo "SETUP-FAILED: no bucket in wrangler.jsonc"; exit 1; }
 [ -z "$(git status --porcelain --untracked-files=no)" ] || { echo "SETUP-FAILED: tracked changes; publish-web would refuse before R2. Commit first."; exit 1; }

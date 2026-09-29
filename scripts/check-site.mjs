@@ -36,6 +36,11 @@
 //              title's 10 s wait, shows the room once it lands (not the console alone)
 //   reticle    in play the reticle is at the view's centre; aimed at floor 14's
 //              printer (?view=8) it lights and the deck's label stands beside it
+//   webgl      scripts/webgl-check.mjs: with WebGL off, or only WebGL 1, the
+//              page says the game needs WebGL 2 and never fetches the wasm;
+//              with no context for the game's canvas, the same message in
+//              place of the loader's raw error; with WebGL 2, no message and
+//              the game boots
 //   (pages)    scripts/check-site-pages.mjs: landing, carousel, contrast,
 //              badge-in, news, feeds, version, preview, crosslink, em-dash,
 //              console (its header lists what each checks)
@@ -60,8 +65,9 @@ if (!process.argv[2] || !fs.existsSync(path.join(DIR, "index.html"))) { console.
 const MAN = DIR + ".manifest";
 if (!fs.existsSync(MAN)) { console.log(`SETUP-FAILED: ${MAN} missing (scripts/stage-web)`); process.exit(2); }
 const sha = (b) => crypto.createHash("sha256").update(b).digest("hex");
-// shot-web.mjs decides the boots, transmission and fullscreen verdicts
-const GATES = ["scripts/check-site.mjs", "scripts/check-site-pages.mjs", "scripts/serve-site.mjs", "scripts/shot-web.mjs", "scripts/tree-manifest"];
+// shot-web.mjs decides the boots, transmission and fullscreen verdicts;
+// webgl-check.mjs the webgl leg
+const GATES = ["scripts/check-site.mjs", "scripts/check-site-pages.mjs", "scripts/serve-site.mjs", "scripts/shot-web.mjs", "scripts/webgl-check.mjs", "scripts/tree-manifest"];
 const gateHashes = GATES.map((g) => [g, sha(fs.readFileSync(path.join(REPO, g)))]);   // at the START of the run
 const head = execFileSync("git", ["-C", REPO, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 const clean = execFileSync("git", ["-C", REPO, "status", "--porcelain", "--untracked-files=no"], { encoding: "utf8" }).trim() === "";
@@ -279,6 +285,27 @@ for (const [q, want] of [["hud=0", "game"], ["title=1", "title"]]) {
   const lit = countNear(b, 77, 242, 217, 12, centre(b)), lab = countNear(b, 77, 242, 217, 12, label(b));
   lit >= 4 && lab >= 40 ? ok("reticle", `aimed at the printer it lights (${lit}) and the deck's label stands beside it (${lab})`)
                         : bad("reticle", `aimed at the printer (?view=8): ${lit} C-SELECTED pixels at the centre, ${lab} in the label (want 4 and 40 or more)`);
+}
+// webgl (2026-09-29: a visitor with no WebGL 2 got "Failed to start:
+// sigil_wasm_start failed (rc -1)"): scripts/webgl-check.mjs in each mode.
+// off (Chrome's --disable-webgl) and webgl1 (getContext("webgl2") null):
+// the message, and the wasm never requested; late (null on #stage alone):
+// the game's failure turns into the message; on, the positive control: the
+// game boots and there is no message.
+for (const mode of ["off", "webgl1", "late", "on"]) {
+  const r = await new Promise((resolve) => {
+    const ch = spawn("node", [path.join(REPO, "scripts/webgl-check.mjs"), "--url", `${BASE}/${SLUG}/`, "--mode", mode,
+      "--query", mode === "on" ? "hud=0" : "", "--wait", "2500", "--shot", `/tmp/phantom-check-site-webgl-${mode}.png`]);
+    let o = "";
+    ch.stdout.on("data", (d) => { o += d; }); ch.stderr.on("data", (d) => { o += d; });
+    const kill = setTimeout(() => ch.kill("SIGKILL"), 200000);
+    ch.on("close", (code) => { clearTimeout(kill); resolve({ status: code, out: o }); });
+  });
+  const verdict = r.out.trim().split("\n").pop();
+  r.status === 0 && verdict === `PASS ${mode}`
+    ? ok("webgl", `${mode}: ${{ off: "WebGL off: the message, no wasm fetched", webgl1: "WebGL 1 only: the message, no wasm fetched",
+                               late: "no context for the game's canvas: the message, not the raw error", on: "WebGL 2: the game boots, no message" }[mode]}`)
+    : bad("webgl", `${mode}: rc ${r.status}: ${r.out.split("\n").filter((l) => /FAIL|SETUP|TIMED/.test(l)).join(" | ").slice(0, 400)}`);
 }
 server.close();
 if (m) {
