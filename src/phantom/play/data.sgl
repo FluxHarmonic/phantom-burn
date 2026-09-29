@@ -22,7 +22,7 @@
           (sigil io))
 
   (export play-data-from-string play-data?
-          play-route play-waits play-start play-exit play-badge play-badge-drawer? play-lift play-glass
+          play-route play-waits play-start play-exit play-badge play-badge-drawer? play-lift play-hums play-glass
           light-cell light-grid-x0 light-grid-y0 light-grid-w light-grid-h
           light-sample! light-sample-z NCIRCUITS
           play-rooms play-edges play-surface-noise play-surface-name play-panels play-reader play-noise-ambient
@@ -64,8 +64,11 @@
     ;;  vector of room indices, goal the floor file's list
     ;;  Phantom 0.1: 28 the service lift, #(x y tier) where you stand to
     ;;  call it and the tier that may, or #f (floor 14's second way out)
-    (define (play-data? d) (and (vector? d) (= (vector-length d) 29) (eq? (vector-ref d 0) 'play-data)))
+    ;;  29 the floor's hums (item 8): a vector of #(kind x y), placed loops
+    ;;  the sound plays (the fridge)
+    (define (play-data? d) (and (vector? d) (= (vector-length d) 30) (eq? (vector-ref d 0) 'play-data)))
     (define (play-lift d) (vector-ref d 28))
+    (define (play-hums d) (vector-ref d 29))
     (define (play-lessons d) (vector-ref d 27))
     (define (lesson-count d) (vector-length (vector-ref d 27)))
     (define (lesson-id l) (vector-ref l 0))
@@ -277,7 +280,9 @@
                                    (flo (list-ref l 4)) (list-ref l 5) (list-ref l 6) (list-ref l 7) (list-ref l 8)))
                          (if e (cdr e) '()))))
                 (let ((e (assq 'lift datum)))
-                  (and e (vector (flo (cadr e)) (flo (caddr e)) (cadddr e)))))))
+                  (and e (vector (flo (cadr e)) (flo (caddr e)) (cadddr e))))
+                (let ((e (assq 'hums datum)))
+                  (list->vector (map (lambda (h) (vector (car h) (flo (cadr h)) (flo (caddr h)))) (if e (cdr e) '())))))))
 
     ;; The room grid: (roomgrid N k z room ...) on the light grid's cells,
     ;; as (starts . layers).

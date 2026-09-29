@@ -51,7 +51,7 @@
           (motif tune player))
   (export bank-tune-text bank-slots make-bank bank-render! bank-render-for! bank-sample bank-ready? bank-rate
           bank-events-ready? bank-robot-ready? BANK-ORDER
-          bank-bed-loop bank-sim-bed-loop crossfade-loop BED-TUNE-TEXT BED-LOOP-S
+          bank-bed-loop bank-dark-bed-loop bank-sim-bed-loop crossfade-loop BED-TUNE-TEXT BED-DARK-TUNE-TEXT BED-LOOP-S
           SLOT-S BANK-SURFACES EVENT-KINDS EVENT-S event-seconds LOOP-KINDS LOOP-FADE-S fade-tail!)
   (begin
     (define SLOT-S 0.6)                   ; the longest slot (the grate rings through it)
@@ -221,17 +221,29 @@
     ;; kept), no exciter (its edge), the air darker (lp 5000 -> 2500), and both 18 dB
     ;; down, the gain folded in here (2 x the old BED-GAIN 0.8 = 1.6 -> 0.2). The
     ;; sketchbook's bed-game is this text, and bed-game-v1 the old, for his ear.
-    (define BED-TUNE-TEXT
-      "(tune version: 1 name: \"phantom bed\" tempo: 150 speed: 3 channels: 2
+    ;; Phantom 0.1 (item 8, the building's beds): the city, a low far wash of
+    ;; traffic, joins the hum and the air (the floor's ambient: hvac, buzz, city),
+    ;; well under them. The dark bed is the same without the tube buzz: where
+    ;; your room's lights are off, the fluorescents' buzz is gone. Each voice has
+    ;; its own seed, so the two render the air and the city identically and a
+    ;; switch between them changes only the buzz.
+    (define (bed-tune-text buzz?)
+      (string-append
+      "(tune version: 1 name: \"phantom bed\" tempo: 150 speed: 3 channels: 3
   (instruments
     (instrument id: 1 name: \"tube buzz\" patch: (drone-saw attack: 1 breath-lo: 0.8 breath-rate: 0.2 bright: 4 cents: -49.4 detune: 2 level: 0.3 release: 2 seed: 41) volume: 20 gain: 0.2)
-    (instrument id: 2 name: \"room air\" patch: (noise-bed attack: 3 centre: 1200 color: pink hp: 320 level: 1 lp: 2500 rate: 0.02 release: 4 seed: 31 wander: 0.1 width: 1.7) volume: 8 gain: 0.2))
+    (instrument id: 2 name: \"room air\" patch: (noise-bed attack: 3 centre: 1200 color: pink hp: 320 level: 1 lp: 2500 rate: 0.02 release: 4 seed: 31 wander: 0.1 width: 1.7) volume: 8 gain: 0.2)
+    (instrument id: 3 name: \"city\" patch: (noise-bed attack: 3 centre: 180 color: brown hp: 40 level: 1 lp: 420 rate: 0.06 release: 4 seed: 57 wander: 0.35 width: 1.9) volume: 6 gain: 0.2))
   (patterns
     (pattern id: 0 rows: 16
-      (row 0 (1 \"B-2\" 1 20 \"000\") (2 \"C-4\" 2 8 \"000\")))
+      (row 0 "
+      (if buzz? "(1 \"B-2\" 1 20 \"000\") " "")
+      "(2 \"C-4\" 2 8 \"000\") (3 \"C-3\" 3 6 \"000\")))
     (pattern id: 1 rows: 256
       (row 255 (2 \"...\" 0 0 \"B01\"))))
-  (order 0 1))")
+  (order 0 1))"))
+    (define BED-TUNE-TEXT (bed-tune-text #t))
+    (define BED-DARK-TUNE-TEXT (bed-tune-text #f))
 
     ;; --- the events --------------------------------------------------------------------------
     ;; the kinds agreed with P2 (topics/phantom-sound-api); each tune is 125 rows
@@ -246,6 +258,9 @@
                           ;; the devices' loops, one 3 s cycle each, retriggered while a
                           ;; device sounds ((phantom sound) devices!)
                           device-phone-ring device-printer device-vent
+                          ;; Phantom 0.1's (item 8): the drawer, a terminal login, the service
+                          ;; lift's call, and the fridge's hum (a loop, placed like a device's)
+                          drawer-open login lift-call device-fridge
                           ;; robot speak (EDGE), after the rest: three variants of each mood
                           speak-suspicious-1 speak-suspicious-2 speak-suspicious-3
                           speak-searching-1 speak-searching-2 speak-searching-3
@@ -270,6 +285,7 @@
               ;; a loop's cycle is 3.0 s (150 rows); rendered 3.4 so its release
               ;; overlaps the next cycle's start instead of dipping at the seam
               (device-phone-ring . 3.4) (device-printer . 3.4) (device-vent . 3.4)
+              (drawer-open . 1.0) (login . 1.5) (lift-call . 2.35) (device-fridge . 3.4)
               ;; robot speak: each tune whole (its rows x 60 ms: the phrase and 0.36 s of tail)
               (speak-suspicious-1 . 0.66) (speak-suspicious-2 . 0.78) (speak-suspicious-3 . 0.72)
               (speak-searching-1 . 0.96) (speak-searching-2 . 0.96) (speak-searching-3 . 0.96)
@@ -282,7 +298,7 @@
     ;; cycle's render ends while they still sound. Its last LOOP-FADE-S fades out
     ;; to silence (a quarter cosine), the stretch the next cycle overlaps: each
     ;; seam is a crossfade, not a cut.
-    (define LOOP-KINDS '(device-phone-ring device-printer device-vent))
+    (define LOOP-KINDS '(device-phone-ring device-printer device-vent device-fridge))
     (define LOOP-FADE-S 0.4)
     (define (fade-tail! bv rate)
       (let* ((n (quotient (bytevector-length bv) 8))
@@ -310,7 +326,7 @@
     (define BANK-ORDER
       (append ROBOT-FIRST
               (filter (lambda (k) (not (or (later-variant? k) (memq k ROBOT-FIRST)))) EVENT-KINDS)
-              '(bed bed-sim)
+              '(bed bed-dark bed-sim)
               (filter later-variant? EVENT-KINDS)))
 
     ;; --- rendering -------------------------------------------------------------------------------
@@ -321,7 +337,8 @@
     ;; in Sigil cost more than motif's render (10 s of the slots' tune: 5.2 s to
     ;; pull, 6.2 s more to fold, natively).
     ;; #(player rate buf done total samples layout stage bed-loop slots loader kinds-left
-    ;;   sim-bed-loop)   sim-bed-loop: PRACTICE's bed (the loader's bed-sim), or #f
+    ;;   sim-bed-loop dark-bed-loop)   sim-bed-loop: PRACTICE's bed (the loader's
+    ;;   bed-sim), or #f; dark-bed-loop: the bed without the tube buzz
     ;;   stage: 'slots | (event KIND) | 'bed | 'ready; buf/done/total are the
     ;;   current stage's (frames); samples: ((key . bv) ...), the cut slots and the
     ;;   events; layout: ((key start-frame frames) ...); slots: the slots' buffer
@@ -334,7 +351,7 @@
                           (slot-layout)))
              (total (rows->frames (slot-total-rows) rate)))
         (vector (open-tune-player t rate) rate (make-bytevector (* 8 total) 0) 0 total '() layout 'slots #f #f
-                (if (pair? opt) (car opt) (lambda (name) #f)) BANK-ORDER #f)))
+                (if (pair? opt) (car opt) (lambda (name) #f)) BANK-ORDER #f #f)))
 
     (define (bank-rate b) (vector-ref b 1))
     (define (bank-ready? b) (eq? (vector-ref b 7) 'ready))
@@ -351,6 +368,9 @@
     ;; PRACTICE's bed, the sim's air in place of the building's hum, as the same
     ;; kind of seamless loop; #f until rendered, or when the loader has no bed-sim
     (define (bank-sim-bed-loop b) (vector-ref b 12))
+    ;; the building's bed with the lights off around you (no tube buzz), the
+    ;; same kind of loop; #f until rendered
+    (define (bank-dark-bed-loop b) (vector-ref b 13))
 
     (define BLOCK 1024)
 
@@ -414,6 +434,9 @@
             ((eq? (car left) 'bed)
              (vector-set! b 11 (cdr left))
              (open-bed! b))
+            ((eq? (car left) 'bed-dark)
+             (vector-set! b 11 (cdr left))
+             (open-bed-text! b BED-DARK-TUNE-TEXT 'bed-dark))
             ((eq? (car left) 'bed-sim)
              (vector-set! b 11 (cdr left))
              (let ((text ((vector-ref b 10) "bed-sim")))
@@ -436,8 +459,8 @@
           ((eq? stage 'slots)
            (vector-set! b 9 (vector-ref b 2))                      ; keep the slots' buffer
            (next-event! b))
-          ((memq stage '(bed bed-sim))
-           (vector-set! b (if (eq? stage 'bed) 8 12)
+          ((memq stage '(bed bed-dark bed-sim))
+           (vector-set! b (case stage ((bed) 8) ((bed-dark) 13) (else 12))
                         (crossfade-loop (vector-ref b 2)
                                             (exact (round (* BED-WARM-S rate)))
                                             (exact (round (* BED-LOOP-S rate)))

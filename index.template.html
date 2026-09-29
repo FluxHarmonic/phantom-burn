@@ -304,7 +304,9 @@
            "deck-hold", "deck-confirm", "deck-deny", "print-done", "blinds-open", "blinds-close",
            "terminal-open", "terminal-close", "crash",
            // the devices' loops: one 3 s cycle each, replayed while a device sounds
-           "device-phone-ring", "device-printer", "device-vent"]
+           "device-phone-ring", "device-printer", "device-vent",
+           // Phantom 0.1: the drawer, a terminal login, the service lift, the fridge's hum
+           "drawer-open", "login", "lift-call", "device-fridge"]
             // robot speak (EDGE): three variants of each mood
             .concat(["bored", "suspicious", "searching", "there", "lost", "settle"].reduce(function (acc, m) {
               return acc.concat(["speak-" + m + "-1", "speak-" + m + "-2", "speak-" + m + "-3"]);

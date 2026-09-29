@@ -11,7 +11,7 @@
 (import (sigil test)
         (sigil math)
         (sigil fs)
-        (only (sigil list) list-sort)
+        (only (sigil list) list-sort find)
         (phantom sound logic)
         (phantom sound bank)
         (phantom sound mix)
@@ -21,7 +21,8 @@
         (motif tune player)
         ;; the printer's loop, commanded from the deck on floor 14 (Phantom 0.1)
         (phantom soup) (phantom walker)
-        (phantom play data) (phantom play core) (phantom play devices) (phantom play mode))
+        (phantom play data) (phantom play core) (phantom play devices) (phantom play mode)
+        (only (phantom sound game) bed-for))
 
 (define RATE 32000)
 (define HEAT-TRACE "music-heat-trace")
@@ -337,7 +338,8 @@
 
 ;; --- Phantom 0.1: the device and PRACTICE sounds, banked -------------------------------
 (define NEW-KINDS '(deck-hold deck-confirm deck-deny print-done blinds-open blinds-close terminal-open terminal-close crash
-                    device-phone-ring device-printer device-vent))
+                    device-phone-ring device-printer device-vent
+                    drawer-open login lift-call device-fridge))
 (test-group "the device and PRACTICE sounds (Phantom 0.1)"
   (test "each device one-shot and the Crash-line blip is a kind, and renders a sample that sounds (above -50 dBFS)"
     (let* ((names (map (lambda (k) (string-append "event-" (symbol->string k))) NEW-KINDS))
@@ -730,3 +732,47 @@
                  (ring (* placed (rms (bank-sample b '(event device-phone-ring))))))
             (display (list 'printer-heard heard 'gain gain 'a-ring-there ring)) (newline)
             (assert-true (and heard (>= heard ring)))))))))
+
+;; --- Phantom 0.1, item 8: the building's beds and the floor's hums -----------------------
+(define LIT (lambda (c) #t))
+(define DARK (lambda (c) (memq c '(emergency screens city))))
+(define (f32at bv i) (bytevector-ieee-single-ref bv (* 4 i) 'little))
+(test-group "the building's beds and hums (Phantom 0.1)"
+  (test "the dark bed (no tube buzz) is its own seamless loop, the lit bed's length, quieter"
+    (let* ((s (ready-sound (only-loader))) (lit (bank-bed-loop (sound-bank s))) (dark (bank-dark-bed-loop (sound-bank s))))
+      (assert-true (and dark #t))
+      (assert-equal (bytevector-length lit) (bytevector-length dark))
+      (assert-false (equal? lit dark))
+      (display (list 'bed-rms 'lit (rms lit) 'dark (rms dark))) (newline)
+      (assert-true (< (rms dark) (* 0.7 (rms lit))))
+      (assert-true (> (rms dark) 0.0003))))
+  (test "on floor 14 the bed follows your room's lights: the lit lobby floor, the dark lobby dark, a room with none dark"
+    (let* ((p (play-reset! (make-play C14 DATA14 (cdr (assq 'circuits INFO14)))))
+           (at (lambda (x y) (play-tick! p (walker-step (make-walker x y 0.0 0.0) NO-INPUT TICK C14) LIT 1.0 2.0))))
+      (at 4.0 5.0)
+      (assert-true (eq? (bed-for p LIT) 'floor))
+      (assert-true (eq? (bed-for p DARK) 'dark))
+      (at 21.25 11.0)                       ; meeting room A: light none
+      (assert-true (eq? (bed-for p LIT) 'dark))))
+  (test "switching the bed crossfades at the same place: its first frame is the old loop's, then the new one"
+    (let* ((s (ready-sound (only-loader))) (lit (bank-bed-loop (sound-bank s))) (dark (bank-dark-bed-loop (sound-bank s)))
+           (n 4096) (b (make-bytevector (* 8 n) 0)))
+      (sound-set-bed! s 'floor)
+      (sound-bed-fill! s b n)
+      (sound-set-bed! s 'dark)
+      (sound-bed-fill! s b n)
+      ;; the second fill started at frame n of the loop
+      (assert-true (< (abs (- (f32at b 0) (* 1.0 (f32at lit (* 2 n))))) 0.001))
+      (assert-true (= (f32at b (* 2 (- n 1))) (f32at dark (* 2 (- (* 2 n) 1)))))
+      (assert-true (eq? (sound-bed-playing s) dark))))
+  (test "the kitchen's fridge hums: in the kitchen the mode's sounding list carries it and the sound plays its loop"
+    (let* ((p (play-reset! (make-play C14 DATA14 (cdr (assq 'circuits INFO14)))))
+           (w (walker-step (make-walker 32.0 2.5 0.0 0.0) NO-INPUT TICK C14)))
+      (play-tick! p w LIT 1.0 2.0)
+      (let* ((sounding (play-sounding p w)) (e (find (lambda (x) (eq? (cadr x) 'fridge)) sounding))
+             (s (ready-sound (only-loader "event-device-fridge"))))
+        (assert-true (and e #t))
+        (sound-frame! s (/ 1 60.0) (list (walker-x w) (walker-y w) (walker-yaw w)) '() sounding)
+        (let ((ev (assoc '(event device-fridge) (sound-last-events s))))
+          (display (list 'fridge ev)) (newline)
+          (assert-true (and ev (> (cadr ev) 0.1))))))))

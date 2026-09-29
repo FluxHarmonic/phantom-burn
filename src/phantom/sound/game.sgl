@@ -29,11 +29,24 @@
           (sigil time)
           (phantom sound)
           (phantom sound bank)
-          (phantom play mode))
+          (phantom play mode)
+          (only (phantom play core) play-data play-runner-room)
+          (only (phantom play data) play-rooms room-circuit)
+          (only (phantom render) render-circuit-on?))
   (export sound-game-init! sound-game-gesture! sound-game-idle! sound-game-frame! sound-game-stop!
-          sound-game sound-game-trace sound-game-set-music-rate! SOUND-RATE SOUND-TUNES)
+          sound-game sound-game-trace sound-game-set-music-rate! SOUND-RATE SOUND-TUNES bed-for)
   (begin
     (define SOUND-RATE 44100)
+
+    ;; The building's bed where you are (Phantom 0.1): floor (the hum, the
+    ;; fluorescents' buzz, the air, the city) where your room's light is on,
+    ;; dark (no buzz) where it is off or the room has none. on? the circuits.
+    (define (bed-for core on?)
+      (let ((r (and core (play-runner-room core))))
+        (if (or (not r) (< r 0))
+            'floor
+            (let ((c (room-circuit (vector-ref (play-rooms (play-data core)) r))))
+              (if (and (symbol? c) (not (eq? c 'none)) (on? c)) 'floor 'dark)))))
 
     ;; the tracks: INFILTRATE plays False Identity, PRACTICE Heat Trace (David's
     ;; split, 2026-09-26); one player at a time, so the budget is per level
@@ -110,7 +123,7 @@
       (when *s*
         (say-progress!)
         (sound-set-music! *s* (level-music))  ; the level's track (a no-op unless it changes)
-        (sound-set-bed! *s* (if (play-mode-practice?) 'sim 'floor))  ; PRACTICE's air in place of the hum
+        (sound-set-bed! *s* (if (play-mode-practice?) 'sim (bed-for (play-mode-core) render-circuit-on?)))  ; PRACTICE's air in place of the hum
         (let ((feed (play-mode-sound-feed walker)))
           (set! *steps-n* (+ *steps-n* (length (caddr feed))))
           (set! *events-n* (+ *events-n* (length (cadddr feed))))
