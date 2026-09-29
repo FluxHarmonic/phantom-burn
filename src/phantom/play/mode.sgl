@@ -365,6 +365,17 @@
             ((eq? (car r) 'terminal-open) #f)
             (else #f)))
 
+    ;; what F (the phone's USE) would do here, for the reticle's label
+    (define (use-label)
+      (let ((key (if *touch* "USE  " "F  ")))
+        (case (play-use-hint *core*)
+          ((drawer) (string-append key "OPEN THE DRAWER"))
+          ((terminal) (string-append key "THE TERMINAL"))
+          ((panel) (string-append key "THE LIGHTS"))
+          ((reader) (string-append key "THE READER"))
+          ((lift) (string-append key "CALL THE LIFT"))
+          (else #f))))
+
     (define (tier-line tier)
       (string-append "LOGGED IN. YOUR DECK HAS " (string-upcase* (symbol->string tier)) " NOW"))
 
@@ -737,7 +748,10 @@
           (unless *practice* (crash-lines-draw! w h k (play-mode-transmission)))
           (cond ((and (eq? *phase* 'play) (play-terminal-open? *core*))
                  (terminal-draw! w h k (play-mode-terminal) (play-mode-devices)))
-                ((not (play-hold?)) (deck-hud-draw! w h k (play-mode-deck))))
+                ((not (play-hold?))
+                 (deck-hud-draw! w h k (play-mode-deck))
+                 ;; the reticle, where the deck aims, and what F would do
+                 (reticle-draw! w h k (play-mode-deck) (use-label))))
           (draw-fades! w h ts)
           (when *paused* (draw-pause! w h ts)))))
 

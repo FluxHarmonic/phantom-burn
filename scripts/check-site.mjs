@@ -30,6 +30,8 @@
 //              line (the pause panel's row), each call requestFullscreen
 //   title-room the first title after a cold load, its room held back past the
 //              title's 10 s wait, shows the room once it lands (not the console alone)
+//   reticle    in play the reticle is at the view's centre; aimed at floor 14's
+//              printer (?view=8) it lights and the deck's label stands beside it
 //   boots      the game at /<game>/ and its title (?title=1) boot in headless
 //              Chrome through this same server with no console error, and
 //              fetched the wasm from /w/<sha16>/ and nowhere else
@@ -218,6 +220,30 @@ for (const [q, want] of [["hud=0", "game"], ["title=1", "title"]]) {
   n >= 300 ? ok("title-room", `the first title, its room held back 12 s, shows it when it lands (${n} violet pixels)`)
            : bad("title-room", `the first title with its room held back: ${n < 0 ? "no shot (rc " + r.status + ")" : n + " violet pixels (want 300 or more): the console alone"}`);
 }
+// reticle (David, 2026-09-29: "you can't tell what you're pointing at"): in
+// play a small plus at the view's centre in C-TEXT-DIM; aimed at a device
+// (floor 14's view 8, deck-printer) it is C-SELECTED and the deck's label
+// stands beside it.
+{
+  const shoot = (q, png) => new Promise((resolve) => {
+    const ch = spawn("node", [path.join(REPO, "scripts/shot-web.mjs"), DIR, png, "--url", `${BASE}/${SLUG}/`, "--query", q, "--wait", "3000"]);
+    let o = ""; ch.stdout.on("data", (d) => { o += d; }); ch.stderr.on("data", (d) => { o += d; });
+    const kill = setTimeout(() => ch.kill("SIGKILL"), 200000);
+    ch.on("close", (code) => { clearTimeout(kill); resolve(code); });
+  });
+  const plain = "/tmp/phantom-check-site-reticle.png", aimed = "/tmp/phantom-check-site-reticle-aimed.png";
+  const r1 = await shoot("go=14", plain), r2 = await shoot("view=8&hud=0", aimed);
+  const a = r1 === 0 ? decodePng(plain) : null, b = r2 === 0 ? decodePng(aimed) : null;
+  // the centre, in the canvas's pixels (the view is scaled into the canvas)
+  const centre = (img) => img ? [Math.floor(img.w / 2) - 12, Math.floor(img.h / 2) - 12, Math.floor(img.w / 2) + 12, Math.floor(img.h / 2) + 12] : null;
+  const label = (img) => img ? [Math.floor(img.w / 2) + 8, Math.floor(img.h / 2) - 14, Math.min(img.w, Math.floor(img.w / 2) + 260), Math.floor(img.h / 2) + 14] : null;
+  const dim = countNear(a, 115, 128, 166, 12, centre(a));
+  dim >= 4 ? ok("reticle", `in play the reticle is at the centre (${dim} C-TEXT-DIM pixels)`)
+           : bad("reticle", `in play (?go=14): ${dim} C-TEXT-DIM pixels at the centre (want 4 or more)`);
+  const lit = countNear(b, 77, 242, 217, 12, centre(b)), lab = countNear(b, 77, 242, 217, 12, label(b));
+  lit >= 4 && lab >= 40 ? ok("reticle", `aimed at the printer it lights (${lit}) and the deck's label stands beside it (${lab})`)
+                        : bad("reticle", `aimed at the printer (?view=8): ${lit} C-SELECTED pixels at the centre, ${lab} in the label (want 4 and 40 or more)`);
+}
 server.close();
 if (m) {
   const want = `/w/${m[1]}/phantom-burn.wasm`;
@@ -238,14 +264,13 @@ try { fs.rmSync(DIR + ".verified"); } catch { /* none */ }
 console.log(`RED: ${pass} pass, ${fail} fail`);
 process.exit(1);
 
-// A PNG's pixels that are near C-GIBSON's violet (#B36BFF): 8-bit RGB or RGBA,
-// not interlaced (a Chrome screenshot).
-function violetPixels(file) {
+// A PNG's pixels (8-bit RGB or RGBA, not interlaced: a Chrome screenshot).
+function decodePng(file) {
   const b = fs.readFileSync(file);
   let o = 8, w = 0, h = 0, ch = 0, idat = [];
   while (o < b.length) {
     const len = b.readUInt32BE(o), type = b.toString("latin1", o + 4, o + 8), d = b.subarray(o + 8, o + 8 + len);
-    if (type === "IHDR") { w = d.readUInt32BE(0); h = d.readUInt32BE(4); ch = d[9] === 6 ? 4 : 3; if (d[8] !== 8 || d[12] !== 0) return -1; }
+    if (type === "IHDR") { w = d.readUInt32BE(0); h = d.readUInt32BE(4); ch = d[9] === 6 ? 4 : 3; if (d[8] !== 8 || d[12] !== 0) return null; }
     else if (type === "IDAT") idat.push(d);
     o += 12 + len;
   }
@@ -261,10 +286,19 @@ function violetPixels(file) {
       px[y * stride + x] = v & 255;
     }
   }
+  return { w, h, ch, px };
+}
+// how many pixels in the box [x0, x1) x [y0, y1) (the whole image by default)
+// are within tol of (r g b)
+function countNear(img, r, g, b, tol, box) {
+  if (!img) return -1;
+  const [x0, y0, x1, y1] = box || [0, 0, img.w, img.h];
   let n = 0;
-  for (let i = 0; i < w * h; i++) {
-    const r = px[i * ch], g = px[i * ch + 1], bl = px[i * ch + 2];
-    if (Math.abs(r - 179) < 45 && Math.abs(g - 107) < 45 && Math.abs(bl - 255) < 45) n++;
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+    const i = (y * img.w + x) * img.ch;
+    if (Math.abs(img.px[i] - r) < tol && Math.abs(img.px[i + 1] - g) < tol && Math.abs(img.px[i + 2] - b) < tol) n++;
   }
   return n;
 }
+// C-GIBSON's violet (#B36BFF): the root console's screen
+function violetPixels(file) { return countNear(decodePng(file), 179, 107, 255, 45); }

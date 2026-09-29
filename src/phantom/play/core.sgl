@@ -32,7 +32,7 @@
           play-light play-light-01 play-visibility play-shape play-light-state
           play-badge? play-learned-tier play-way-out play-near-lift? play-lift-tier play-best-after
           play-torch TORCH-RANGE TORCH-COS TORCH-LIGHT play-ignored-kinds
-          play-cleaners-state CLEANER-SPEED CLEANER-SEE-S VACUUM-NOISE
+          play-cleaners-state CLEANER-SPEED CLEANER-SEE-S VACUUM-NOISE play-use-hint
           play-outcome play-ticks play-start-walker
           play-near-exit? GUARD-START-LEG PICKUP-REACH EXIT-REACH
           play-hearing play-take-steps! play-last-heard play-runner-room
@@ -964,6 +964,30 @@
                    (begin (event! p 'deck-deny (vector-ref lift 0) (vector-ref lift 1))
                           (list 'lift-deny (vector-ref lift 2)))))
               (else '())))))
+
+    ;; What F would do from where you stand (Phantom 0.1: the reticle's label),
+    ;; without doing it: drawer, terminal, panel, reader, lift, or #f. As
+    ;; play-use! chooses, from your last place on the ground.
+    (define (play-use-hint p)
+      (let ((x (vector-ref p 17)) (y (vector-ref p 18)))
+        (and x y (eq? (vector-ref p 8) 'playing)
+             (let* ((data (vector-ref p 1))
+                    (reach? (lambda (px py) (let ((dx (- x px)) (dy (- y py))) (< (+ (* dx dx) (* dy dy)) (* USE-REACH USE-REACH)))))
+                    (d2 (lambda (px py) (let ((dx (- x px)) (dy (- y py))) (+ (* dx dx) (* dy dy)))))
+                    (term (terminal-at data x y 0.0))
+                    (b (play-badge data))
+                    (lift (play-lift data)))
+               (cond ((and (play-badge-drawer? data) (not (vector-ref p 7)) (reach? (vector-ref b 0) (vector-ref b 1))
+                           (or (< term 0) (let ((t (vector-ref (play-devices data) term)))
+                                            (<= (d2 (vector-ref b 0) (vector-ref b 1)) (d2 (device-x t) (device-y t))))))
+                      'drawer)
+                     ((>= term 0) 'terminal)
+                     ((let find ((ps (play-panels data)))
+                        (cond ((null? ps) #f) ((reach? (cadr (car ps)) (caddr (car ps))) #t) (else (find (cdr ps)))))
+                      'panel)
+                     ((reach? (vector-ref (play-exit data) 0) (vector-ref (play-exit data) 1)) 'reader)
+                     ((and lift (reach? (vector-ref lift 0) (vector-ref lift 1))) 'lift)
+                     (else #f))))))
 
     ;; --- the terminal (design §3; the device API §3) ------------------------------
 

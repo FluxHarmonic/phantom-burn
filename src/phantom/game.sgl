@@ -262,7 +262,10 @@
       (apply-view-light! (view-ref k))
       (set! *walker* (walker-at-view k))
       (set! *prev* *walker*)
-      (set! *acc* 0.0))
+      (set! *acc* 0.0)
+      ;; and its pitch, as game-place! does: in play the walker looks where the
+      ;; view looks (the reticle's leg aims the deck at a device by a view)
+      (set! *pending-pitch* (list-ref (view-ref k) 5)))
 
     ;; The walker at (x y) on the floor under it, looking at (tx ty tz) from
     ;; its eyes (the native --look, for shots of a device from where you'd aim).
