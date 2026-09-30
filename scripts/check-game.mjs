@@ -3,7 +3,7 @@
 // "arm", named in substratic.sgv). check-site serves the staged tree on
 // loopback, runs its shared legs (the files, the redirects, indexing, the
 // 404s, the wasm), then runs this while the server is up and relays these
-// lines. Everything here is scripts/check-site.mjs's (2c1ff55), unchanged
+// lines. Everything here was scripts/check-site.mjs's (2c1ff55), unchanged
 // but for where the server comes from.
 //
 //   node scripts/check-game.mjs BASE DIR     (BASE: http://127.0.0.1:PORT)

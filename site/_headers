@@ -1,5 +1,5 @@
-# phantomburn.net's Cloudflare Pages headers. scripts/stage-web copies this to
-# the root of the deploy tree; scripts/serve-site.mjs applies the same rules
+# phantomburn.net's Cloudflare Pages headers. substratic's stage-web copies this
+# to the root of the deploy tree; its checks/serve-site.mjs applies the same rules
 # locally, so check-site.mjs sees what Pages sends.
 #
 # Public from 0.1 (David, 2026-09-29): the site is indexed, so there is no

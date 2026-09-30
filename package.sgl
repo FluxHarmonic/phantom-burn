@@ -76,7 +76,10 @@
 
   dev-dependencies: (list
     (from-git url: sigil-repo package: "sigil-test" version: ">=0.22.10")
-    (from-git url: sigil-repo package: "sigil-test-runner" version: ">=0.22.10"))
+    (from-git url: sigil-repo package: "sigil-test-runner" version: ">=0.22.10")
+    ;; the shared site and release tasks (sgx substratic:stage-web and the
+    ;; rest, configured in substratic.sgv); nothing of it is compiled into the game
+    (from-git url: "github:substratic/substratic" version: "^0.3.0"))
 
   tasks: (list
     (task

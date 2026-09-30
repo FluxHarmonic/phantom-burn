@@ -37,7 +37,7 @@ stop_port() {
 }
 stop_port $PORT_TLS
 stop_port $PORT_HTTP
-# and scripts/host-site's servers on the same ports (its site-PORT.pid, the
+# and substratic's host-site servers on the same ports (their site-PORT.pid, the
 # same checks: our node, this directory, serve-site.mjs)
 for p in $PORT_TLS $PORT_HTTP; do
   f="site-$p.pid"; [ -f "$f" ] || continue

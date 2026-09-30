@@ -6,7 +6,7 @@
 //                             [--console FILE] [--requests FILE] [--eval JS]
 //
 // --url BASE uses a server that is already running (BASE ends in /, e.g.
-// scripts/check-site.mjs's serve-site on a staged tree) instead of serving
+// substratic check-site's serve-site on a staged tree) instead of serving
 // BUILD itself; the page opened is BASE?QUERY.
 //
 // --eval JS runs in the page once the game is ready, before the wait (e.g.

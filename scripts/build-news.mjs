@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // build-news.mjs - phantomburn.net's /news/ and /version.json, generated into
 // a staged tree. Harkfell's scripts/build-news.mjs (its ruling D38) in Phantom
-// Burn's names and look. scripts/stage-web runs it, so both land INSIDE the
-// tree scripts/check-site.mjs checks and publish-web ships byte for byte.
+// Burn's names and look. substratic's stage-web runs it (the stage-hook: in
+// substratic.sgv), so both land INSIDE the tree check-site checks and
+// publish-web ships byte for byte.
 //
 //   node scripts/build-news.mjs NEWS-DIR TREE --version X.Y.Z --stamp STAMP [--date YYYY-MM-DD]
 //

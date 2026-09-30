@@ -1,5 +1,5 @@
 // check-site-pages.mjs - the site's own pages in headless Chrome, for
-// scripts/check-site.mjs (the game's legs stay there). Ported from Harkfell's
+// scripts/check-game.mjs (the arm substratic's check-site runs). Ported from Harkfell's
 // verify-site.mjs (its landing, carousel, contrast, news, feeds, version,
 // preview, crosslink and console legs), in phantomburn.net's names.
 //

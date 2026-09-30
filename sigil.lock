@@ -73,6 +73,11 @@
            sha: "fba8cb3b62857799af019158c94608447c8ba496"
            package-selector: "sigil-wasm-audio"
            version: "0.22.10")
+  (package name: "substratic"
+           url: "github:substratic/substratic"
+           ref: "^0.3.0"
+           sha: "593e895505378e3e0bc01286a71d6d0520b52703"
+           version: "0.3.0")
   (package name: "sigil-json"
            url: "codeberg:sigil/sigil-json"
            ref: "^0.16.0"

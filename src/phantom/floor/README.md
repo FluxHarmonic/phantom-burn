@@ -49,7 +49,7 @@ Exit status: 0 clean, 1 problems, 2 a usage or file error. `--raise` (with `--fl
 Heavy runs go to an azoth runner (folio `procedures/azoth-remote-builds`):
 
 ```
-scripts/build-remote --no-web --command "--floor-reach floors/14-slice.floor" --output build/floors
+sgx substratic:build-remote --no-web --command "--floor-reach floors/14-slice.floor" --output build/floors
 ```
 
 builds HEAD's release config on the runner, runs the release binary with those arguments, and fetches `build/floors` to `build/remote-out-<sha>/`.

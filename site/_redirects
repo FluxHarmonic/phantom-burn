@@ -2,7 +2,7 @@
 # The game lives at /badge-in/ (David, 2026-09-29: the public path for 0.1, a
 # sibling of Crash's /jack-in/). Its earlier paths keep working: its first,
 # unguessable one; /beta/, where the previews were; and /play/, the path
-# everyone guesses. scripts/check-site.mjs and verify-live.mjs follow every
+# everyone guesses. substratic's check-site and verify-live follow every
 # rule here, with a query string (?go=14 must survive the move).
 /p-wuypeb4rqy/* /badge-in/:splat 301
 /p-wuypeb4rqy /badge-in/ 301
