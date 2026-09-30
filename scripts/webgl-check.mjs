@@ -30,6 +30,7 @@
 // rule; see shot-web.mjs).
 import fs from "node:fs";
 import { spawn, execFileSync } from "node:child_process";
+import { plausibleStub } from "./plausible-check.mjs";
 
 const args = process.argv.slice(2);
 const opt = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : dflt; };
@@ -74,6 +75,7 @@ const lines = [], requests = [];
 let exiting = false;
 function shutdown(code) {
   if (exiting) return; exiting = true;
+  if (stub) stub.close();
   killChromeGroup("SIGTERM");
   setTimeout(() => { killChromeGroup("SIGKILL"); try { fs.rmSync(udd, { recursive: true, force: true }); } catch { /* scratch */ } process.exit(code); }, 600);
 }
@@ -98,9 +100,11 @@ let msgId = 0; const pending = new Map();
 function send(method, params = {}) {
   return new Promise((res, rej) => { const id = ++msgId; pending.set(id, { res, rej }); ws.send(JSON.stringify({ id, method, params })); });
 }
+let stub = null;
 ws.addEventListener("message", (ev) => {
   const msg = JSON.parse(ev.data);
   if (msg.id && pending.has(msg.id)) { const { res, rej } = pending.get(msg.id); pending.delete(msg.id); msg.error ? rej(new Error(JSON.stringify(msg.error))) : res(msg.result); return; }
+  if (stub) stub.onMessage(msg);
   if (msg.method === "Runtime.consoleAPICalled") lines.push(msg.params.type + ": " + (msg.params.args || []).map((a) => a.value ?? a.description ?? "").join(" "));
   if (msg.method === "Runtime.exceptionThrown") lines.push("exception: " + (msg.params.exceptionDetails?.exception?.description || msg.params.exceptionDetails?.text));
   if (msg.method === "Network.requestWillBeSent") requests.push(msg.params.request.url);
@@ -108,6 +112,8 @@ ws.addEventListener("message", (ev) => {
 await new Promise((res, rej) => { ws.addEventListener("open", res); ws.addEventListener("error", rej); });
 await send("Page.enable"); await send("Runtime.enable"); await send("Network.enable");
 await send("Network.setCacheDisabled", { cacheDisabled: true });
+// plausible.io stood in for (scripts/plausible-check.mjs): no internet
+stub = await plausibleStub(send);
 if (INIT) await send("Page.addScriptToEvaluateOnNewDocument", { source: INIT });
 async function evalJS(expr) {
   const r = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true });

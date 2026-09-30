@@ -27,6 +27,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import { spawn, execFileSync } from "node:child_process";
+import { plausibleStub } from "./plausible-check.mjs";
 
 const args = process.argv.slice(2);
 const opt = (name, dflt) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : dflt; };
@@ -84,6 +85,7 @@ function shutdown(code) {
   if (opt("--console")) fs.writeFileSync(opt("--console"), lines.join("\n") + "\n");
   if (opt("--requests")) fs.writeFileSync(opt("--requests"), requests.join("\n") + "\n");
   try { server.close(); } catch { /* not listening */ }
+  if (stub) stub.close();
   killChromeGroup("SIGTERM");
   setTimeout(() => { killChromeGroup("SIGKILL"); try { fs.rmSync(udd, { recursive: true, force: true }); } catch { /* scratch */ } process.exit(code); }, 800);
 }
@@ -102,14 +104,18 @@ let msgId = 0; const pending = new Map();
 function send(method, params = {}) {
   return new Promise((res, rej) => { const id = ++msgId; pending.set(id, { res, rej }); ws.send(JSON.stringify({ id, method, params })); });
 }
+let stub = null;
 ws.addEventListener("message", (ev) => {
   const msg = JSON.parse(ev.data);
   if (msg.id && pending.has(msg.id)) { const { res, rej } = pending.get(msg.id); pending.delete(msg.id); msg.error ? rej(new Error(JSON.stringify(msg.error))) : res(msg.result); return; }
+  if (stub) stub.onMessage(msg);
   if (msg.method === "Runtime.consoleAPICalled") lines.push((msg.params.args || []).map((a) => a.value ?? a.description ?? "").join(" "));
   if (msg.method === "Runtime.exceptionThrown") lines.push("exception: " + (msg.params.exceptionDetails?.exception?.description || msg.params.exceptionDetails?.text));
 });
 await new Promise((res, rej) => { ws.addEventListener("open", res); ws.addEventListener("error", rej); });
 await send("Page.enable"); await send("Runtime.enable");
+// plausible.io stood in for (scripts/plausible-check.mjs): a shot never reaches the internet
+stub = await plausibleStub(send);
 await send("Emulation.setDeviceMetricsOverride", { width: W * SCALE, height: H * SCALE, deviceScaleFactor: 1, mobile: false });
 
 async function evalJS(expr) {

@@ -41,6 +41,6 @@
   ;; the game's own legs of check-site: the landing and the site's pages,
   ;; the boots, floor 14, fullscreen, the first title's room, the reticle
   check: (arm: "scripts/check-game.mjs"
-          gate-files: ("scripts/check-site-pages.mjs" "scripts/shot-web.mjs"))
+          gate-files: ("scripts/check-site-pages.mjs" "scripts/shot-web.mjs" "scripts/plausible-check.mjs"))
   host: (https: 8811 http: 8812 dir: "~/Projects/Code/sigil/phantom-burn-hosted" interface: "wg0")
   remote: (web-config: web))

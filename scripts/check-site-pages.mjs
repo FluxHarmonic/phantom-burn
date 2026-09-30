@@ -41,6 +41,19 @@
 //              directory and the wasm are not the site's copy)
 //   console    no console error, exception or failed request on /, /news/,
 //              each post, and the 404 page
+//   analytics  (scripts/plausible-check.mjs) every HTML page in the tree, the
+//              game's included, carries David's Plausible snippet exactly
+//              once, in <head>, with phantomburn.net's script ID and no
+//              other site's; in Chrome, against a stub plausible.io (no
+//              internet: the stub answers every https://plausible.io/*
+//              request), each page the legs above visit loads the script
+//              and sends a pageview for phantomburn.net that the stub
+//              accepts (202, seen by the page)
+//   privacy    the landing's footer says "Privacy-friendly analytics by
+//              Plausible: no cookies, no personal data."
+//   analytics-down  with plausible.io unreachable (every request refused),
+//              / and the game still work: no error but the refused
+//              plausible.io requests themselves, and the game says ready
 // Chrome runs muted, into the worker-null sink (worker-instructions: no audio
 // on David's speakers). Throws on a setup failure; check-site reports that as
 // SETUP-FAILED.
@@ -48,7 +61,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { auditTree, plausibleStub, isPlausibleFailure, PRIVACY } from "./plausible-check.mjs";
 
+const PLAUSIBLE_ID = "pa-GxdOlotIbYY0LzO4WRsIV";
+const PLAUSIBLE_DOMAIN = "phantomburn.net";
 const SITE = "https://phantomburn.net";
 const DRAWABLE = /^[\x20-\x7e]*$/;
 const SUMMARY_MAX = 120;
@@ -65,6 +81,17 @@ export async function pageLegs({ DIR, BASE, SLUG, STAMP, REPO, ok, bad }) {
       .filter((f) => !f.startsWith(SLUG + "/") && !f.startsWith("w/") && /\.(html|xml|json|txt|css)$|^_headers$|^_redirects$/.test(f) && f !== "fonts/OFL.txt");
     const dashed = mine.filter((f) => EM.test(text(f)));
     dashed.length ? bad("em-dash", `an em dash in ${dashed.join(", ")}`) : ok("em-dash", `none in the site's ${mine.length} text files`);
+  }
+
+  // ---- analytics (no browser): the tag on every HTML page ------------------------------
+  {
+    const { pages, problems } = auditTree(DIR, PLAUSIBLE_ID);
+    // a floor: the pages that must be there, so an empty walk is no pass
+    const must = ["index.html", "404.html", "news/index.html", `${SLUG}/index.html`];
+    const absent = must.filter((p) => !pages.includes(p));
+    if (absent.length) problems.push(`pages missing from the walk: ${absent.join(", ")}`);
+    problems.length ? bad("analytics", problems.slice(0, 6).join("; "))
+      : ok("analytics", `David's snippet with ${PLAUSIBLE_ID} (${PLAUSIBLE_DOMAIN}) once, in <head>, on all ${pages.length} HTML pages: ${pages.join(", ")}`);
   }
 
   // ---- the browser ------------------------------------------------------------------
@@ -93,9 +120,11 @@ export async function pageLegs({ DIR, BASE, SLUG, STAMP, REPO, ok, bad }) {
     let msgId = 0; const pending = new Map();
     const consoleLines = []; const consoleErrors = [];
     const net = new Map();
+    let stub = null;
     ws.addEventListener("message", (ev) => {
       const msg = JSON.parse(ev.data);
       if (msg.id && pending.has(msg.id)) { const { res, rej } = pending.get(msg.id); pending.delete(msg.id); msg.error ? rej(new Error(JSON.stringify(msg.error))) : res(msg.result); return; }
+      if (stub) stub.onMessage(msg);
       const p = msg.params || {};
       if (msg.method === "Runtime.consoleAPICalled") {
         const t = (p.args || []).map((a) => a.value ?? a.description ?? "").join(" ");
@@ -112,6 +141,8 @@ export async function pageLegs({ DIR, BASE, SLUG, STAMP, REPO, ok, bad }) {
     const send = (method, params = {}) => new Promise((res, rej) => { const id = ++msgId; pending.set(id, { res, rej }); ws.send(JSON.stringify({ id, method, params })); });
     await send("Page.enable"); await send("Runtime.enable"); await send("Network.enable"); await send("Log.enable");
     await send("Network.setCacheDisabled", { cacheDisabled: true });
+    // plausible.io, stood in for (scripts/plausible-check.mjs): no leg reaches the internet
+    stub = await plausibleStub(send, { mode: "stub" });
     const evalJS = async (expr) => {
       const r = await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true });
       if (r.exceptionDetails) throw new Error(JSON.stringify(r.exceptionDetails).slice(0, 300));
@@ -123,9 +154,21 @@ export async function pageLegs({ DIR, BASE, SLUG, STAMP, REPO, ok, bad }) {
     // a URL is bad when no request for it succeeded (a request the page
     // abandoned and made again is not a missing file)
     const badRequests = (list) => { const g = new Set(list.filter(good).map((r) => r.url)); return list.filter((r) => !good(r) && !g.has(r.url) && !/^data:/.test(r.url || "")); };
+    // what each page's analytics saw: its URL -> the event statuses the page got back
+    const seen = new Map();
+    // every page a leg opened while the stub served (the review, 2026-09-30:
+    // a page that recorded nothing was simply absent from seen, and only the
+    // floors below could notice)
+    const visited = new Set();
+    const notePlausible = async () => {
+      const got = await waitFor(() => evalJS("window.__plausibleStub && window.__plausibleStub.length ? JSON.stringify([location.href, window.__plausibleStub]) : null"), 5000);
+      if (got) { const [u, st] = JSON.parse(got); seen.set(u, st); }
+    };
     const visit = async (p) => {
       await send("Page.navigate", { url: BASE + p });
-      return waitFor(() => evalJS("document.readyState === 'complete' && document.fonts.status === 'loaded'"), 15000);
+      const r = await waitFor(() => evalJS("document.readyState === 'complete' && document.fonts.status === 'loaded'"), 15000);
+      if (stub && stub.mode === "stub") { visited.add(await evalJS("location.href").catch(() => BASE + p)); await notePlausible(); }
+      return r;
     };
     const errorsAt = {};   // page -> errors seen while it was open
     // the landing's errors are collected from its first load through the
@@ -291,6 +334,8 @@ export async function pageLegs({ DIR, BASE, SLUG, STAMP, REPO, ok, bad }) {
       if (!at) detail.push(`the click did not land on /${SLUG}/ (at ${await evalJS("location.href").catch(() => "?")})`);
       const ready = await waitFor(async () => consoleLines.slice(l0).find((l) => /^phantom-burn: ready/.test(l)), 90000);
       if (!ready) detail.push(`the game never said "phantom-burn: ready" within 90 s`);
+      visited.add(await evalJS("location.href").catch(() => `${BASE}/${SLUG}/`));
+      await notePlausible();
       await send("Page.navigate", { url: "about:blank" });
       await sleep(300);
       detail.length ? bad("badge-in", detail.join("; ")) : ok("badge-in", `a click on BADGE IN lands on /${SLUG}/ and the game says "${ready}"`);
@@ -464,6 +509,76 @@ export async function pageLegs({ DIR, BASE, SLUG, STAMP, REPO, ok, bad }) {
       dirty.length ? bad("console", dirty.map(([p, errs]) => `${p}: ${errs.slice(0, 3).join(" | ")}`).join("; "))
         : ok("console", `no console error, exception or failed request on ${Object.keys(errorsAt).join(", ")}`);
     }
+
+    // ---- analytics, in Chrome: every page visited sent its pageview ------------------
+    {
+      const detail = [];
+      const pages = [...seen.keys()].map((u) => u.replace(BASE, "")).sort();
+      // a floor: the landing, the game, /news/, a post and the 404 page, so
+      // a harness that recorded nothing is no pass
+      for (const want of ["/", `/${SLUG}/`, "/news/"]) if (!pages.includes(want)) detail.push(`no analytics recorded on ${want}`);
+      if (!pages.some((p) => /^\/news\/[a-z0-9-]+\/$/.test(p))) detail.push("no analytics recorded on a news post");
+      if (!pages.some((p) => /^\/no-such-page-\d+$/.test(p))) detail.push("no analytics recorded on the 404 page");
+      for (const u of visited) if (!seen.has(u)) detail.push(`${u.replace(BASE, "")}: visited, and no event status came back to the page`);
+      for (const [u, st] of seen) {
+        const p = u.replace(BASE, "");
+        if (!st.includes(202)) detail.push(`${p}: the page got ${JSON.stringify(st)} back, not 202`);
+        const evs = stub.events.filter((e) => e.body && e.body.u === u);
+        if (!evs.some((e) => e.body.n === "pageview")) detail.push(`${p}: the stub received no pageview for it`);
+      }
+      const wrongScript = stub.scripts.filter((sc) => sc.id !== PLAUSIBLE_ID);
+      if (wrongScript.length) detail.push(`scripts requested for other IDs: ${[...new Set(wrongScript.map((sc) => sc.id))].join(", ")}`);
+      const wrongDomain = stub.events.filter((e) => !e.body || e.body.d !== PLAUSIBLE_DOMAIN);
+      if (wrongDomain.length) detail.push(`${wrongDomain.length} event(s) not for ${PLAUSIBLE_DOMAIN}: ${JSON.stringify(wrongDomain[0].body).slice(0, 120)}`);
+      detail.length ? bad("analytics", detail.slice(0, 6).join("; "))
+        : ok("analytics", `${pages.length} pages loaded the stub script for ${PLAUSIBLE_ID} and sent a pageview for ${PLAUSIBLE_DOMAIN} that came back 202 (${stub.scripts.length} script requests, ${stub.events.length} events): ${pages.join(", ")}`);
+    }
+
+    // ---- privacy: the footer's line -----------------------------------------------------
+    {
+      await visit("/");
+      const foot = await evalJS("(() => { const f = document.querySelector('footer'); if (!f) return null; const a = [...f.querySelectorAll('a')].find((a) => a.textContent.trim() === 'Plausible'); return { text: f.innerText, link: a ? a.href : null }; })()");
+      !foot ? bad("privacy", "the landing has no <footer>")
+        : !foot.text.includes(PRIVACY) ? bad("privacy", `the landing's footer does not say "${PRIVACY}"`)
+        : foot.link !== "https://plausible.io/data-policy" ? bad("privacy", `the footer's "Plausible" links ${foot.link || "nowhere"}, not https://plausible.io/data-policy`)
+        : ok("privacy", `the landing's footer says "${PRIVACY}", Plausible linking its data policy`);
+    }
+
+    // ---- analytics-down: plausible.io unreachable --------------------------------------
+    {
+      stub.setMode("down");
+      const detail = [];
+      const split = (e0, n0) => {
+        const errs = [...consoleErrors.slice(e0), ...badRequests(netSince(n0)).map((r) => `request ${r.url} ${r.status ?? ""}${r.failed ?? ""}`)];
+        return { ours: errs.filter(isPlausibleFailure), other: errs.filter((e) => !isPlausibleFailure(e)) };
+      };
+      const f0 = stub.failed.length;
+      let e0 = consoleErrors.length, n0 = net.size;
+      await visit("/");
+      await sleep(1000);
+      const landed = await evalJS("!!document.querySelector('h1.logo img') && document.querySelector('h1.logo img').naturalWidth > 0").catch(() => false);
+      let r = split(e0, n0);
+      if (!landed) detail.push("/: the landing did not render its logo");
+      if (r.other.length) detail.push(`/: ${r.other.slice(0, 3).join(" | ")}`);
+      const landingFails = r.ours.length;
+      const l0 = consoleLines.length;
+      e0 = consoleErrors.length; n0 = net.size;
+      await send("Page.navigate", { url: `${BASE}/${SLUG}/` });
+      const ready = await waitFor(async () => consoleLines.slice(l0).find((l) => /^phantom-burn: ready/.test(l)), 90000);
+      await sleep(1000);
+      r = split(e0, n0);
+      if (!ready) detail.push(`/${SLUG}/: the game never said "phantom-burn: ready" within 90 s`);
+      if (r.other.length) detail.push(`/${SLUG}/: ${r.other.slice(0, 3).join(" | ")}`);
+      // the positive control: the stub really refused them (or this leg judged nothing)
+      const refused = stub.failed.length - f0;
+      if (refused < 2 || !landingFails || !r.ours.length) detail.push(`plausible.io was not refused on both pages (${refused} refused; ${landingFails} and ${r.ours.length} failures seen)`);
+      await send("Page.navigate", { url: "about:blank" });
+      await sleep(300);
+      stub.setMode("stub");
+      detail.length ? bad("analytics-down", detail.join("; "))
+        : ok("analytics-down", `with plausible.io refused (${refused} requests), / renders and /${SLUG}/ says "${ready}", and the only errors are the refused plausible.io requests`);
+    }
+    stub.close();
     ws.close();
   } finally {
     killChrome();
