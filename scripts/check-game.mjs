@@ -151,12 +151,20 @@ for (const [q, want] of [["hud=0", "game"], ["title=1", "title"]]) {
 // the title starts without it; when it lands the title must put it in. The
 // root console's screen is violet (C-GIBSON); the bare title has none. Served
 // from this leg's own server over DIR (the same handler), so it can hold the
-// room back.
+// room back. Release all its files at the same deadline: floor.sexp names
+// the meshes/textures, so delaying each subsequent request by another 12 s
+// races the screenshot at 10 s (stand-in ready) + 14 s (shot wait).
 {
   const handler = createHandler(DIR);
+  let roomDeadline = null;
+  const roomRequests = [];
   const hold = http.createServer((req, res) => {
-    if (req.url.includes("/assets/floors/root-room/")) setTimeout(() => handler(req, res), 12000);
-    else handler(req, res);
+    if (req.url.includes("/assets/floors/root-room/")) {
+      if (roomDeadline === null) roomDeadline = Date.now() + 12000;
+      const remaining = Math.max(0, roomDeadline - Date.now());
+      roomRequests.push(`${req.url}: held ${remaining}ms`);
+      setTimeout(() => handler(req, res), remaining);
+    } else handler(req, res);
   });
   await new Promise((r) => hold.listen(0, "127.0.0.1", r));
   const HOLD = `http://127.0.0.1:${hold.address().port}`;
@@ -172,7 +180,7 @@ for (const [q, want] of [["hud=0", "game"], ["title=1", "title"]]) {
   hold.close();
   const n = r.status === 0 && fs.existsSync(png) ? violetPixels(png) : -1;
   n >= 300 ? ok("title-room", `the first title, its room held back 12 s, shows it when it lands (${n} violet pixels)`)
-           : bad("title-room", `the first title with its room held back: ${n < 0 ? "no shot (rc " + r.status + ")" : n + " violet pixels (want 300 or more): the console alone"}`);
+           : bad("title-room", `the first title with its room held back: ${n < 0 ? "no shot (rc " + r.status + ")" : n + " violet pixels (want 300 or more): the console alone"}; requests: ${roomRequests.join(" | ")}`);
 }
 // reticle (David, 2026-09-29: "you can't tell what you're pointing at"): in
 // play a small plus at the view's centre in C-TEXT-DIM; aimed at a device
