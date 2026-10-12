@@ -18,6 +18,8 @@
 //   boots       the game at /<game>/ and its title (?title=1) boot in headless
 //               Chrome (scripts/shot-web.mjs: --mute-audio and the worker-null
 //               sink) with no console error
+//   webgl       with WebGL disabled, the page explains the requirement and
+//               stops the loader before it requests WASM or bridges
 //   overlay     the page has no HTML instructions overlay (#how)
 //   transmission  floor 14 (?go=14, the flow) prints Crash's transmission
 //   fullscreen  Substratic's button, and the page's "phantom-burn: fullscreen"
@@ -96,6 +98,27 @@ for (const [q, want] of [["hud=0", "game"], ["title=1", "title"]]) {
   const out = r.out;
   r.status === 0 && /shot ->/.test(out) ? ok("boots", `the ${want} boots at /${SLUG}/?${q} with no console error`)
     : bad("boots", `the ${want} at /${SLUG}/?${q}: rc ${r.status}: ${out.split("\n").filter((l) => !/^retry/.test(l)).slice(0, 3).join(" | ").slice(0, 300)}`);
+}
+// WebGL-off was lost when the site gate moved to Substratic's tasks. Keep
+// this game-specific check in the arm so every check-site run exercises it.
+{
+  const r = await new Promise((resolve) => {
+    const ch = spawn("node", [path.join(REPO, "scripts/webgl-check.mjs"),
+      "--url", `${BASE}/${SLUG}/`, "--mode", "off"]);
+    let out = "";
+    ch.stdout.on("data", (d) => { out += d; });
+    ch.stderr.on("data", (d) => { out += d; });
+    const kill = setTimeout(() => ch.kill("SIGKILL"), 170000);
+    ch.on("error", (error) => { clearTimeout(kill); resolve({ status: 2, out: String(error) }); });
+    ch.on("close", (status) => { clearTimeout(kill); resolve({ status, out }); });
+  });
+  if (r.status !== 0 && r.status !== 1) {
+    console.log(`SETUP-FAILED: WebGL-off exited ${r.status}: ${r.out.trim()}`);
+    process.exit(2);
+  }
+  r.status === 0 && /^PASS off$/m.test(r.out)
+    ? ok("webgl", "with WebGL off the message is visible and no loader, WASM or bridges run")
+    : bad("webgl", `WebGL-off: ${r.out.trim()}`);
 }
 // Phantom 0.1 (David): no HTML instructions over the game; Crash's
 // transmission on floor 14 instead; Substratic's fullscreen button, and the
