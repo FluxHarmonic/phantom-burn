@@ -2,7 +2,8 @@
 # gate-dither [native|web|both] [--expect-wrong spread|palette]
 #
 # The post pass reproduces Crash's ordered dither (D27) bit for bit. For each
-# of the floor's three views and one dark room (view 4, office-night), on
+# of the prototype slice's three views and one dark room (view 4,
+# office-night), on
 # each target:
 #   raw   the frame with the dither off (--dither off)
 #   dith  the same frame with the dither on (Bayer 4x4, embers), once per
@@ -24,7 +25,9 @@
 # shader, run by hand and logged in the task's Session Log).
 #
 # Native needs SHOT_DISPLAY (your own Xvfb) and build/dev; web needs
-# build/web. Prints one line per view and target, then GREEN/RED with
+# build/web. Web shots use play=0 to match the native walk-only path:
+# play's frame hooks and arrival transmission are outside this render gate.
+# Prints one line per view and target, then GREEN/RED with
 # counts; exit 0 GREEN, 1 RED, 2 SETUP-FAILED.
 set -eu
 cd "$(dirname "$0")/.."
@@ -52,10 +55,10 @@ for t in $TARGETS; do
     if [ "$v" = card ]; then NA="--card"; WQ="card=1"; else NA="--shot $v"; WQ="shot=$v"; fi
     raw="$OUT/$t-$v-raw.png"
     if [ "$t" = native ]; then
-      scripts/shot-native "$raw" $NA --hud 0 --dither off > "$OUT/$t-$v-raw.log" 2>&1 \
+      scripts/shot-native "$raw" --floor assets/floors/14-slice $NA --hud 0 --dither off > "$OUT/$t-$v-raw.log" 2>&1 \
         || { cat "$OUT/$t-$v-raw.log"; echo "SETUP-FAILED: native shot $v raw"; exit 2; }
     else
-      node scripts/shot-web.mjs build/web "$raw" --query "$WQ&hud=0&dither=off" > "$OUT/$t-$v-raw.log" 2>&1 \
+      node scripts/shot-web.mjs build/web "$raw" --query "$WQ&floor=14-slice&play=0&hud=0&dither=off" > "$OUT/$t-$v-raw.log" 2>&1 \
         || { cat "$OUT/$t-$v-raw.log"; echo "SETUP-FAILED: web shot $v raw"; exit 2; }
     fi
     nraw="$(colours "$raw" | wc -l)"
@@ -63,10 +66,10 @@ for t in $TARGETS; do
     for sp in $SPREADS; do
       dith="$OUT/$t-$v-s$sp-dith.png"; want="$OUT/$t-$v-s$sp-want.png"
       if [ "$t" = native ]; then
-        scripts/shot-native "$dith" $NA --hud 0 --dither on --spread "$sp" --bayer 4 --palette embers > "$OUT/$t-$v-s$sp.log" 2>&1 \
+        scripts/shot-native "$dith" --floor assets/floors/14-slice $NA --hud 0 --dither on --spread "$sp" --bayer 4 --palette embers > "$OUT/$t-$v-s$sp.log" 2>&1 \
           || { cat "$OUT/$t-$v-s$sp.log"; echo "SETUP-FAILED: native shot $v spread $sp"; exit 2; }
       else
-        node scripts/shot-web.mjs build/web "$dith" --query "$WQ&hud=0&dither=on&spread=$sp&bayer=4&palette=embers" > "$OUT/$t-$v-s$sp.log" 2>&1 \
+        node scripts/shot-web.mjs build/web "$dith" --query "$WQ&floor=14-slice&play=0&hud=0&dither=on&spread=$sp&bayer=4&palette=embers" > "$OUT/$t-$v-s$sp.log" 2>&1 \
           || { cat "$OUT/$t-$v-s$sp.log"; echo "SETUP-FAILED: web shot $v spread $sp"; exit 2; }
       fi
       moved="$(differ "$raw" "$dith")"
