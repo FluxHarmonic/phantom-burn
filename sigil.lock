@@ -34,10 +34,10 @@
            sha: "9112ac9adad2e5ee75286533af384105f08ea118"
            version: "0.1.0")
   (package name: "substratic"
-           url: "github:substratic/substratic"
-           ref: "^0.3.0"
-           sha: "593e895505378e3e0bc01286a71d6d0520b52703"
-           version: "0.3.0")
+           url: "https://github.com/substratic/substratic.git"
+           ref: "v0.4.0"
+           sha: "52df49d7059434be9c908776755c3869750404ca"
+           version: "0.4.0")
   (package name: "sigil-wasm-runtime"
            url: "codeberg:sigil/sigil"
            ref: "0.22.11"

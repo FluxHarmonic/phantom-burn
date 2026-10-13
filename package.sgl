@@ -63,10 +63,9 @@
     (from-git url: "codeberg:sigil/sigil-graphics" version: "^0.14.0")
     ;; vec/mat/quat as float32 bytevectors, the camera, rays.
     (from-git url: "codeberg:sigil/sigil-geometry" version: "^0.1.0")
-    ;; Shared runtime and site tooling. Until its 0.4.0 release, development
-    ;; gates repoint .sigil/deps/substratic to tested shared-modules revision
-    ;; 94e95e5f9b4ab462c3d52c756d126403d0b44ae9 and build with --force.
-    (from-git url: "github:substratic/substratic" version: "^0.3.0")
+    ;; Shared runtime and site tooling, pinned to the released engine tag.
+    (from-git url: "https://github.com/substratic/substratic.git"
+              name: "substratic" tag: "v0.4.0")
     ;; Web only: the wasm runtime and loader, the WebGL2 bridge and app
     ;; shell, and the browser helpers.
     (from-git url: sigil-repo package: "sigil-wasm-runtime" version: "0.22.11" configs: '(web))
