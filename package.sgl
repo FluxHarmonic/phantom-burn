@@ -21,7 +21,7 @@
 (package
   name: "phantom-burn"
   version: "0.1.0"
-  sigil: "0.22.10"
+  sigil: "0.22.11"
   description: "A first-person stealth and hacking game in Crash The Stack's world"
   license: "GPL-3.0-or-later"
   authors: (list "David Wilson <david@daviwil.com>")
@@ -58,28 +58,29 @@
 
   dependencies: (list
     ;; Window, keyboard and cursor capture (GLFW); native only.
-    (from-git url: "codeberg:sigil/sigil-app" name: "sigil-desktop" version: "^0.12.0" configs: '(dev release))
+    (from-git url: "codeberg:sigil/sigil-desktop" version: "^0.13.0" configs: '(dev release))
     ;; Drawing, 2D and the 3D path, both targets.
     (from-git url: "codeberg:sigil/sigil-graphics" version: "^0.14.0")
     ;; vec/mat/quat as float32 bytevectors, the camera, rays.
     (from-git url: "codeberg:sigil/sigil-geometry" version: "^0.1.0")
+    ;; Shared runtime and site tooling. Until its 0.4.0 release, development
+    ;; gates repoint .sigil/deps/substratic to tested shared-modules revision
+    ;; 94e95e5f9b4ab462c3d52c756d126403d0b44ae9 and build with --force.
+    (from-git url: "github:substratic/substratic" version: "^0.3.0")
     ;; Web only: the wasm runtime and loader, the WebGL2 bridge and app
     ;; shell, and the browser helpers.
-    (from-git url: sigil-repo package: "sigil-wasm-runtime" version: ">=0.22.10" configs: '(web))
-    (from-git url: sigil-repo package: "sigil-wasm-gles3" version: ">=0.22.10" configs: '(web))
-    (from-git url: sigil-repo package: "sigil-browser" version: ">=0.22.10" configs: (quote (web)))
+    (from-git url: sigil-repo package: "sigil-wasm-runtime" version: "0.22.11" configs: '(web))
+    (from-git url: sigil-repo package: "sigil-wasm-gles3" version: "0.22.11" configs: '(web))
+    (from-git url: sigil-repo package: "sigil-browser" version: "0.22.11" configs: (quote (web)))
     ;; S1 sound: the tune player and the render (motif), the sink (sigil-audio; the
     ;; WebAudio bridge on the web, with sigil-wasm-audio)
     (from-git url: "codeberg:sigil/motif" version: "^0.8.0")
     (from-git url: "codeberg:sigil/sigil-audio" version: "^0.13.0")
-    (from-git url: sigil-repo package: "sigil-wasm-audio" version: ">=0.22.10" configs: (quote (web))))
+    (from-git url: sigil-repo package: "sigil-wasm-audio" version: "0.22.11" configs: (quote (web))))
 
   dev-dependencies: (list
-    (from-git url: sigil-repo package: "sigil-test" version: ">=0.22.10")
-    (from-git url: sigil-repo package: "sigil-test-runner" version: ">=0.22.10")
-    ;; the shared site and release tasks (sgx substratic:stage-web and the
-    ;; rest, configured in substratic.sgv); nothing of it is compiled into the game
-    (from-git url: "github:substratic/substratic" version: "^0.3.0"))
+    (from-git url: sigil-repo package: "sigil-test" version: "0.22.11")
+    (from-git url: sigil-repo package: "sigil-test-runner" version: "0.22.11"))
 
   tasks: (list
     (task

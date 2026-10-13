@@ -2,27 +2,27 @@
 (lock
   (package name: "sigil-stdlib"
            url: "codeberg:sigil/sigil"
-           ref: ">=0.22.10, <1.0"
-           sha: "fba8cb3b62857799af019158c94608447c8ba496"
+           ref: ">=0.22.11, <1.0"
+           sha: "318332fd7f005d4a6cdc834cb8a1e632c0ba923f"
            package-selector: "sigil-stdlib"
-           version: "0.22.10")
+           version: "0.22.11")
   (package name: "sigil-test"
            url: "codeberg:sigil/sigil"
-           ref: ">=0.22.10"
-           sha: "fba8cb3b62857799af019158c94608447c8ba496"
+           ref: "0.22.11"
+           sha: "318332fd7f005d4a6cdc834cb8a1e632c0ba923f"
            package-selector: "sigil-test"
-           version: "0.22.10")
+           version: "0.22.11")
   (package name: "sigil-test-runner"
            url: "codeberg:sigil/sigil"
-           ref: ">=0.22.10"
-           sha: "fba8cb3b62857799af019158c94608447c8ba496"
+           ref: "0.22.11"
+           sha: "318332fd7f005d4a6cdc834cb8a1e632c0ba923f"
            package-selector: "sigil-test-runner"
-           version: "0.22.10")
+           version: "0.22.11")
   (package name: "sigil-desktop"
-           url: "codeberg:sigil/sigil-app"
-           ref: "^0.12.0"
-           sha: "a342bd511cb593580912a0f96ace32950d0b745f"
-           version: "0.12.0")
+           url: "codeberg:sigil/sigil-desktop"
+           ref: "^0.13.0"
+           sha: "a1e672622304a8e33a81d111e393b1a858a9d0c1"
+           version: "0.13.0")
   (package name: "sigil-graphics"
            url: "codeberg:sigil/sigil-graphics"
            ref: "^0.14.0"
@@ -33,30 +33,35 @@
            ref: "^0.1.0"
            sha: "9112ac9adad2e5ee75286533af384105f08ea118"
            version: "0.1.0")
+  (package name: "substratic"
+           url: "github:substratic/substratic"
+           ref: "^0.3.0"
+           sha: "593e895505378e3e0bc01286a71d6d0520b52703"
+           version: "0.3.0")
   (package name: "sigil-wasm-runtime"
            url: "codeberg:sigil/sigil"
-           ref: ">=0.22.10"
-           sha: "fba8cb3b62857799af019158c94608447c8ba496"
+           ref: "0.22.11"
+           sha: "318332fd7f005d4a6cdc834cb8a1e632c0ba923f"
            package-selector: "sigil-wasm-runtime"
-           version: "0.22.10")
+           version: "0.22.11")
   (package name: "sigil-lib"
            url: "codeberg:sigil/sigil"
            ref: ">=0.21"
-           sha: "fba8cb3b62857799af019158c94608447c8ba496"
+           sha: "318332fd7f005d4a6cdc834cb8a1e632c0ba923f"
            package-selector: "sigil-lib"
-           version: "0.22.10")
+           version: "0.22.11")
   (package name: "sigil-wasm-gles3"
            url: "codeberg:sigil/sigil"
-           ref: ">=0.22.10"
-           sha: "fba8cb3b62857799af019158c94608447c8ba496"
+           ref: "0.22.11"
+           sha: "318332fd7f005d4a6cdc834cb8a1e632c0ba923f"
            package-selector: "sigil-wasm-gles3"
-           version: "0.22.10")
+           version: "0.22.11")
   (package name: "sigil-browser"
            url: "codeberg:sigil/sigil"
-           ref: ">=0.22.10"
-           sha: "fba8cb3b62857799af019158c94608447c8ba496"
+           ref: "0.22.11"
+           sha: "318332fd7f005d4a6cdc834cb8a1e632c0ba923f"
            package-selector: "sigil-browser"
-           version: "0.22.10")
+           version: "0.22.11")
   (package name: "motif"
            url: "codeberg:sigil/motif"
            ref: "^0.8.0"
@@ -69,15 +74,10 @@
            version: "0.13.0")
   (package name: "sigil-wasm-audio"
            url: "codeberg:sigil/sigil"
-           ref: ">=0.22.10"
-           sha: "fba8cb3b62857799af019158c94608447c8ba496"
+           ref: "0.22.11"
+           sha: "318332fd7f005d4a6cdc834cb8a1e632c0ba923f"
            package-selector: "sigil-wasm-audio"
-           version: "0.22.10")
-  (package name: "substratic"
-           url: "github:substratic/substratic"
-           ref: "^0.3.0"
-           sha: "593e895505378e3e0bc01286a71d6d0520b52703"
-           version: "0.3.0")
+           version: "0.22.11")
   (package name: "sigil-json"
            url: "codeberg:sigil/sigil-json"
            ref: "^0.16.0"
@@ -96,9 +96,9 @@
   (package name: "sigil-args"
            url: "codeberg:sigil/sigil"
            ref: ">=0.19"
-           sha: "fba8cb3b62857799af019158c94608447c8ba496"
+           sha: "318332fd7f005d4a6cdc834cb8a1e632c0ba923f"
            package-selector: "sigil-args"
-           version: "0.22.10")
+           version: "0.22.11")
   (package name: "sigil-dsp"
            url: "codeberg:sigil/sigil-dsp"
            ref: "^0.3.4"
@@ -132,7 +132,7 @@
   (package name: "sigil-repl"
            url: "codeberg:sigil/sigil"
            ref: ">=0.19"
-           sha: "fba8cb3b62857799af019158c94608447c8ba496"
+           sha: "318332fd7f005d4a6cdc834cb8a1e632c0ba923f"
            package-selector: "sigil-repl"
-           version: "0.22.10")
+           version: "0.22.11")
 )
