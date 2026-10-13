@@ -1,0 +1,25 @@
+;;; Phantom's accepted DOM keys and game aliases. Shared keys/sticks own
+;;; state; this module contains only the game's existing vocabulary.
+(define-library (phantom input web)
+  (import (only (substratic input keys) dom-key->symbol))
+  (export phantom-dom-key)
+
+  (begin
+    (define (phantom-dom-key name)
+      (cond
+        ((string=? name "deck") 'deck)
+        ((string=? name " ") (dom-key->symbol name))
+        ((= (string-length name) 1)
+         ;; The lighting lab reads literal punctuation symbols. Substratic
+         ;; uses desktop names such as comma and left-bracket instead.
+         (let ((character (string-ref name 0)))
+           (if (or (char-alphabetic? character) (char-numeric? character))
+               (dom-key->symbol name)
+               (string->symbol (string (char-downcase character))))))
+        ((member name '("ArrowLeft" "ArrowRight" "ArrowUp" "ArrowDown"
+                       "Shift" "Control" "Enter" "Escape"))
+         (case (dom-key->symbol name)
+           ((ctrl) 'control)
+           ((return) 'enter)
+           (else (dom-key->symbol name))))
+        (else #f)))))

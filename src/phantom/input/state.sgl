@@ -1,0 +1,100 @@
+;;; Phantom's ordered menu/button presses and legacy payloads over shared state.
+(define-library (phantom input state)
+  (import (sigil struct)
+          (phantom input web)
+          (substratic input keys)
+          (substratic input sticks)
+          (substratic input events))
+  (export make-web-input web-input? web-input-dispatch!
+          web-input-held? web-input-pressed web-input-stick
+          web-input-clear-pressed! web-input-clear-keys! web-input-take-look!
+          web-input-pair)
+
+  (begin
+    (define-struct web-input
+      (keys)
+      (sticks)
+      (pressed default: '() mutable: #t)
+      (look-x default: 0 mutable: #t)
+      (look-y default: 0 mutable: #t))
+
+    (define (make-web-input)
+      (web-input keys: (make-keys) sticks: (make-sticks)))
+
+    (define (web-input-held? input key)
+      (let ((keys (web-input-keys input)))
+        (case key
+          ;; Keep Phantom's policy: Ctrl+W closes a browser tab, so Ctrl
+          ;; remains a menu press but never enables the running modifier.
+          ((control) #f)
+          ((deck) (or (keys-held? keys 'deck) (keys-held? keys 't)))
+          (else (keys-held? keys key)))))
+
+    (define (web-input-stick input name)
+      (stick-vector (web-input-sticks input) name))
+
+    (define (web-input-clear-pressed! input)
+      (set-web-input-pressed! input '())
+      (keys-end-frame! (web-input-keys input)))
+
+    (define (web-input-take-look! input)
+      (let ((look (cons (web-input-look-x input) (web-input-look-y input))))
+        (set-web-input-look-x! input 0)
+        (set-web-input-look-y! input 0)
+        look))
+
+    ;; Flow-to-game cleared keys, presses and mouse deltas, retaining sticks.
+    (define (web-input-clear-keys! input)
+      (keys-clear! (web-input-keys input))
+      (web-input-clear-pressed! input)
+      (web-input-take-look! input)
+      #t)
+
+    ;; The old two-field events independently map an invalid component to 0.
+    (define (web-input-pair payload)
+      (let find ((index 0))
+        (cond
+          ((>= index (string-length payload)) (cons 0 0))
+          ((char=? (string-ref payload index) #\,)
+           (cons (or (string->number (substring payload 0 index)) 0)
+                 (or (string->number (substring payload (+ index 1) (string-length payload))) 0)))
+          (else (find (+ index 1))))))
+
+    (define (web-input-dispatch! input type payload)
+      (let ((keys (web-input-keys input))
+            (sticks (web-input-sticks input)))
+        (cond
+          ((string=? type "keydown")
+           (let ((key (phantom-dom-key payload)))
+             (when (and key (not (keys-held? keys key)))
+               (keys-down! keys key)
+               ;; Preserve ordering across physical and synthetic presses.
+               (set-web-input-pressed! input (cons key (web-input-pressed input)))))
+           #t)
+          ((string=? type "keyup")
+           (let ((key (phantom-dom-key payload)))
+             (when key
+               (keys-up! keys key)))
+           #t)
+          ((string=? type "press")
+           (set-web-input-pressed! input
+             (cons (string->symbol payload) (web-input-pressed input)))
+           #t)
+          ((string=? type "look")
+           (let ((look (web-input-pair payload)))
+             (set-web-input-look-x! input (+ (web-input-look-x input) (car look)))
+             (set-web-input-look-y! input (+ (web-input-look-y input) (cdr look))))
+           #t)
+          ((or (string=? type "move") (string=? type "lookstick"))
+           (let ((stick (web-input-pair payload))
+                 (name (if (string=? type "move") "move" "look")))
+             (sticks-set! sticks name (car stick) (cdr stick)))
+           #t)
+          ((string=? type "blur")
+           (input-dispatch! keys sticks type payload)
+           ;; Shared clear releases holds; game transitions must also discard
+           ;; pending presses and mouse deltas before another frame arrives.
+           (web-input-clear-pressed! input)
+           (web-input-take-look! input)
+           #t)
+          (else (input-dispatch! keys sticks type payload)))))))

@@ -33,8 +33,7 @@
 ;;; time: each switch reloads the one it goes to.
 
 (define-library (phantom shell web)
-  (import (sigil core)
-          (sigil math)
+  (import (sigil math)
           (sigil graphics)
           (sigil graphics image)
           (sigil browser gles3)
@@ -44,6 +43,7 @@
           (phantom title)
           (phantom stand-in)
           (phantom walker)
+          (phantom input state)
           (phantom floor replay)
           (phantom play mode)
           (phantom sound game)
@@ -67,12 +67,7 @@
     (define *waited* 0.0)        ; seconds since the page named the floor, until start
     (define *said-stuck* #f)
     (define *last-ms* #f)
-    (define *keys* '())
-    (define *pressed* '())
-    (define *look-x* 0)
-    (define *look-y* 0)
-    (define *move-x* 0.0) (define *move-y* 0.0)
-    (define *stick-x* 0.0) (define *stick-y* 0.0)
+    (define *input* (make-web-input))
 
     ;; S1's sound ((phantom sound game)): the page fetches its tunes
     ;; (SOUND-TUNES) and hands each over as ("tune", "NAME\nTEXT"); the loader
@@ -152,27 +147,9 @@
                  (and (gles3-image-ready? (cdar fs)) (loop (cdr fs)))))))
     (define (all-ready?) (and *collide* (fetched?)))
 
-    (define (dom-key->sym k)
-      (cond ((string=? k "ArrowLeft") 'left)
-            ((string=? k "ArrowRight") 'right)
-            ((string=? k "ArrowUp") 'up)
-            ((string=? k "ArrowDown") 'down)
-            ((string=? k "Shift") 'shift)
-            ((string=? k "Control") 'control)
-            ((string=? k "deck") 'deck)
-            ((string=? k "Enter") 'enter)
-            ((string=? k "Escape") 'escape)     ; the pause panel (unlocked: in play the page sends "pause")
-            ((string=? k " ") 'space)
-            ((= (string-length k) 1) (string->symbol (string (char-downcase (string-ref k 0)))))
-            (else #f)))
-
-    ;; Ctrl runs natively but not here: Ctrl+W closes the tab.
-    ;; the deck (P3) is held: the page's right mouse button and DECK button
-    ;; send the key "deck", and T holds it too
-    (define (held? k)
-      (cond ((eq? k 'control) #f)
-            ((eq? k 'deck) (and (or (memq 'deck *keys*) (memq 't *keys*)) #t))
-            (else (and (memq k *keys*) #t))))
+    ;; Phantom aliases and browser Ctrl policy live in the input adapter.
+    (define (held? key)
+      (web-input-held? *input* key))
 
     (define (frame-dt payload)
       (let* ((ms (or (string->number payload) 0.0))
@@ -360,7 +337,7 @@
       ;; only the console; a title after PRACTICE had the room)
       (set! *t-bare* (not (and *t-info* (t-fetched?))))
       (apply-params!)
-      (set! *pressed* '())
+      (web-input-clear-pressed! *input*)
       (set! *tap* #f)
       ;; PRACTICE finished (now or before): the menu points at INFILTRATE
       (set! *menu-sel* (if (and (string=? *floor* "sim") (not (practiced?))) 0 1))
@@ -382,9 +359,7 @@
     ;; reloading its floor into the renderer and a fresh attempt.
     (define (flow-to-game!)
       (set! *mode* 'game)
-      (set! *pressed* '())
-      (set! *keys* '())
-      (set! *look-x* 0) (set! *look-y* 0)
+      (web-input-clear-keys! *input*)
       (when (eq? *started* #t)
         (game-reload! load-mesh* load-texture* (game-collision) *info*)
         (apply-params!)
@@ -399,7 +374,7 @@
                       ((down s) (set! *menu-sel* (min (- (length MENU-ITEMS) 1) (+ *menu-sel* 1))))
                       ((tap) #f)
                       (else (set! go? #t))))
-                  (reverse *pressed*))
+                  (reverse (web-input-pressed *input*)))
         (when *tap*
           (let ((hit (title-menu-hit (gles3-canvas-width) (gles3-canvas-height) (car *tap*) (cdr *tap*))))
             (when hit (set! *menu-sel* hit) (set! go? #t))))
@@ -446,10 +421,10 @@
               ;; does not skip the title): up/down (or W/S) move, any other
               ;; key starts the choice, a tap starts the item under it
               (when (> *t-time* 0.8) (menu-input!))
-              (set! *pressed* '())
+              (web-input-clear-pressed! *input*)
               (set! *tap* #f))
             (begin
-              (set! *pressed* '())
+              (web-input-clear-pressed! *input*)
               (begin-frame)
               (clear-screen 0.0 0.0 0.0)
               (end-frame)))))
@@ -480,16 +455,20 @@
       (gles3-resize-to-display)
       (let ((dt (frame-dt payload)))
         (cond ((eq? *started* #t)
-               (let ((dx *look-x*) (dy *look-y*) (pressed *pressed*))
-                 (set! *look-x* 0)
-                 (set! *look-y* 0)
-                 (set! *pressed* '())
+               (let* ((look (web-input-take-look! *input*))
+                      (move (web-input-stick *input* "move"))
+                      (stick (web-input-stick *input* "look"))
+                      (pressed (web-input-pressed *input*)))
+                 (web-input-clear-pressed! *input*)
                  ;; a tap in play: the pause panel's rows, or dismissing Crash's transmission
                  (when (and *tap* (eq? *mode* 'game))
                    (play-mode-tap! (car *tap*) (cdr *tap*))
                    (set! *tap* #f))
                  (game-frame! dt (gles3-canvas-width) (gles3-canvas-height)
-                              (make-controls held? pressed dx dy *move-x* *move-y* *stick-x* *stick-y*))
+                              (make-controls held? pressed
+                                             (car look) (cdr look)
+                                             (car move) (cdr move)
+                                             (car stick) (cdr stick)))
                  ;; the sound: P2's feed for this frame (steps, events, you, the guard)
                  (sound-game-frame! dt (game-walker))
                  (sound-traced!)
@@ -518,14 +497,6 @@
                (clear-screen (/ 13 255) (/ 10 255) (/ 26 255))
                (end-frame)))))
 
-    (define (split-pair s)
-      (let loop ((i 0))
-        (cond ((>= i (string-length s)) (cons 0 0))
-              ((char=? (string-ref s i) #\,)
-               (cons (or (string->number (substring s 0 i)) 0)
-                     (or (string->number (substring s (+ i 1) (string-length s))) 0)))
-              (else (loop (+ i 1))))))
-
     ;; "a=1&b=two" -> (("a" . "1") ("b" . "two")); no decoding (the values
     ;; are numbers and plain words).
     (define (split-query s)
@@ -549,38 +520,15 @@
       (gles3-start-loop "phantom-burn-tick")
       0)
 
-    (define (drop k ks)
-      (cond ((null? ks) '()) ((eq? (car ks) k) (drop k (cdr ks))) (else (cons (car ks) (drop k (cdr ks))))))
-
     (define (web-dispatch type payload)
       (cond ((string=? type "frame") (web-tick payload) 0)
-            ((string=? type "keydown")
-             (let ((k (dom-key->sym payload)))
-               (when k
-                 (unless (memq k *keys*)
-                   (set! *keys* (cons k *keys*))
-                   (set! *pressed* (cons k *pressed*)))))
-             0)
-            ((string=? type "keyup")
-             (let ((k (dom-key->sym payload)))
-               (when k (set! *keys* (drop k *keys*))))
-             0)
-            ((string=? type "look")
-             (let ((p (split-pair payload)))
-               (set! *look-x* (+ *look-x* (car p)))
-               (set! *look-y* (+ *look-y* (cdr p))))
-             0)
-            ((string=? type "move")
-             (let ((p (split-pair payload))) (set! *move-x* (car p)) (set! *move-y* (cdr p)))
-             0)
-            ((string=? type "lookstick")
-             (let ((p (split-pair payload))) (set! *stick-x* (car p)) (set! *stick-y* (cdr p)))
-             0)
-            ((string=? type "press")
-             (set! *pressed* (cons (string->symbol payload) *pressed*))
+            ((web-input-dispatch! *input* type payload)
+             ;; Focus loss also discards a pending product menu tap.
+             (when (string=? type "blur")
+               (set! *tap* #f))
              0)
             ((string=? type "tap")
-             (let ((p (split-pair payload))) (set! *tap* p))
+             (set! *tap* (web-input-pair payload))
              0)
             ;; the page: the pointer lock was lost in play (Escape): the pause panel
             ((string=? type "pause")
