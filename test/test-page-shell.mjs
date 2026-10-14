@@ -14,11 +14,11 @@ async function boot(page, query, level, stored, fullscreen = true, ready = true,
     constructor() { this.listeners = new Map(); }
     addEventListener(type, callback, options) {
       const callbacks = this.listeners.get(type) || [];
-      callbacks.push({ callback, once: !!options?.once });
+      callbacks.push({ callback, once: !!options?.once, capture: !!options?.capture });
       this.listeners.set(type, callbacks);
     }
     fire(type, data = {}) {
-      for (const listener of [...(this.listeners.get(type) || [])]) {
+      for (const listener of [...(this.listeners.get(type) || [])].sort((a, b) => Number(b.capture) - Number(a.capture))) {
         listener.callback({ target: this, preventDefault() {}, stopPropagation() {}, ...data });
         if (listener.once) this.listeners.set(type, this.listeners.get(type).filter(x => x !== listener));
       }
@@ -27,7 +27,7 @@ async function boot(page, query, level, stored, fullscreen = true, ready = true,
   class Element extends Target {
     constructor(tag) {
       super(); this.nodeName = tag.toUpperCase(); this.style = {}; this.children = [];
-      this.attributes = {}; this.className = ''; this.textContent = ''; nodes.push(this);
+      this.attributes = {}; this.className = ''; this.textContent = ''; this.width = 480; this.height = 270; nodes.push(this);
       this.classList = {
         contains: name => this.className.split(/\s+/).includes(name),
         add: name => { if (!this.classList.contains(name)) this.className += ' ' + name; },
@@ -44,6 +44,7 @@ async function boot(page, query, level, stored, fullscreen = true, ready = true,
       return (level === 'webgl2' || (level === 'webgl1' && kind === 'webgl'))
         ? { getExtension() { return { loseContext() {} }; } } : null;
     }
+    getBoundingClientRect() { return { left: 0, top: 0, width: 480, height: 270 }; }
     requestPointerLock() { pointerRequests++; document.pointerLockElement = this; return Promise.resolve(); }
   }
   const document = new Target();
@@ -104,8 +105,25 @@ async function boot(page, query, level, stored, fullscreen = true, ready = true,
     counts: () => [fullscreenRequests, pointerRequests, landscapeRequests] };
 }
 
+function ring(fixture, side) {
+  return fixture.document.getElementById(side + 'ring') ||
+    fixture.nodes.filter(node => node.classList.contains('sub-ring'))[side === 'l' ? 0 : 1];
+}
 function productEvents(fixture) {
-  const events = fixture.events.filter(([type]) => type !== 'param');
+  const last = { move: '0,0', lookstick: '0,0' };
+  const events = fixture.events.filter(([type]) => type !== 'param').flatMap(([type, payload]) => {
+    if (type === 'stick') {
+      const [name, x, y] = payload.split(',');
+      if (!['move', 'look'].includes(name)) return [[type, payload]];
+      type = name === 'move' ? 'move' : 'lookstick'; payload = x + ',' + y;
+    }
+    if (type === 'move' || type === 'lookstick') {
+      payload = payload.split(',').map(Number).join(',');
+      if (last[type] === payload) return [];
+      last[type] = payload;
+    }
+    return [[type, payload]];
+  });
   if (fixture.context.SubstraticPage) {
     assert.equal(events[0][0], 'params');
     return events.slice(1);
@@ -113,7 +131,7 @@ function productEvents(fixture) {
   return events;
 }
 
-let passed = 0, focusCases = 0, tuneCases = 0;
+let passed = 0, focusCases = 0, tuneCases = 0, touchCases = 0;
 for (const query of ['', '?play=0', '?floor=14&play=1', '?go=14', '?touch&dev&rate=28',
                      '?title=1', '?floor=sim&best=999_7', '?mute', '?floor=%CE%B1%2Fb&rate=24']) {
   for (const practiced of ['0', '1']) {
@@ -192,11 +210,15 @@ if (read(afterPath).includes('webglCheck: true, focus: true')) {
       fixture.document.visibilityState = 'hidden';
       fixture.document.fire('visibilitychange');
     }
-    const released = fixture.events.slice(at);
+    const released = fixture.events.slice(at).map(([type, payload]) => {
+      if (type !== 'stick') return [type, payload];
+      const [name, x, y] = payload.split(',');
+      return [name === 'move' ? 'move' : 'lookstick', x + ',' + y];
+    });
     assert.ok(released.some(([type, payload]) => type === 'blur' && payload === ''));
     for (const [side, type] of [['l', 'move'], ['r', 'lookstick']]) {
       assert.ok(released.some(([event, payload]) => event === type && payload === '0,0'));
-      assert.equal(fixture.document.getElementById(side + 'ring').style.display, 'none');
+      assert.equal(ring(fixture, side).style.display, 'none');
     }
     assert.equal(fixture.document.getElementById('crouch').classList.contains('down'), false);
     const afterLoss = fixture.events.length;
@@ -223,8 +245,12 @@ if (read(afterPath).includes('window.SubstraticPage.fetchTune(name)')) {
       ['assets/tunes/bed-sim-' + bedFile + '.cts']: '' };
     const before = await boot(read(beforePath), query, 'webgl2', {}, true, true, responses);
     const after = await boot(read(afterPath), query, 'webgl2', {}, true, true, responses);
-    const expected = before.events.filter(([type]) => type === 'tune').map(([, payload]) => {
+    const legacy = before.events.filter(([type]) => type === 'tune');
+    const expected = legacy.length ? legacy.map(([, payload]) => {
       const at = payload.indexOf('\n'); return [payload.slice(0, at), payload.slice(at + 1)];
+    }) : before.events.filter(([type]) => type === 'tune-done').map(([, name]) => {
+      const chunks = before.events.filter(([type, payload]) => type === 'tune-chunk' && payload.startsWith(name + '\t'));
+      return [name, Buffer.concat(chunks.map(([, payload]) => Buffer.from(payload.split('\t')[2], 'base64'))).toString('utf8')];
     });
     assert.equal(expected.length, 3);
     for (const [name, text] of expected) {
@@ -262,10 +288,49 @@ if (read(afterPath).includes('window.SubstraticPage.fetchTune(name)')) {
   fs.mkdirSync('build/adoption-prep', { recursive: true });
   fs.writeFileSync('build/adoption-prep/tune-page-fixtures.json', JSON.stringify(fixtures) + '\n');
 }
+const touchFixtures = [];
+for (const mode of ['title', 'paused', 'game']) {
+  const before = await boot(read(beforePath), '?mute', 'webgl2', {});
+  const after = await boot(read(afterPath), '?mute', 'webgl2', {});
+  const groups = [];
+  for (const fixture of [before, after]) {
+    const steps = []; groups.push(steps);
+    const record = (target, type, data = {}) => {
+      const at = fixture.events.length; target.fire(type, data);
+      steps.push(fixture.events.slice(at).filter(([event]) => ['tap', 'keydown', 'keyup', 'press', 'look', 'move', 'lookstick', 'stick', 'blur'].includes(event)));
+    };
+    fixture.context.SigilWebApp.dispatch('keydown', 'w');
+    steps.push([['keydown', 'w']]);
+    fixture.context.console.log(mode === 'title' ? 'phantom-burn: mode title' : mode === 'paused' ? 'phantom-burn: paused' : 'phantom-burn: mode game');
+    const canvas = fixture.document.getElementById('stage');
+    record(canvas, 'pointerdown', { clientX: 40, clientY: 80 });
+    const touches = [{ identifier: 10, clientX: 40, clientY: 80 }, { identifier: 20, clientX: 400, clientY: 80 }];
+    record(canvas, 'touchstart', { changedTouches: touches });
+    record(canvas, 'touchstart', { changedTouches: [{ identifier: 30, clientX: 50, clientY: 80 }] });
+    for (const offset of [[15, 30], [120, 80], [-150, -100]]) {
+      record(canvas, 'touchmove', { changedTouches: touches.map(t => ({ ...t, clientX: t.clientX + offset[0], clientY: t.clientY + offset[1] })) });
+    }
+    record(canvas, 'touchcancel', { changedTouches: touches });
+    record(fixture.document.getElementById('crouch'), 'touchstart');
+    assert.equal(ring(fixture, 'l').style.display, 'none');
+    assert.equal(ring(fixture, 'r').style.display, 'none');
+  }
+  assert.deepEqual(productEvents(after), productEvents(before), mode);
+  assert.equal(after.events.filter(([type]) => type === 'touch').length, 1);
+  assert.equal(after.events.filter(([type]) => type === 'tap').length, mode === 'game' ? 0 : 1);
+  touchFixtures.push({ mode, before: groups[0], after: groups[1] });
+  passed++; touchCases++;
+}
+fs.writeFileSync('build/adoption-prep/touch-page-fixtures.json', JSON.stringify(touchFixtures) + '\n');
 if (process.argv.includes('--require-focus')) {
   assert.equal(focusCases, 2, 'the focus gate must execute both focus-loss scenarios');
 }
 if (process.argv.includes('--require-tunes')) {
   assert.equal(tuneCases, 5, 'the tune gate must execute alias, UTF-8 and failure scenarios');
+}
+if (process.argv.includes('--require-touch')) {
+  assert.equal(touchCases, 3);
+  assert.ok(read(afterPath).includes('name: "move", zone: "left"'));
+  assert.ok(read(afterPath).includes('name: "look", zone: "right"'));
 }
 console.log(`PAGE DOM CONTRACT GREEN: ${passed} scenarios; actual complete page scripts, released shared script, params/fetch order, fullscreen, touch and loader suppression`);

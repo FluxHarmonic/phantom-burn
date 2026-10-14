@@ -20,11 +20,8 @@
     /* The phone's controls: a stick under each thumb where it lands (left
        half moves, right half looks), and a crouch button. Shown on the
        first touch, or with ?touch. */
-    .ring, .knob, #crouch { position: fixed; border-radius: 50%; pointer-events: none; box-sizing: border-box;
+    #crouch { position: fixed; border-radius: 50%; pointer-events: none; box-sizing: border-box;
                             display: none; z-index: 2; }
-    .ring { width: 120px; height: 120px; margin: -60px 0 0 -60px;
-            border: 2px solid rgba(204, 230, 255, 0.35); background: rgba(204, 230, 255, 0.05); }
-    .knob { width: 48px; height: 48px; margin: -24px 0 0 -24px; background: rgba(204, 230, 255, 0.4); }
     #crouch { right: 24px; top: 24px; width: 64px; height: 64px; pointer-events: auto; touch-action: none;
               border: 2px solid rgba(204, 230, 255, 0.35); background: rgba(204, 230, 255, 0.06);
               color: rgba(204, 230, 255, 0.7); font: bold 22px ui-monospace, monospace;
@@ -71,8 +68,6 @@
 </head>
 <body>
   <canvas id="stage"></canvas>
-  <div class="ring" id="lring"></div><div class="knob" id="lknob"></div>
-  <div class="ring" id="rring"></div><div class="knob" id="rknob"></div>
   <div id="crouch">C</div>
   <div id="lights"><button data-k="deck" data-hold="1">DECK</button><button data-k="use">USE</button><button data-k="pause">PAUSE</button></div>
   <div id="lab">
@@ -92,7 +87,9 @@
   <script>
     // Product controls keep their menu, tap and gesture behavior.
     window.SUBSTRATIC = {
-      canvas: "#stage", sticks: [], buttons: [],
+      canvas: "#stage",
+      sticks: [{ name: "move", zone: "left" }, { name: "look", zone: "right" }],
+      stickRadius: 60, buttons: [],
       fullscreen: true, webglCheck: true, focus: true, gamepad: false,
       playtest: false, versionUrl: null,
       tunes: new URLSearchParams(location.search).has("mute") ? null : {
@@ -111,7 +108,11 @@
   </script>
   <script src="assets/substratic/substratic.js"></script>
   <script>window.PhantomWebGL = window.SubstraticPage.webgl;</script>
-  <style>#sub-fs { right: auto; }</style>
+  <style>
+    #sub-fs { right: auto; }
+    .sub-ring { border-color: rgba(204, 230, 255, 0.35); background: rgba(204, 230, 255, 0.05); }
+    .sub-knob { background: rgba(204, 230, 255, 0.4); }
+  </style>
   <script>
   // Phantom Burn's page. The generic loader (sigil-web-app.js) boots the
   // wasm, forwards keydown/keyup and runs the frame loop. This page adds:
@@ -144,7 +145,7 @@
   //   the collision (assets/NAME/floor14.collide.b64) as ("collide", BASE64);
   //   the mouse: a click locks the pointer, movement is ("look", "dx,dy");
   //   touch: a thumb landing on the left half is a move stick, on the right
-  //     half a look stick, each ("move"|"lookstick", "x,y") in -1..1; the C
+  //     half a look stick, shared ("stick", "NAME,x,y") in -1..1; the C
   //     button is ("press", "c"); the LAB button (top left) opens the style
   //     lab's keys as buttons, each ("press", KEY), for the phone.
   //   S1's sound: the tunes it renders (assets/tunes/NAME.cts, the game's
@@ -424,66 +425,18 @@
         }
       });
 
-      var R = 60;
-      function stickEl(side) {
-        return { ring: document.getElementById(side + "ring"), knob: document.getElementById(side + "knob") };
-      }
-      var sticks = { l: null, r: null }, els = { l: stickEl("l"), r: stickEl("r") };
-      var events = { l: "move", r: "lookstick" };
-      function show(side, s) {
-        var e = els[side];
-        e.ring.style.display = e.knob.style.display = s ? "block" : "none";
-        if (!s) return;
-        e.ring.style.left = s.x + "px"; e.ring.style.top = s.y + "px";
-        e.knob.style.left = (s.x + s.dx * R) + "px"; e.knob.style.top = (s.y + s.dy * R) + "px";
-      }
-      function send(side) {
-        var s = sticks[side];
-        app.dispatch(events[side], s ? s.dx.toFixed(3) + "," + s.dy.toFixed(3) : "0,0");
-      }
-      canvas.addEventListener("touchstart", function (e) {
-        if (!document.body.classList.contains("touch")) app.dispatch("touch", "1");   // the pause panel's controls
+      // Product policy: teach phone controls on the first canvas touch.
+      // Capture runs before the shared sticks' bubble handler.
+      canvas.addEventListener("touchstart", function () {
+        if (!document.body.classList.contains("touch")) app.dispatch("touch", "1");
         document.body.classList.add("touch");
-        for (var i = 0; i < e.changedTouches.length; i++) {
-          var t = e.changedTouches[i];
-          var side = t.clientX < window.innerWidth / 2 ? "l" : "r";
-          if (!sticks[side]) { sticks[side] = { id: t.identifier, x: t.clientX, y: t.clientY, dx: 0, dy: 0 }; show(side, sticks[side]); }
-        }
-        e.preventDefault();
-      }, { passive: false });
-      canvas.addEventListener("touchmove", function (e) {
-        for (var i = 0; i < e.changedTouches.length; i++) {
-          var t = e.changedTouches[i];
-          ["l", "r"].forEach(function (side) {
-            var s = sticks[side];
-            if (!s || s.id !== t.identifier) return;
-            var dx = (t.clientX - s.x) / R, dy = (t.clientY - s.y) / R, m = Math.hypot(dx, dy);
-            if (m > 1) { dx /= m; dy /= m; }
-            s.dx = dx; s.dy = dy; show(side, s); send(side);
-          });
-        }
-        e.preventDefault();
-      }, { passive: false });
-      function end(e) {
-        for (var i = 0; i < e.changedTouches.length; i++) {
-          var t = e.changedTouches[i];
-          ["l", "r"].forEach(function (side) {
-            if (sticks[side] && sticks[side].id === t.identifier) { sticks[side] = null; show(side, null); send(side); }
-          });
-        }
-      }
-      canvas.addEventListener("touchend", end);
-      canvas.addEventListener("touchcancel", end);
-      // Shared focus events clear game input; clear the page's touch owners too.
-      function clearPageSticks() {
-        ["l", "r"].forEach(function (side) {
-          if (sticks[side]) { sticks[side] = null; show(side, null); send(side); }
-        });
+      }, { capture: true, passive: true });
+      function clearCrouchHighlight() {
         document.getElementById("crouch").classList.remove("down");
       }
-      window.addEventListener("blur", clearPageSticks);
+      window.addEventListener("blur", clearCrouchHighlight);
       document.addEventListener("visibilitychange", function () {
-        if (document.visibilityState === "hidden") clearPageSticks();
+        if (document.visibilityState === "hidden") clearCrouchHighlight();
       });
       // the lab panel: every button sends its key; the HUD shows the state
       var lab = document.getElementById("lab");
