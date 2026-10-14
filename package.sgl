@@ -102,5 +102,12 @@
         (link-assets)
         (lambda (ctx)
           (if (memq (target-os ctx) '(wasm wasi))
+              ((copy-assets
+                 source-dir: ".sigil/deps/substratic/assets"
+                 output-dir: (config-output-subdir "assets")
+                 patterns: '("substratic/substratic.js")) ctx)
+              ctx))
+        (lambda (ctx)
+          (if (memq (target-os ctx) '(wasm wasi))
               ((link-web-application name: "phantom-burn" html-mount-id: "status") ctx)
               ctx))))))
