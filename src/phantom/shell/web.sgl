@@ -45,6 +45,7 @@
           (phantom walker)
           (phantom input state)
           (phantom store browser)
+          (phantom web params)
           (phantom floor replay)
           (phantom play mode)
           (phantom sound game)
@@ -83,7 +84,8 @@
         (let ((t (sound-game-trace)))
           (when t (display (string-append "phantom-burn: sound " t)) (newline)))))
 
-    (define (param key) (let ((p (assoc key *params*))) (and p (cdr p))))
+    (define (param key)
+      (web-param *params* key))
     ;; "SECS_INCIDENTS" -> (secs . incidents), or #f
     (define (best-param v)
       (and v (let loop ((i 0))
@@ -498,21 +500,6 @@
                (clear-screen (/ 13 255) (/ 10 255) (/ 26 255))
                (end-frame)))))
 
-    ;; "a=1&b=two" -> (("a" . "1") ("b" . "two")); no decoding (the values
-    ;; are numbers and plain words).
-    (define (split-query s)
-      (let loop ((i 0) (start 0) (acc '()))
-        (if (or (>= i (string-length s)) (char=? (string-ref s i) #\&))
-            (let* ((part (substring s start (min i (string-length s))))
-                   (eq (let find ((j 0)) (cond ((>= j (string-length part)) #f)
-                                               ((char=? (string-ref part j) #\=) j)
-                                               (else (find (+ j 1))))))
-                   (acc (cond ((string=? part "") acc)
-                              (eq (cons (cons (substring part 0 eq) (substring part (+ eq 1) (string-length part))) acc))
-                              (else (cons (cons part "") acc)))))
-              (if (>= i (string-length s)) (reverse acc) (loop (+ i 1) (+ i 1) acc)))
-            (loop (+ i 1) start acc))))
-
     (define (web-main)
       (browser-save-ready!)
       (unless (gles3-use-canvas "#stage")
@@ -547,7 +534,7 @@
              (browser-record-packet! payload)
              0)
             ((string=? type "params")
-             (set! *params* (split-query payload))
+             (set! *params* (legacy-query->params payload))
              (set! *params-seen* #t)
              ;; ?go=FLOOR (the menu's other floor, after a reload): straight to it
              (when (and (param "flow") (param "go")) (set! *mode* 'game) (display "phantom-burn: mode game") (newline))

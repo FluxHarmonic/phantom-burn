@@ -1,0 +1,21 @@
+;;; Preserve the shell's raw query vocabulary through shared split-param.
+(define-library (phantom web params)
+  (import (sigil list)
+          (sigil string)
+          (substratic web params))
+  (export legacy-query->params web-param web-param-present?)
+
+  (begin
+    (define (legacy-query->params query)
+      (map
+        (lambda (part)
+          (let ((entry (split-param part)))
+            (cons (car entry) (or (cdr entry) ""))))
+        (filter (lambda (part) (not (string=? part "")))
+                (string-split query "&"))))
+
+    (define (web-param params key)
+      (let ((entry (assoc key params))) (and entry (cdr entry))))
+
+    (define (web-param-present? params key)
+      (and (assoc key params) #t))))

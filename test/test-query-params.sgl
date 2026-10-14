@@ -1,0 +1,26 @@
+(import (sigil test)
+        (phantom web params))
+
+(test-group "Legacy raw query compatibility"
+  (test "bare flags, first equals and duplicate ordering retain the old table"
+    (assert-equal
+      '(("bare" . "") ("x" . "1=2") ("x" . "second")
+        ("" . "value") ("esc" . "a%3Db"))
+      (legacy-query->params "bare&x=1=2&&x=second&=value&esc=a%3Db&")))
+  (test "the first value wins and explicit empty values stay present"
+    (let ((params (legacy-query->params "best=&best=999_7&floor=sim")))
+      (assert-equal "" (web-param params "best"))
+      (assert-true (web-param-present? params "best"))
+      (assert-equal "sim" (web-param params "floor"))
+      (assert-false (web-param params "missing"))
+      (assert-false (web-param-present? params "missing"))))
+  (test "percent text, Unicode and plus signs remain undecoded"
+    (assert-equal
+      '(("floor" . "α%2Fb") ("word" . "a+b") ("look" . "1%2C2%2C3"))
+      (legacy-query->params "floor=α%2Fb&word=a+b&look=1%2C2%2C3")))
+  (test "empty segments disappear while empty names and bare flags remain"
+    (assert-equal '() (legacy-query->params ""))
+    (assert-equal '() (legacy-query->params "&&"))
+    (assert-equal '(("" . "") ("flag" . "")) (legacy-query->params "&=&flag&&"))))
+
+(run-tests)
