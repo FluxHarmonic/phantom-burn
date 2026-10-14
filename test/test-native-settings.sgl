@@ -1,0 +1,37 @@
+;;; The shared settings table preserves booleans in the existing native save.
+(import (sigil test)
+        (phantom settings native)
+        (substratic store settings))
+
+(define EXISTING-SETTINGS
+  '((best "14" 120 2) (best "sim" 91 0)
+    (fullscreen #f) (future-setting keep)))
+
+(test-group "Native fullscreen settings compatibility"
+  (test "explicit false and missing settings stay off; true stays on"
+    (assert-false (save-fullscreen? EXISTING-SETTINGS))
+    (assert-false (save-fullscreen? '((best "14" 120 2))))
+    (assert-true (save-fullscreen? '((fullscreen #t)))))
+  (test "toggling on and off retains scores and unknown settings"
+    (let* ((enabled (save-with-fullscreen EXISTING-SETTINGS #t))
+           (disabled (save-with-fullscreen enabled #f)))
+      (assert-equal
+        '((fullscreen #t) (best "14" 120 2) (best "sim" 91 0) (future-setting keep))
+        enabled)
+      (assert-equal
+        '((fullscreen #f) (best "14" 120 2) (best "sim" 91 0) (future-setting keep))
+        disabled)))
+  (test "the first legacy value wins and replacement removes duplicate settings"
+    (assert-false (save-fullscreen? '((fullscreen #f) (fullscreen #t))))
+    (assert-equal '((fullscreen #t) (future-setting keep))
+                  (save-with-fullscreen
+                    '((fullscreen #f) (future-setting keep) (fullscreen #t)) #t)))
+  (test "the shared table translates the boolean without migration or reset"
+    (assert-equal 'off
+                  (settings-value fullscreen-table
+                                  (save-fullscreen-settings EXISTING-SETTINGS)
+                                  'fullscreen))
+    (assert-false (settings-table-version fullscreen-table))
+    (assert-false (settings-migrate! fullscreen-table))))
+
+(run-tests)

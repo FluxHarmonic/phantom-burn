@@ -70,7 +70,8 @@
           (only (phantom play core) play-guard)
           (only (phantom guard guard) guard-place!)
           (phantom sound game)
-          (phantom store save))
+          (phantom store save)
+          (phantom settings native))
 
   (export native-main)
 
@@ -245,11 +246,12 @@
     ;; fullscreen (Substratic's toggle, (substratic view window): F11 or
     ;; Alt+Enter, remembered between runs; without its 2D view fit)
     (define (fullscreen-remembered?)
-      (let ((e (find (lambda (x) (eq? (car x) 'fullscreen)) (read-save-all)))) (and e (pair? (cdr e)) (cadr e) #t)))
+      (save-fullscreen? (read-save-all)))
+
     (define (toggle-fullscreen!)
-      (let ((on (not (fullscreen?))))
-        (set-fullscreen! on)
-        (write-save! (cons (list 'fullscreen on) (filter (lambda (x) (not (eq? (car x) 'fullscreen))) (read-save-all))))))
+      (let ((enabled (not (fullscreen?))))
+        (set-fullscreen! enabled)
+        (write-save! (save-with-fullscreen (read-save-all) enabled))))
 
     ;; The guard's body (G1's skinned robot, one for every floor), and the
     ;; skin door's demo (--skin N). The baked guard (assets/guard/guard.sgm)

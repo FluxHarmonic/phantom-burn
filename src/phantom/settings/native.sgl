@@ -1,0 +1,38 @@
+;;; Preserve legacy fullscreen booleans through a shared table with no reset.
+(define-library (phantom settings native)
+  (import (sigil list)
+          (substratic store settings))
+  (export fullscreen-table save-fullscreen-settings save-fullscreen?
+          save-with-fullscreen)
+
+  (begin
+    (define (entry-tag? entry tag)
+      (and (pair? entry) (eq? (car entry) tag)))
+
+    ;; A false boolean on disk is OFF, never a missing setting. No version
+    ;; migration: adopting the table must not reset existing preferences.
+    (define fullscreen-table
+      (make-settings-table
+        (list
+          (setting id: 'fullscreen name: "Fullscreen"
+                   values: '(off on) default: 'off key: "fullscreen"))
+        version: #f))
+
+    (define (save-fullscreen-settings entries)
+      (let* ((entry (find (lambda (row) (entry-tag? row 'fullscreen)) entries))
+             (enabled (and entry (pair? (cdr entry)) (cadr entry))))
+        (settings-with fullscreen-table (settings-defaults fullscreen-table)
+                       'fullscreen (if enabled 'on 'off))))
+
+    (define (save-fullscreen? entries)
+      (eq? (settings-value fullscreen-table
+                           (save-fullscreen-settings entries) 'fullscreen)
+           'on))
+
+    (define (save-with-fullscreen entries enabled)
+      (let* ((settings
+               (settings-with fullscreen-table (save-fullscreen-settings entries)
+                              'fullscreen (if enabled 'on 'off)))
+             (value (eq? (settings-value fullscreen-table settings 'fullscreen) 'on)))
+        (cons (list 'fullscreen value)
+              (filter (lambda (entry) (not (entry-tag? entry 'fullscreen))) entries))))))
