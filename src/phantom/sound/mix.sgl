@@ -1,87 +1,16 @@
-;;; (phantom sound mix) - A small sample mixer: mono or stereo samples in, stereo out
-;;;
-;;; S1. Each voice is a bank sample (an f32 bytevector, mono or interleaved stereo) playing from its
-;;; start at a left and a right gain; mixer-render! sums every voice into
-;;; n stereo f32 frames and drops the voices that have ended. A LOOP voice
-;;; (the bed) wraps and never ends. At most MAX-VOICES one-shot voices sound at
-;;; once; a new one past that replaces the oldest (loops do not count).
-;;; Plain arithmetic: the same voices give the same bytes, every time.
-;;;
-;;;   (make-mixer)
-;;;   (mixer-play! m sample gain pan [channels])   pan -1..1 (pan-gains); channels 1 or 2
-;;;   (mixer-loop! m sample gain [channels])   a centred loop from the sample's start
-;;;   (mixer-render! m out n)           n stereo f32 frames into out (overwritten)
-;;;   (mixer-voices m)                  how many one-shot voices are sounding
-
+;;; Keep Phantom's public API while Substratic owns the PCM sample mixer.
 (define-library (phantom sound mix)
-  (import (sigil core)
-          (sigil math)
-          (phantom sound logic))
-  (export make-mixer mixer-play! mixer-loop! mixer-render! mixer-voices mixer-silent? MAX-VOICES)
-  (begin
-    (define MAX-VOICES 16)
-
-    ;; #(voices loops) where a voice is #(sample frames pos gl gr channels), oldest first
-    (define (make-mixer) (vector '() '()))
-    (define (mixer-voices m) (length (vector-ref m 0)))
-    ;; nothing sounding: no one-shot and no loop (a caller can skip the render)
-    (define (mixer-silent? m) (and (null? (vector-ref m 0)) (null? (vector-ref m 1))))
-
-    ;; a sample is mono (channels 1, the default) or interleaved stereo (2: the
-    ;; bank's); a stereo sample's left plays at gl, its right at gr
-    (define (voice sample gain pan ch)
-      (let ((g (pan-gains pan)))
-        (vector sample (quotient (bytevector-length sample) (* 4 ch)) 0 (* gain (car g)) (* gain (cdr g)) ch)))
-
-    (define (mixer-play! m sample gain pan . opt)
-      (when sample
-        (let ((vs (append (vector-ref m 0) (list (voice sample gain pan (if (pair? opt) (car opt) 1))))))
-          (vector-set! m 0 (if (> (length vs) MAX-VOICES) (cdr vs) vs)))))
-
-    (define (mixer-loop! m sample gain . opt)
-      (when sample
-        (vector-set! m 1 (append (vector-ref m 1) (list (voice sample gain 0.0 (if (pair? opt) (car opt) 1)))))))
-
-    (define (f32 bv i) (bytevector-ieee-single-ref bv (* 4 i) 'little))
-    (define (f32! bv i x) (bytevector-ieee-single-set! bv (* 4 i) x 'little))
-
-    ;; add k frames of voice v from its position into out, starting at frame at
-    (define (add! out v at k)
-      (let ((s (vector-ref v 0)) (pos (vector-ref v 2)) (gl (vector-ref v 3)) (gr (vector-ref v 4))
-            (stereo? (= (vector-ref v 5) 2)))
-        (let add ((i 0))
-          (when (< i k)
-            (let* ((o (* 2 (+ at i)))
-                   (xl (if stereo? (f32 s (* 2 (+ pos i))) (f32 s (+ pos i))))
-                   (xr (if stereo? (f32 s (+ 1 (* 2 (+ pos i)))) xl)))
-              (f32! out o (+ (f32 out o) (* gl xl)))
-              (f32! out (+ 1 o) (+ (f32 out (+ 1 o)) (* gr xr))))
-            (add (+ i 1))))
-        (vector-set! v 2 (+ pos k))))
-
-    ;; n stereo frames of out to 0.0 (whose bytes are all 0), copied natively
-    ;; from a zero block: a per-sample loop here cost more than the voices
-    (define ZERO (make-bytevector (* 8 4096) 0))
-    (define (zero! out n)
-      (let loop ((at 0))
-        (when (< at (* 8 n))
-          (let ((k (min (bytevector-length ZERO) (- (* 8 n) at))))
-            (bytevector-copy! out at ZERO 0 k)
-            (loop (+ at k))))))
-
-    (define (mixer-render! m out n)
-      (zero! out n)
-      ;; loops first, wrapping as often as the block needs
-      (for-each
-        (lambda (v)
-          (let wrap ((at 0))
-            (when (< at n)
-              (when (>= (vector-ref v 2) (vector-ref v 1)) (vector-set! v 2 0))
-              (let ((k (min (- n at) (- (vector-ref v 1) (vector-ref v 2)))))
-                (add! out v at k)
-                (wrap (+ at k))))))
-        (vector-ref m 1))
-      (for-each
-        (lambda (v) (add! out v 0 (min n (- (vector-ref v 1) (vector-ref v 2)))))
-        (vector-ref m 0))
-      (vector-set! m 0 (filter (lambda (v) (< (vector-ref v 2) (vector-ref v 1))) (vector-ref m 0))))))
+  (import
+    (rename
+      (only (substratic audio mixer)
+            make-sample-mixer sample-mixer-play! sample-mixer-loop!
+            sample-mixer-render! sample-mixer-voices sample-mixer-silent?
+            MAX-VOICES)
+      (make-sample-mixer make-mixer)
+      (sample-mixer-play! mixer-play!)
+      (sample-mixer-loop! mixer-loop!)
+      (sample-mixer-render! mixer-render!)
+      (sample-mixer-voices mixer-voices)
+      (sample-mixer-silent? mixer-silent?)))
+  (export make-mixer mixer-play! mixer-loop! mixer-render!
+          mixer-voices mixer-silent? MAX-VOICES))
