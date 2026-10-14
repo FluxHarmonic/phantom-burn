@@ -93,7 +93,7 @@
     // Product controls keep their menu, tap and gesture behavior.
     window.SUBSTRATIC = {
       canvas: "#stage", sticks: [], buttons: [],
-      fullscreen: true, webglCheck: true, focus: false, gamepad: false,
+      fullscreen: true, webglCheck: true, focus: true, gamepad: false,
       playtest: false, versionUrl: null, tunes: null
     };
   </script>
@@ -469,6 +469,17 @@
       }
       canvas.addEventListener("touchend", end);
       canvas.addEventListener("touchcancel", end);
+      // Shared focus events clear game input; clear the page's touch owners too.
+      function clearPageSticks() {
+        ["l", "r"].forEach(function (side) {
+          if (sticks[side]) { sticks[side] = null; show(side, null); send(side); }
+        });
+        document.getElementById("crouch").classList.remove("down");
+      }
+      window.addEventListener("blur", clearPageSticks);
+      document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState === "hidden") clearPageSticks();
+      });
       // the lab panel: every button sends its key; the HUD shows the state
       var lab = document.getElementById("lab");
       function labTap(e) {

@@ -96,9 +96,9 @@ async function boot(page, query, level, stored, fullscreen = true, ready = true)
     counts: () => [fullscreenRequests, pointerRequests, landscapeRequests] };
 }
 
-function productEvents(fixture, sharedPage) {
+function productEvents(fixture) {
   const events = fixture.events.filter(([type]) => type !== 'param');
-  if (sharedPage) {
+  if (fixture.context.SubstraticPage) {
     assert.equal(events[0][0], 'params');
     return events.slice(1);
   }
@@ -112,7 +112,7 @@ for (const query of ['', '?play=0', '?floor=14&play=1', '?go=14', '?touch&dev&ra
     const stored = { 'phantomburn.practiced': practiced, 'phantomburn.best.14': '120_2', 'phantomburn.best.sim': '91_0' };
     const before = await boot(read(beforePath), query, 'webgl2', stored);
     const after = await boot(read(afterPath), query, 'webgl2', stored);
-    assert.deepEqual(productEvents(after, true), productEvents(before, false), query);
+    assert.deepEqual(productEvents(after), productEvents(before), query);
     assert.deepEqual(after.requests, before.requests, query);
     for (const fixture of [before, after]) {
       const button = fixture.document.getElementById('sub-fs');
@@ -132,7 +132,7 @@ for (const query of ['', '?play=0', '?floor=14&play=1', '?go=14', '?touch&dev&ra
       fixture.document.getElementById('crouch').fire('touchstart');
     }
     assert.deepEqual(after.counts(), before.counts(), query);
-    assert.deepEqual(productEvents(after, true), productEvents(before, false), query);
+    assert.deepEqual(productEvents(after), productEvents(before), query);
     assert.equal(after.nodes.filter(node => node.id === 'sub-fs').length, 1);
     passed++;
   }
@@ -165,4 +165,38 @@ for (const path of [beforePath, afterPath]) {
   assert.equal(fixture.document.getElementById('status').textContent, '');
 }
 passed++;
+if (read(afterPath).includes('webglCheck: true, focus: true')) {
+  for (const loss of ['blur', 'hidden']) {
+    const fixture = await boot(read(afterPath), '?touch&play=1', 'webgl2', {});
+    const canvas = fixture.document.getElementById('stage');
+    const touches = [{ identifier: 1, clientX: 40, clientY: 80 },
+                     { identifier: 2, clientX: 400, clientY: 80 }];
+    canvas.fire('touchstart', { changedTouches: touches });
+    canvas.fire('touchmove', { changedTouches: touches.map(t => ({ ...t, clientY: 110 })) });
+    fixture.document.getElementById('crouch').fire('touchstart');
+    const at = fixture.events.length;
+    if (loss === 'blur') fixture.context.fire('blur');
+    else {
+      fixture.document.visibilityState = 'hidden';
+      fixture.document.fire('visibilitychange');
+    }
+    const released = fixture.events.slice(at);
+    assert.ok(released.some(([type, payload]) => type === 'blur' && payload === ''));
+    for (const [side, type] of [['l', 'move'], ['r', 'lookstick']]) {
+      assert.ok(released.some(([event, payload]) => event === type && payload === '0,0'));
+      assert.equal(fixture.document.getElementById(side + 'ring').style.display, 'none');
+    }
+    assert.equal(fixture.document.getElementById('crouch').classList.contains('down'), false);
+    const afterLoss = fixture.events.length;
+    canvas.fire('touchmove', { changedTouches: touches });
+    assert.equal(fixture.events.length, afterLoss, 'orphaned fingers cannot restore held sticks');
+    fixture.document.visibilityState = 'visible';
+    fixture.document.fire('visibilitychange');
+    assert.ok(fixture.events.some(([type, payload]) => type === 'visibility' && payload === 'visible'));
+    passed++;
+  }
+}
+if (process.argv.includes('--require-focus')) {
+  assert.equal(passed, 24, 'the focus gate must execute both focus-loss scenarios');
+}
 console.log(`PAGE DOM CONTRACT GREEN: ${passed} scenarios; actual complete page scripts, released shared script, params/fetch order, fullscreen, touch and loader suppression`);
