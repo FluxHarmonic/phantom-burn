@@ -1,0 +1,166 @@
+(import (sigil test)
+        (phantom store browser))
+
+;; Generated from the synthetic JSON fixture and current page code.
+(define browser-fixture
+  '(("phantomburn.practiced" . "1")
+    ("phantomburn.best.14" . "120_2")
+    ("phantomburn.best.sim" . "91_0")
+    ("other-game.setting" . "keep")))
+(define browser-expected-after
+  '(("phantomburn.practiced" . "1")
+    ("phantomburn.best.14" . "110_1")
+    ("phantomburn.best.sim" . "91_0")
+    ("other-game.setting" . "keep")))
+(define browser-score-cases
+  '(("120_2" "120_1" "120_2")
+  ("12seconds_03notes" "12_1" "12_03")
+  ("  +0012ms_-03x" "12_-3" "0012_03")
+  ("12.5_2.9" "12_1" "125_29")
+  ("1e2_2" "1_1" "12_2")
+  ("0x10_2" "0_1" "010_2")
+  ("-5_2" "-5_1" "5_2")
+  ("0_0" "0_0" "0_0")
+  ("bad" "150_1" "")
+  ("120_" "150_1" "120_")
+  ("_2" "150_1" "_2")
+  ("120_2_extra" "150_1" "120_2_")))
+(define browser-expected-sanitized
+  '(("phantomburn.practiced" . "1")
+    ("phantomburn.best.14" . "120_2")
+    ("phantomburn.best.sim" . "91_0")
+    ("other-game.setting" . "keep")
+    ("phantomburn.best.14_a-Z" . "90_0")))
+
+
+(define (with-browser-fixture initial procedure)
+  (let ((entries initial))
+    (define (get key)
+      (let ((entry (assoc key entries))) (and entry (cdr entry))))
+    (define (put key value)
+      (set! entries
+        (cons (cons key value)
+              (filter (lambda (entry) (not (equal? (car entry) key))) entries)))
+      #t)
+    (procedure get put (lambda () entries))))
+
+(define (assert-storage-equal expected actual)
+  (assert-equal (length expected) (length actual))
+  (for-each
+    (lambda (entry)
+      (let ((found (assoc (car entry) actual)))
+        (assert-true (and found #t))
+        (assert-equal (cdr entry) (cdr found))))
+    expected))
+
+(test-group "Phantom raw browser save compatibility"
+  (test "shared short keys preserve physical saves and isolate update metadata"
+    (browser-save-ready!)
+    (with-browser-fixture browser-fixture
+      (lambda (get put snapshot)
+        ;; Model the documented web KV prefix at the backend boundary.
+        (define (shared-get key) (get (string-append "phantomburn." key)))
+        (define (shared-put key value)
+          (put (string-append "phantomburn." key) value))
+        (define (legacy-get key) (browser-save-get key get: shared-get))
+        (define (legacy-put key value)
+          (browser-save-put! key value put: shared-put))
+        (assert-true (browser-practiced? get: legacy-get))
+        (assert-equal "120_2" (browser-best-text "14" get: legacy-get))
+        (assert-true
+          (browser-record-best! "14" 150 1 get: legacy-get put: legacy-put))
+        (assert-equal "120_1" (get "phantomburn.best.14"))
+        (assert-false (get "phantomburn.phantomburn.best.14"))
+        (assert-true (shared-put "update-seen" "\"0.1.1\""))
+        (assert-equal "\"0.1.1\"" (get "phantomburn.update-seen"))
+        (assert-false (get "update-seen"))
+        (assert-equal "91_0" (get "phantomburn.best.sim"))
+        (assert-equal "keep" (get "other-game.setting")))))
+  (test "the compatibility adapter rejects a key from another application"
+    (let ((backend-calls 0))
+      (define (backend key)
+        (set! backend-calls (+ backend-calls 1))
+        "keep")
+      (assert-false
+        (guard (exception (#t #f))
+          (browser-save-get "other-game.setting" get: backend)))
+      (assert-equal 0 backend-calls)))
+  (test "reading exact legacy keys leaves all fixture data unchanged"
+    (browser-save-ready!)
+    (with-browser-fixture browser-fixture
+      (lambda (get put snapshot)
+        (assert-true (browser-practiced? get: get))
+        (assert-equal "120_2" (browser-best-text "14" get: get))
+        (assert-equal "91_0" (browser-best-text "sim" get: get))
+        (assert-storage-equal browser-fixture (snapshot)))))
+  (test "practice and independent score improvements match the current page"
+    (with-browser-fixture browser-fixture
+      (lambda (get put snapshot)
+        (assert-true (browser-practice-done! put: put))
+        (assert-true (browser-record-best! "14" 150 1 get: get put: put))
+        (assert-true (browser-record-best! "14" 110 3 get: get put: put))
+        (assert-storage-equal browser-expected-after (snapshot)))))
+  (test "twelve existing raw-score cases match the actual page oracle"
+    (for-each
+      (lambda (case)
+        (with-browser-fixture browser-fixture
+          (lambda (get put snapshot)
+            (put "phantomburn.best.14" (car case))
+            (assert-equal (caddr case) (browser-best-text "14" get: get))
+            (assert-true (browser-record-best! "14" 150 1 get: get put: put))
+            (assert-equal (cadr case) (get "phantomburn.best.14"))
+            (assert-equal "91_0" (get "phantomburn.best.sim"))
+            (assert-equal "keep" (get "other-game.setting")))))
+      browser-score-cases))
+  (test "the page's ASCII floor-key filtering keeps the same destination"
+    (with-browser-fixture browser-fixture
+      (lambda (get put snapshot)
+        (assert-true (browser-record-best! "14_αa-Z!" 90 0 get: get put: put))
+        (assert-storage-equal browser-expected-sanitized (snapshot)))))
+  (test "a new floor leaves the old floors and unrelated origin key intact"
+    (with-browser-fixture browser-fixture
+      (lambda (get put snapshot)
+        (assert-true (browser-record-best! "15" 95 4 get: get put: put))
+        (assert-storage-equal
+          (cons '("phantomburn.best.15" . "95_4") browser-fixture)
+          (snapshot)))))
+  (test "private-storage errors give the legacy fallback and abort writes"
+    (let ((writes 0)
+          (unavailable (lambda (key) (error "synthetic private storage"))))
+      (define (put key value) (set! writes (+ writes 1)) #t)
+      (assert-false (browser-practiced? get: unavailable))
+      (assert-equal "" (browser-best-text "14" get: unavailable))
+      (assert-false (browser-record-best! "14" 150 1 get: unavailable put: put))
+      (assert-equal 0 writes)
+      (assert-false
+        (browser-practice-done!
+          put: (lambda (key value) (error "synthetic private storage"))))))
+  (test "only the exact raw practice marker is accepted"
+    (for-each
+      (lambda (raw)
+        (assert-false (browser-practiced? get: (lambda (key) raw))))
+      (list #f "" "0" "true" "01"))
+    (assert-true (browser-practiced? get: (lambda (key) "1")))))
+
+(test-group "Checked browser save handoff"
+  (test "raw JSON packets keep independent minima and add a confirmed missing floor"
+    (with-browser-fixture browser-fixture
+      (lambda (get put snapshot)
+        (assert-true (browser-record-packet! "[\"14\",150,1,\"120_2\"]" put: put))
+        (assert-true (browser-record-packet! "[\"15\",95,4,null]" put: put))
+        (assert-storage-equal
+          '(("phantomburn.practiced" . "1") ("phantomburn.best.14" . "120_1")
+            ("phantomburn.best.15" . "95_4") ("phantomburn.best.sim" . "91_0")
+            ("other-game.setting" . "keep"))
+          (snapshot)))))
+  (test "unchecked reads and malformed packets never overwrite a score"
+    (with-browser-fixture browser-fixture
+      (lambda (get put snapshot)
+        (assert-false (browser-record-best! "14" 150 1 put: put))
+        (for-each
+          (lambda (payload) (assert-false (browser-record-packet! payload put: put)))
+          '("" "[" "{}" "[]" "[14,150,1,null]" "[\"14\",150.5,1,null]"
+            "[\"14\",150,1,false]" "[\"14\",150,1,null,0]"))
+        (assert-storage-equal browser-fixture (snapshot))))))
+
+(run-tests)

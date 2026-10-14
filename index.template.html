@@ -417,19 +417,27 @@
           location.search = q.toString();
         }
         // practice finished: INFILTRATE is the default from now on
-        if (line === "phantom-burn: practice done") { try { localStorage.setItem("phantomburn.practiced", "1"); } catch (e) { /* private window */ } }
+        if (line === "phantom-burn: practice done") {
+          queueMicrotask(function () {
+            withApp(function (app) { app.dispatch("save-practice", ""); });
+          });
+        }
         // a floor finished (Phantom 0.1): remember it, the best time and the
         // fewest incidents (localStorage phantomburn.best.FLOOR = "SECS_INCIDENTS")
         if (line.indexOf("phantom-burn: floor-done ") === 0) {
           var fd = line.slice("phantom-burn: floor-done ".length).split(" ");
-          var fkey = "phantomburn.best." + (fd[0] || "").replace(/[^A-Za-z0-9_-]/g, "");
-          var fs2 = parseInt(fd[1], 10), fi = parseInt(fd[2], 10);
-          if (!isNaN(fs2) && !isNaN(fi)) {
-            try {
-              var was = (localStorage.getItem(fkey) || "").split("_").map(function (v) { return parseInt(v, 10); });
-              if (was.length === 2 && !isNaN(was[0]) && !isNaN(was[1])) { fs2 = Math.min(fs2, was[0]); fi = Math.min(fi, was[1]); }
-              localStorage.setItem(fkey, fs2 + "_" + fi);
-            } catch (e) { /* private window */ }
+          var savedFloor = (fd[0] || "").replace(/[^A-Za-z0-9_-]/g, "");
+          var savedSeconds = parseInt(fd[1], 10), savedIncidents = parseInt(fd[2], 10);
+          if (!isNaN(savedSeconds) && !isNaN(savedIncidents)) {
+            // Dispatch after the current WASM callback returns. Read inside
+            // the queued task so successive records see preceding writes.
+            queueMicrotask(function () {
+              try {
+                var previous = localStorage.getItem("phantomburn.best." + savedFloor);
+                var packet = JSON.stringify([savedFloor, savedSeconds, savedIncidents, previous]);
+                withApp(function (app) { app.dispatch("save-best", packet); });
+              } catch (e) { /* unavailable read: do not overwrite an existing score */ }
+            });
           }
         }
         log1.apply(null, arguments);

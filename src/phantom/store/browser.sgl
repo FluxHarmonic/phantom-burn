@@ -1,0 +1,121 @@
+;;; Phantom's raw browser save keys and score policy, over shared KV.
+(define-library (phantom store browser)
+  (import (sigil list)
+          (sigil string)
+          (substratic data json)
+          (substratic store kv))
+  (export browser-save-ready! browser-best-key browser-best-text
+          browser-practiced? browser-practice-done! browser-record-best!
+          browser-record-best/raw! browser-record-packet!
+          browser-save-get browser-save-put!)
+
+  (begin
+    ;; Shared helpers use short keys under the same application prefix.
+    ;; The public adapter keeps physical legacy keys for page compatibility.
+    (define SAVE-PREFIX "phantomburn.")
+
+    (define (browser-save-ready!)
+      (set-store-prefix! SAVE-PREFIX))
+
+    (define (legacy-key->shared key)
+      (let ((prefix-length (string-length SAVE-PREFIX)))
+        (unless (and (>= (string-length key) prefix-length)
+                     (string=? (substring key 0 prefix-length) SAVE-PREFIX))
+          (error "Not a Phantom browser save key" key))
+        (substring key prefix-length (string-length key))))
+
+    (define (browser-save-get key (keys: (get store-get)))
+      (get (legacy-key->shared key)))
+
+    (define (browser-save-put! key value (keys: (put store-set!)))
+      (put (legacy-key->shared key) value))
+
+    (define (ascii-range? character first last)
+      (and (char<=? first character) (char<=? character last)))
+
+    (define (digit? character) (ascii-range? character #\0 #\9))
+
+    (define (browser-best-key floor)
+      (string-append
+        "phantomburn.best."
+        (list->string
+          (filter
+            (lambda (character)
+              (or (ascii-range? character #\A #\Z)
+                  (ascii-range? character #\a #\z)
+                  (digit? character)
+                  (memv character '(#\_ #\-))))
+            (string->list floor)))))
+
+    ;; Same radix-10 integer prefix as the page's parseInt(value, 10).
+    ;; Keep numeric prefixes in existing raw scores rather than resetting.
+    (define (decimal-prefix text)
+      (let* ((text (string-trim text))
+             (length (string-length text))
+             (signed (and (> length 0) (memv (string-ref text 0) '(#\+ #\-))))
+             (first (if signed 1 0)))
+        (let scan ((index first))
+          (if (and (< index length) (digit? (string-ref text index)))
+              (scan (+ index 1))
+              (and (> index first) (string->number (substring text 0 index)))))))
+
+    (define (browser-practiced? (keys: (get browser-save-get)))
+      (guard (exception (#t #f))
+        (equal? (get "phantomburn.practiced") "1")))
+
+    (define (browser-practice-done! (keys: (put browser-save-put!)))
+      (guard (exception (#t #f))
+        (put "phantomburn.practiced" "1")))
+
+    (define (browser-best-text floor (keys: (get browser-save-get)))
+      (guard (exception (#t ""))
+        (list->string
+          (filter
+            (lambda (character) (or (digit? character) (char=? character #\_)))
+            (string->list (or (get (browser-best-key floor)) ""))))))
+
+    (define (browser-record-best! floor seconds incidents
+                                  (keys: (get #f) (put browser-save-put!)))
+      (guard (exception (#t #f))
+        ;; Shared KV cannot distinguish missing from failed reads. A record
+        ;; must use a checked read boundary; otherwise do not risk overwriting
+        ;; an existing score with a worse time or incident count.
+        (unless get (error "A checked browser save read is required"))
+        (let* ((key (browser-best-key floor))
+               (seconds (decimal-prefix (number->string seconds)))
+               (incidents (decimal-prefix (number->string incidents))))
+          (and seconds incidents
+               (let* ((parts (string-split (or (get key) "") "_"))
+                      (previous-seconds (and (= (length parts) 2) (decimal-prefix (car parts))))
+                      (previous-incidents (and (= (length parts) 2) (decimal-prefix (cadr parts))))
+                      (valid (and previous-seconds previous-incidents)))
+                 (put key
+                      (string-append
+                        (number->string (if valid (min seconds previous-seconds) seconds))
+                        "_"
+                        (number->string (if valid (min incidents previous-incidents) incidents)))))))))
+
+    ;; The page supplies RAW only after its original localStorage read succeeds.
+    ;; #f here means a confirmed missing key, rather than an unavailable read.
+    (define (browser-record-best/raw! floor seconds incidents raw
+                                      (keys: (put browser-save-put!)))
+      (browser-record-best! floor seconds incidents
+                           get: (lambda (key) raw)
+                           put: put))
+
+    ;; [floor, seconds, incidents, previousRawOrNull], emitted only after the
+    ;; page's checked read succeeds. JSON preserves embedded newlines/Unicode.
+    (define (browser-record-packet! payload (keys: (put browser-save-put!)))
+      (guard (exception (#t #f))
+        (let ((packet (json->datum payload)))
+          (and (vector? packet)
+               (= (vector-length packet) 4)
+               (string? (vector-ref packet 0))
+               (integer? (vector-ref packet 1))
+               (integer? (vector-ref packet 2))
+               (or (string? (vector-ref packet 3))
+                   (eq? (vector-ref packet 3) 'null))
+               (browser-record-best/raw!
+                 (vector-ref packet 0) (vector-ref packet 1) (vector-ref packet 2)
+                 (if (eq? (vector-ref packet 3) 'null) #f (vector-ref packet 3))
+                 put: put)))))))
