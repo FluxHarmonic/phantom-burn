@@ -1,0 +1,23 @@
+(import (sigil test)
+        (phantom view frame)
+        (substratic view fit))
+
+(define (placement width height)
+  (let ((fit (frame-fit width height)))
+    (list (fit-mode fit) (fit-scale fit)
+          (fit-x fit) (fit-y fit) (fit-w fit) (fit-h fit))))
+
+(test-group "Phantom integer frame placement"
+  (test "the 1440x810 native default keeps its exact 3x view"
+    (assert-equal 480 VIEW-W)
+    (assert-equal 270 VIEW-H)
+    (assert-equal '(integer 3 0 0 1440 810) (placement 1440 810)))
+  (test "odd window margins retain the old floor rounding"
+    (assert-equal '(integer 2 20 40 960 540) (placement 1001 621)))
+  (test "a landscape phone retains integer scale and black margins"
+    (assert-equal '(integer 2 364 120 960 540) (placement 1688 780)))
+  (test "a window smaller than the view keeps 1x and crops"
+    (assert-equal '(integer 1 -90 -85 480 270) (placement 300 100))
+    (assert-equal '(integer 1 -240 -135 480 270) (placement 0 0))))
+
+(run-tests)

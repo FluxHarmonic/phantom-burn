@@ -22,11 +22,12 @@
 ;;; off, render-post! does nothing and the composite shows the raw frame.
 
 (define-library (phantom render)
-  (import (sigil core)
-          (sigil math)
+  (import (sigil math)
           (sigil time)
           (sigil graphics)
           (sigil geometry)
+          (phantom view frame)
+          (only (substratic view fit) fit-scale fit-x fit-y fit-w fit-h)
           (phantom dither))
 
   (export VIEW-W VIEW-H
@@ -51,8 +52,6 @@
 
   (begin
 
-    (define VIEW-W 480)
-    (define VIEW-H 270)
     (define NLIGHTS 24)
     ;; C-BG, the colour the distance fades to and the clear colour
     (define BG-R (/ 13.0 255.0))
@@ -1165,7 +1164,8 @@ void main() {
     ;; Put the frame on a w x h window at the largest whole scale that
     ;; fits, centred; returns the scale.
     (define (render-composite! w h)
-      (let* ((k (max 1 (exact (floor (min (/ w VIEW-W) (/ h VIEW-H))))))
+      (let* ((fit (frame-fit w h))
+             (k (fit-scale fit))
              (css (/ k *dpr*))
              (_ (when (and *spread-auto* (not (= css *pixel-css*)))
                   (set! *pixel-css* css)
@@ -1176,7 +1176,8 @@ void main() {
                                           " css-px " (number->string css)
                                           " spread " (number->string *spread*) " (auto)"))
                   (newline)))
-             (ox (exact (floor (/ (- w (* VIEW-W k)) 2))))
-             (oy (exact (floor (/ (- h (* VIEW-H k)) 2)))))
-        (draw-render-target (if (or *dither* *card*) *post* *view*) ox oy (* VIEW-W k) (* VIEW-H k))
+             (ox (fit-x fit))
+             (oy (fit-y fit)))
+        (draw-render-target (if (or *dither* *card*) *post* *view*)
+                            ox oy (fit-w fit) (fit-h fit))
         k))))

@@ -1,0 +1,11 @@
+;;; Phantom keeps its 480x270 view and integer-only presentation policy.
+(define-library (phantom view frame)
+  (import (substratic view fit))
+  (export VIEW-W VIEW-H frame-fit)
+
+  (begin
+    (define VIEW-W 480)
+    (define VIEW-H 270)
+
+    (define (frame-fit width height)
+      (view-fit width height VIEW-W VIEW-H integer-only: #t))))
