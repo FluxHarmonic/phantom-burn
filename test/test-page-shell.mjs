@@ -7,7 +7,7 @@ const afterPath = process.argv[3] || 'index.template.html';
 const shared = fs.readFileSync('.sigil/deps/substratic/assets/substratic/substratic.js', 'utf8');
 const read = path => fs.readFileSync(path, 'utf8');
 
-async function boot(page, query, level, stored, fullscreen = true, ready = true) {
+async function boot(page, query, level, stored, fullscreen = true, ready = true, responses = {}) {
   const events = [], requests = [], observers = [], nodes = [];
   let fullscreenRequests = 0, pointerRequests = 0, landscapeRequests = 0;
   class Target {
@@ -62,7 +62,7 @@ async function boot(page, query, level, stored, fullscreen = true, ready = true)
   }
   const window = new Target();
   const context = vm.createContext(Object.assign(window, {
-    document, window, URLSearchParams, Promise, location: { search: query },
+    document, window, URLSearchParams, Promise, TextEncoder, location: { search: query },
     navigator: { userAgent: 'page-contract' }, screen: { orientation: { lock() { landscapeRequests++; return Promise.resolve(); } } },
     innerWidth: 480, devicePixelRatio: 1,
     localStorage: { getItem: key => stored[key] ?? null },
@@ -71,7 +71,15 @@ async function boot(page, query, level, stored, fullscreen = true, ready = true)
       constructor(callback) { this.callback = callback; observers.push(this); }
       observe() {} disconnect() {}
     },
-    fetch(url) { requests.push(String(url)); return new Promise(() => {}); },
+    fetch(url) {
+      requests.push(String(url));
+      const response = responses[String(url)];
+      if (response !== undefined) {
+        return Promise.resolve({ ok: response !== false, status: response === false ? 404 : 200,
+          headers: new Map(), text: () => Promise.resolve(response) });
+      }
+      return new Promise(() => {});
+    },
     setTimeout() { return 1; }, clearTimeout() {}, requestAnimationFrame() {},
     queueMicrotask, AbortController, btoa, atob
   }));
@@ -91,7 +99,7 @@ async function boot(page, query, level, stored, fullscreen = true, ready = true)
   const app = { started: true, ready: Promise.resolve(), dispatch(type, payload) { events.push([type, String(payload)]); return 0; } };
   context.SigilWebApp = app;
   if (ready && level === 'webgl2') document.fire('sigil-web-app-ready', { detail: app });
-  for (let i = 0; i < 8; i++) await Promise.resolve();
+  for (let i = 0; i < 32; i++) await Promise.resolve();
   return { context, document, events, requests, observers, nodes,
     counts: () => [fullscreenRequests, pointerRequests, landscapeRequests] };
 }
@@ -105,7 +113,7 @@ function productEvents(fixture) {
   return events;
 }
 
-let passed = 0;
+let passed = 0, focusCases = 0, tuneCases = 0;
 for (const query of ['', '?play=0', '?floor=14&play=1', '?go=14', '?touch&dev&rate=28',
                      '?title=1', '?floor=sim&best=999_7', '?mute', '?floor=%CE%B1%2Fb&rate=24']) {
   for (const practiced of ['0', '1']) {
@@ -113,7 +121,11 @@ for (const query of ['', '?play=0', '?floor=14&play=1', '?go=14', '?touch&dev&ra
     const before = await boot(read(beforePath), query, 'webgl2', stored);
     const after = await boot(read(afterPath), query, 'webgl2', stored);
     assert.deepEqual(productEvents(after), productEvents(before), query);
-    assert.deepEqual(after.requests, before.requests, query);
+    // Shared transfers queue their requests; floor loading keeps its ordering.
+    const tunes = fixture => fixture.requests.filter(url => url.startsWith('assets/tunes/')).sort();
+    const floors = fixture => fixture.requests.filter(url => !url.startsWith('assets/tunes/'));
+    assert.deepEqual(tunes(after), tunes(before), query);
+    assert.deepEqual(floors(after), floors(before), query);
     for (const fixture of [before, after]) {
       const button = fixture.document.getElementById('sub-fs');
       assert.ok(button); assert.equal(button.title, 'Fullscreen');
@@ -194,9 +206,66 @@ if (read(afterPath).includes('webglCheck: true, focus: true')) {
     fixture.document.fire('visibilitychange');
     assert.ok(fixture.events.some(([type, payload]) => type === 'visibility' && payload === 'visible'));
     passed++;
+    focusCases++;
   }
 }
+if (read(afterPath).includes('window.SubstraticPage.fetchTune(name)')) {
+  const fixtures = [];
+  for (const query of ['?play=0', '?play=0&blip=a&bed=b', '?play=0&blip=b&bed=a',
+                       '?play=0&blip=invalid&bed=invalid']) {
+    const blip = new URLSearchParams(query).get('blip');
+    const bed = new URLSearchParams(query).get('bed');
+    const blipFile = ['a', 'b', 'c'].includes(blip) ? blip : 'c';
+    const bedFile = ['a', 'b'].includes(bed) ? bed : 'a';
+    const text = '(tune name: "π🗝")\n'.repeat(800);
+    const responses = { 'assets/tunes/music-false-identity.cts': text,
+      ['assets/tunes/crash-blip-' + blipFile + '.cts']: 'α\nβ\n',
+      ['assets/tunes/bed-sim-' + bedFile + '.cts']: '' };
+    const before = await boot(read(beforePath), query, 'webgl2', {}, true, true, responses);
+    const after = await boot(read(afterPath), query, 'webgl2', {}, true, true, responses);
+    const expected = before.events.filter(([type]) => type === 'tune').map(([, payload]) => {
+      const at = payload.indexOf('\n'); return [payload.slice(0, at), payload.slice(at + 1)];
+    });
+    assert.equal(expected.length, 3);
+    for (const [name, text] of expected) {
+      const begin = after.events.filter(([type, payload]) => type === 'tune-begin' && payload.startsWith(name + '\t'));
+      assert.equal(begin.length, 1);
+      const chunks = after.events.filter(([type, payload]) => type === 'tune-chunk' && payload.startsWith(name + '\t'));
+      const [, bytes, count] = begin[0][1].split('\t');
+      assert.equal(Number(bytes), Buffer.byteLength(text)); assert.equal(Number(count), chunks.length);
+      const parts = chunks.map(([, payload], index) => {
+        const [id, sequence, encoded] = payload.split('\t');
+        assert.equal(id, name); assert.equal(Number(sequence), index);
+        return Buffer.from(encoded, 'base64');
+      });
+      assert.equal(Buffer.concat(parts).toString('utf8'), text);
+      assert.equal(after.events.filter(([type, payload]) => type === 'tune-done' && payload === name).length, 1);
+    }
+    assert.equal(after.events.filter(([type]) => type === 'tune').length, 0);
+    assert.equal(await after.context.SubstraticPage.fetchTune('music-false-identity'), true);
+    assert.equal(after.requests.filter(url => url === 'assets/tunes/music-false-identity.cts').length, 1);
+    for (const type of ['pointerup', 'touchend', 'click', 'keydown']) {
+      before.document.fire(type); after.document.fire(type);
+    }
+    const gestures = fixture => fixture.events.filter(([type]) => type === 'gesture');
+    assert.deepEqual(gestures(after), gestures(before));
+    fixtures.push({ expected, events: after.events.filter(([type]) => type.startsWith('tune-')) });
+    passed++; tuneCases++;
+  }
+  const failed = await boot(read(afterPath), '?play=0', 'webgl2', {}, true, true,
+                           { 'assets/tunes/music-false-identity.cts': false });
+  assert.equal(await failed.context.SubstraticPage.fetchTune('music-false-identity'), false);
+  assert.equal(failed.requests.filter(url => url === 'assets/tunes/music-false-identity.cts').length, 1);
+  assert.equal(failed.events.filter(([type, payload]) => type === 'tune-failed' && payload.startsWith('music-false-identity\t')).length, 1);
+  assert.equal(failed.events.filter(([type, payload]) => type === 'tune-done' && payload === 'music-false-identity').length, 0);
+  passed++; tuneCases++;
+  fs.mkdirSync('build/adoption-prep', { recursive: true });
+  fs.writeFileSync('build/adoption-prep/tune-page-fixtures.json', JSON.stringify(fixtures) + '\n');
+}
 if (process.argv.includes('--require-focus')) {
-  assert.equal(passed, 24, 'the focus gate must execute both focus-loss scenarios');
+  assert.equal(focusCases, 2, 'the focus gate must execute both focus-loss scenarios');
+}
+if (process.argv.includes('--require-tunes')) {
+  assert.equal(tuneCases, 5, 'the tune gate must execute alias, UTF-8 and failure scenarios');
 }
 console.log(`PAGE DOM CONTRACT GREEN: ${passed} scenarios; actual complete page scripts, released shared script, params/fetch order, fullscreen, touch and loader suppression`);

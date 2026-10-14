@@ -94,7 +94,19 @@
     window.SUBSTRATIC = {
       canvas: "#stage", sticks: [], buttons: [],
       fullscreen: true, webglCheck: true, focus: true, gamepad: false,
-      playtest: false, versionUrl: null, tunes: null
+      playtest: false, versionUrl: null,
+      tunes: new URLSearchParams(location.search).has("mute") ? null : {
+        cache: "default", retries: 0,
+        urlFor: (function () {
+          var params = new URLSearchParams(location.search);
+          return function (name) {
+            var blip = ({a: 1, b: 1, c: 1})[params.get("blip")] ? params.get("blip") : "c";
+            var bed = ({a: 1, b: 1})[params.get("bed")] ? params.get("bed") : "a";
+            var file = name === "event-crash" ? "crash-blip-" + blip : name === "bed-sim" ? "bed-sim-" + bed : name;
+            return "assets/tunes/" + file + ".cts";
+          };
+        })()
+      }
     };
   </script>
   <script src="assets/substratic/substratic.js"></script>
@@ -346,16 +358,9 @@
             // PRACTICE's bed, the sim's air in place of the building's hum
             .concat(["bed-sim"])
             .forEach(function (name) {
-              // David swaps the blip and the sim's bed by ear: ?blip=a|b|c, ?bed=a|b (defaults C and A, his picks)
-              // (David, 2026-09-28: blip C, the trill; bed A, the soft tone with a fan)
-              var blip = ({a: 1, b: 1, c: 1})[params.get("blip")] ? params.get("blip") : "c";   // David's pick: C, the trill
-              var bed = ({a: 1, b: 1})[params.get("bed")] ? params.get("bed") : "a";
-              var file = name === "event-crash" ? "crash-blip-" + blip : name === "bed-sim" ? "bed-sim-" + bed : name;
-              fetch("assets/tunes/" + file + ".cts").then(function (r) {
-                if (!r.ok) throw new Error(String(r.status));
-                return r.text();
-              }).then(function (t) { app.dispatch("tune", name + "\n" + t); },
-                      function (e) { console.log("phantom-burn: sound: no " + name + " (" + e.message + ")"); });
+              window.SubstraticPage.fetchTune(name).then(function (ok) {
+                if (!ok) console.log("phantom-burn: sound: no " + name + " (shared tune transfer failed)");
+              });
             });
           ["pointerup", "touchend", "click", "keydown"].forEach(function (n) {
             document.addEventListener(n, function () { app.dispatch("gesture", n); }, true);
