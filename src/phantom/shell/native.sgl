@@ -70,6 +70,7 @@
           (only (phantom play core) play-guard)
           (only (phantom guard guard) guard-place!)
           (phantom sound game)
+          (phantom sound tunes)
           (phantom store save)
           (phantom settings native))
 
@@ -311,9 +312,11 @@
         (apply-settings! args)
         (start-play! args (load-info))
         (when (sound-wanted? args frames seconds)
-          (sound-game-init! (lambda (name)
-                              (let ((f (string-append "assets/tunes/" name ".cts")))
-                                (and (file-exists? f) (read-file-string f)))))
+          (sound-game-init!
+            (make-native-tune-loader
+              (lambda (name)
+                (let ((file (string-append "assets/tunes/" name ".cts")))
+                  (and (file-exists? file) (read-file-string file))))))
           (sound-game-gesture!))                 ; natively no gesture is needed: start now
 
         (guard-preview! args)

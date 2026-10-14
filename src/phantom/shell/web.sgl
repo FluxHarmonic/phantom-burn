@@ -49,6 +49,8 @@
           (phantom floor replay)
           (phantom play mode)
           (phantom sound game)
+          (phantom sound tunes)
+          (substratic audio tunes)
           (phantom guard skin-draw))
 
   (export web-main web-dispatch)
@@ -75,8 +77,8 @@
     ;; (SOUND-TUNES) and hands each over as ("tune", "NAME\nTEXT"); the loader
     ;; answers from what has landed. ?mute=1: no sound at all. ?trace=1: a
     ;; line of the sound's costs every 120 frames.
-    (define *tunes* '())
-    (define (tune-loader name) (let ((e (assoc name *tunes*))) (and e (cdr e))))
+    (define *tunes* (make-tunes))
+    (define (tune-loader name) (tunes-text *tunes* name))
     (define *sound-frames* 0)
     (define (sound-traced!)
       (set! *sound-frames* (+ *sound-frames* 1))
@@ -546,13 +548,10 @@
                  (when (and r (>= r 8) (<= r 48)) (sound-game-set-music-rate! (exact (round (* 1000 r)))))))
              0)
             ((string=? type "tune")
-             ;; "NAME\nTEXT": one of SOUND-TUNES, fetched by the page
-             (let loop ((i 0))
-               (cond ((>= i (string-length payload)) #f)
-                     ((char=? (string-ref payload i) #\newline)
-                      (set! *tunes* (cons (cons (substring payload 0 i) (substring payload (+ i 1) (string-length payload)))
-                                          *tunes*)))
-                     (else (loop (+ i 1)))))
+             (legacy-tune-provide! *tunes* payload)
+             0)
+            ((member type '("tune-begin" "tune-chunk" "tune-done" "tune-failed"))
+             (tunes-dispatch! *tunes* type payload)
              0)
             ((string=? type "gesture")
              ;; a user gesture (the page sends pointerup, touchend, click, keydown):

@@ -1,0 +1,25 @@
+;;; Compatibility with Phantom's existing NAME-newline-TEXT page event.
+;;; Substratic owns the cached texts and the newer chunked transfers.
+(define-library (phantom sound tunes)
+  (import (only (substratic audio tunes)
+                make-tunes tunes-text tunes-provide! tunes-forget!))
+  (export legacy-tune-provide! make-native-tune-loader)
+
+  (begin
+    ;; Native lookups historically reread files, including successful ones.
+    ;; Refresh only the requested name, preserving retries and file edits.
+    (define (make-native-tune-loader load)
+      (let ((cache (make-tunes load: load)))
+        (lambda (name)
+          (tunes-forget! cache name)
+          (tunes-text cache name))))
+
+    (define (legacy-tune-provide! cache payload)
+      (let find ((index 0))
+        (cond
+          ((>= index (string-length payload)) #f)
+          ((char=? (string-ref payload index) #\newline)
+           (tunes-provide! cache
+                           (substring payload 0 index)
+                           (substring payload (+ index 1) (string-length payload))))
+          (else (find (+ index 1))))))))

@@ -1,0 +1,55 @@
+(import (sigil test)
+        (phantom sound tunes)
+        (substratic audio tunes))
+
+(test-group "Phantom legacy tune handoff"
+  (test "a tune arriving after a missing lookup becomes available"
+    (let ((cache (make-tunes)))
+      (assert-false (tunes-text cache "music-false-identity"))
+      (assert-true (legacy-tune-provide! cache "music-false-identity\n(tune)\n"))
+      (assert-equal "(tune)\n" (tunes-text cache "music-false-identity"))))
+  (test "only the first newline splits the envelope; UTF-8 text stays exact"
+    (let ((cache (make-tunes)))
+      (legacy-tune-provide! cache "event-note\nα\nβ\n")
+      (assert-equal "α\nβ\n" (tunes-text cache "event-note"))))
+  (test "a refresh replaces that name and keeps the other tune"
+    (let ((cache (make-tunes)))
+      (legacy-tune-provide! cache "bed-sim\nold")
+      (legacy-tune-provide! cache "music-heat-trace\nkeep")
+      (legacy-tune-provide! cache "bed-sim\nnew")
+      (assert-equal "new" (tunes-text cache "bed-sim"))
+      (assert-equal "keep" (tunes-text cache "music-heat-trace"))))
+  (test "an incomplete envelope leaves existing text intact"
+    (let ((cache (make-tunes)))
+      (legacy-tune-provide! cache "bed-sim\nold")
+      (assert-false (legacy-tune-provide! cache "bed-sim"))
+      (assert-equal "old" (tunes-text cache "bed-sim")))))
+
+(test-group "Native tune lookup compatibility"
+  (test "a missing native file is retried and a changed file is reread"
+    (let ((text #f)
+          (calls 0))
+      (let ((loader
+              (make-native-tune-loader
+                (lambda (name)
+                  (set! calls (+ calls 1))
+                  text))))
+        (assert-false (loader "event-note"))
+        (set! text "first")
+        (assert-equal "first" (loader "event-note"))
+        (set! text "changed")
+        (assert-equal "changed" (loader "event-note"))
+        (set! text #f)
+        (assert-false (loader "event-note"))
+        (assert-equal 4 calls))))
+  (test "a partial UTF-8 refresh keeps the old text until all chunks arrive"
+    (let ((cache (make-tunes)))
+      (legacy-tune-provide! cache "event-note\nold")
+      (tunes-begin! cache "event-note" 2 2)
+      (tunes-chunk! cache "event-note" 0 (bytevector 206))
+      (assert-equal "old" (tunes-text cache "event-note"))
+      (tunes-chunk! cache "event-note" 1 (bytevector 177))
+      (tunes-done! cache "event-note")
+      (assert-equal "α" (tunes-text cache "event-note")))))
+
+(run-tests)
