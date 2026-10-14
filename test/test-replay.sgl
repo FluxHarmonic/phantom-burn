@@ -1,0 +1,36 @@
+(import (sigil test)
+        (phantom walker)
+        (phantom floor replay))
+
+(test-group "Legacy walker replay contracts"
+  (test "the script keeps its header, integer rows, flags and final newline"
+    (assert-equal
+      "start 1 2 0 0 crouched\n0 1 0 0 1 0 1 -1\n"
+      (script->string '(1 2 0 0 #t)
+                      (list (make-input 0 1 0 0 #t #f #t -1))))
+    (assert-equal "start 1 2 0 0\n" (script->string '(1 2 0 0 #f) '())))
+  (test "empty lines, repeated spaces and header suffixes keep their meaning"
+    (assert-equal
+      (cons '(1 2 0 0 #t) (list (make-input 0 1 0 0 #t #f #t -1)))
+      (parse-script "\nstart  1 2 0 0 crouched ignored\n\n0  1 0 0 1 0 1 -1\n"))
+    (assert-equal
+      (cons '(1 2 0 0 #f) (list (make-input 0 1 0 0 #f #f #f 0)))
+      (parse-script "start 1 2 0 0 other\n0 1 0 0 yes no 2 0\n")))
+  (test "malformed scripts and version headers retain the legacy rejection"
+    (for-each
+      (lambda (text) (assert-false (parse-script text)))
+      '("" "start x 2 0 0\n" "start 1 2 0\n"
+        "start 1 2 0 0\n   \n" "start 1 2 0 0\n\t\n"
+        "start 1 2 0 0\n0 1 0 0 0 0 0\n"
+        "replay v1\nstart 1 2 0 0\n")))
+  (test "nonnumeric input fields preserve the existing parser result"
+    (assert-equal
+      (cons '(1 2 0 0 #f) (list (make-input #f 1 0 0 #f #f #f #f)))
+      (parse-script "start 1 2 0 0\nx 1 0 0 0 0 0 x\n")))
+  (test "an empty replay includes exactly the initial standing or crouched state"
+    (assert-equal '("0 1 2 0 0 1.75")
+                  (replay-trace #f (cons '(1 2 0 0 #f) '()) TICK))
+    (assert-equal '("0 1 2 0 0 0.9")
+                  (replay-trace #f (cons '(1 2 0 0 #t) '()) TICK))))
+
+(run-tests)
