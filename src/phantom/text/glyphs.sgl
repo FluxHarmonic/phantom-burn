@@ -1,0 +1,34 @@
+;;; Shared glyph bitmaps with Phantom's established atlas slots and shapes.
+(define-library (phantom text glyphs)
+  (import (only (substratic text font) glyph-rows))
+  (export GLYPHS)
+
+  (begin
+    (define ORDER " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.:/-()%[]=+,?!#;$><_'")
+    (define OVERRIDES
+      '((#\space "     " "     " "     " "     " "     " "     " "     ")
+        (#\W "#   #" "#   #" "#   #" "# # #" "# # #" "# # #" " # # ")
+        (#\. "     " "     " "     " "     " "     " " ##  " " ##  ")
+        (#\: "     " " ##  " " ##  " "     " " ##  " " ##  " "     ")
+        (#\/ "     " "    #" "   # " "  #  " " #   " "#    " "     ")
+        (#\% "##   " "##  #" "   # " "  #  " " #   " "#  ##" "   ##")
+        (#\, "     " "     " "     " "     " " ##  " "  #  " " #   ")
+        (#\! "  #  " "  #  " "  #  " "  #  " "  #  " "     " "  #  ")
+        (#\; "     " "  #  " "     " "     " "  #  " "  #  " " #   ")))
+
+    (define (rows-for character)
+      (let ((override (assv character OVERRIDES)))
+        (if override
+            (cdr override)
+            (let ((rows (glyph-rows character)))
+              (unless rows (error "missing shared atlas glyph" character))
+              (map
+                (lambda (row)
+                  (list->string
+                    (map (lambda (cell) (if (char=? cell #\#) #\# #\space))
+                         (string->list row))))
+                rows)))))
+
+    (define GLYPHS
+      (map (lambda (character) (cons character (rows-for character)))
+           (string->list ORDER)))))

@@ -1,0 +1,37 @@
+(import (sigil test)
+        (phantom text glyphs))
+
+(test-group "Phantom atlas glyph compatibility"
+  (test "the atlas retains all 58 existing slots in their original order"
+    (assert-equal
+      (string->list " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ.:/-()%[]=+,?!#;$><_'")
+      (map car GLYPHS))
+    (assert-false (assv #\@ GLYPHS))
+    (assert-false (assv #\* GLYPHS)))
+  (test "the shared letter and P3 prompt bitmaps retain their lit cells"
+    (assert-equal '(" ### " "#   #" "#   #" "#####" "#   #" "#   #" "#   #")
+                  (cdr (assv #\A GLYPHS)))
+    (assert-equal '("  #  " " ####" "# #  " " ### " "  # #" "#### " "  #  ")
+                  (cdr (assv #\$ GLYPHS)))
+    (assert-equal "#####" (list-ref (cdr (assv #\_ GLYPHS)) 6)))
+  (test "Phantom's distinct W and punctuation keep their original strokes"
+    (assert-equal '("#   #" "#   #" "#   #" "# # #" "# # #" "# # #" " # # ")
+                  (cdr (assv #\W GLYPHS)))
+    (assert-equal '("     " " ##  " " ##  " "     " " ##  " " ##  " "     ")
+                  (cdr (assv #\: GLYPHS)))
+    (assert-equal '("     " "     " "     " "     " "     " " ##  " " ##  ")
+                  (cdr (assv #\. GLYPHS))))
+  (test "every slot stays seven five-cell rows with legacy blank encoding"
+    (for-each
+      (lambda (glyph)
+        (assert-equal 7 (length (cdr glyph)))
+        (for-each
+          (lambda (row)
+            (assert-equal 5 (string-length row))
+            (for-each
+              (lambda (cell) (assert-true (or (char=? cell #\space) (char=? cell #\#))))
+              (string->list row)))
+          (cdr glyph)))
+      GLYPHS)))
+
+(run-tests)
