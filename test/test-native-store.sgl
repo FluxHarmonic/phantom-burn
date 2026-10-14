@@ -1,0 +1,50 @@
+;;; Existing native saves retain their path, bytes and independent minima.
+(import (sigil test)
+        (phantom store save))
+
+(define EXISTING-SAVE
+  '((best "14" 120 2) (best "sim" 91 0)
+    (fullscreen #f) (future-setting keep)))
+
+(test-group "Native legacy save compatibility"
+  (test "the existing directory honors XDG and HOME, including empty values"
+    (assert-equal "/data/phantom-burn" (legacy-save-directory "/data" "/home/player"))
+    (assert-equal "/home/player/.local/share/phantom-burn"
+                  (legacy-save-directory #f "/home/player"))
+    (assert-equal "./.local/share/phantom-burn" (legacy-save-directory #f #f))
+    (assert-equal "/phantom-burn" (legacy-save-directory "" "/home/player")))
+  (test "serialized bytes keep the legacy header and explicit false setting"
+    (assert-equal
+      (string-append
+        ";; Phantom Burn's save: each floor's best time (s) and fewest incidents, and fullscreen\n"
+        "((best \"14\" 120 2) (best \"sim\" 91 0) (fullscreen #f) (future-setting keep))\n")
+      (entries->legacy-save EXISTING-SAVE)))
+  (test "the first datum survives comments and broken trailing text"
+    (assert-equal EXISTING-SAVE
+                  (legacy-save->entries
+                    (string-append (entries->legacy-save EXISTING-SAVE) "(broken"))))
+  (test "missing and malformed saves retain the empty fallback and valid rows"
+    (assert-equal '() (legacy-save->entries #f))
+    (assert-equal '() (legacy-save->entries ""))
+    (assert-equal '() (legacy-save->entries "("))
+    (assert-equal '() (legacy-save->entries "42"))
+    (assert-equal '((fullscreen #f) (future-setting keep))
+                  (legacy-save->entries "((fullscreen #f) 42 (future-setting keep))")))
+  (test "time and incident improvements are independent and keep every other row"
+    (let* ((first (save-with-best EXISTING-SAVE "14" 150 1))
+           (second (save-with-best first "14" 110 3))
+           (third (save-with-best second "15" 95 4))
+           (fourth (save-with-best third "14" 109.25 2)))
+      (assert-equal '(best "14" 120 1) (save-best-entry first "14"))
+      (assert-equal '(best "14" 110 1) (save-best-entry second "14"))
+      (assert-equal
+        '((best "14" 109.25 1) (best "15" 95 4) (best "sim" 91 0)
+          (fullscreen #f) (future-setting keep))
+        fourth)))
+  (test "a missing floor has no best and malformed duplicate rows are replaced"
+    (assert-false (save-best-entry EXISTING-SAVE "unknown"))
+    (assert-equal '((best "14" 100 0) (fullscreen #f))
+                  (save-with-best '((best "14") (best "14" 120 2) (fullscreen #f))
+                                  "14" 100 0))))
+
+(run-tests)

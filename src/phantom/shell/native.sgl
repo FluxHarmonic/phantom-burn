@@ -52,8 +52,7 @@
 ;;; capture); Escape gives it back, and quits when it is not captured.
 
 (define-library (phantom shell native)
-  (import (sigil core)
-          (sigil math)
+  (import (sigil math)
           (sigil process)
           (sigil io)
           (sigil list)
@@ -70,7 +69,8 @@
           (phantom play mode)
           (only (phantom play core) play-guard)
           (only (phantom guard guard) guard-place!)
-          (phantom sound game))
+          (phantom sound game)
+          (phantom store save))
 
   (export native-main)
 
@@ -194,7 +194,7 @@
         (game-set-play! (vector play-hold? play-after-tick! play-frame! play-hud! play-press! play-held!))
         (play-mode-set-dev! (and (member "--dev" args) #t))
         ;; the floor's best (Phantom 0.1), kept in the save file
-        (let ((b (find (lambda (e) (equal? (cadr e) (floor-name))) (read-save))))
+        (let ((b (save-best-entry (read-save-all) (floor-name))))
           (play-mode-set-best! (and b (cons (caddr b) (cadddr b)))))
         (play-mode-set-on-record! (lambda (secs incidents) (record-best! (floor-name) secs incidents)))
         ;; the pause panel's rows: RESUME takes the mouse again; FULLSCREEN;
@@ -219,8 +219,7 @@
     ;; datum, ((best FLOOR SECS INCIDENTS) ...), each floor's best time and
     ;; fewest incidents (the page keeps the same in localStorage).
     (define (save-dir)
-      (string-append (or (getenv "XDG_DATA_HOME") (string-append (or (getenv "HOME") ".") "/.local/share"))
-                     "/phantom-burn"))
+      (legacy-save-directory (getenv "XDG_DATA_HOME") (getenv "HOME")))
     (define (save-path) (string-append (save-dir) "/save.sexp"))
     (define (floor-name)
       (let loop ((i (- (string-length *dir*) 1)))
@@ -229,23 +228,20 @@
               (else (loop (- i 1))))))
     ;; the whole save: ((best FLOOR SECS INCIDENTS) ... (fullscreen #t|#f))
     (define (read-save-all)
-      (let ((d (and (file-exists? (save-path))
-                    (guard (e (#t #f)) (read (open-input-string (read-file-string (save-path))))))))
-        (if (list? d) (filter list? d) '())))
-    (define (read-save)
-      (filter (lambda (e) (and (= (length e) 4) (eq? (car e) 'best))) (read-save-all)))
+      (legacy-save->entries
+        (and (file-exists? (save-path))
+             (guard (exception (#t #f))
+               (read-file-string (save-path))))))
+
     (define (write-save! entries)
-      (guard (x (#t #f))
+      (guard (exception (#t #f))
         (ensure-directory (save-dir))
-        (write-file-string (save-path)
-                           (string-append ";; Phantom Burn's save: each floor's best time (s) and fewest incidents, and fullscreen\n"
-                                          (let ((out (open-output-string))) (write entries out) (get-output-string out))
-                                          "\n"))))
-    (define (record-best! floor secs incidents)
-      (let* ((old (read-save))
-             (was (find (lambda (e) (equal? (cadr e) floor)) old))
-             (e (list 'best floor (if was (min secs (caddr was)) secs) (if was (min incidents (cadddr was)) incidents))))
-        (write-save! (cons e (filter (lambda (x) (not (and (eq? (car x) 'best) (equal? (cadr x) floor)))) (read-save-all))))))
+        (write-file-string (save-path) (entries->legacy-save entries))))
+
+    (define (record-best! floor seconds incidents)
+      (write-save!
+        (save-with-best (read-save-all) floor seconds incidents)))
+
     ;; fullscreen (Substratic's toggle, (substratic view window): F11 or
     ;; Alt+Enter, remembered between runs; without its 2D view fit)
     (define (fullscreen-remembered?)

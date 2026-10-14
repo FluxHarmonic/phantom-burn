@@ -1,0 +1,53 @@
+;;; Phantom's existing save format and score policy, over shared helpers.
+;;; Native file I/O must retain save.sexp; shared KV's key.sgl is different.
+(define-library (phantom store save)
+  (import (sigil list)
+          (only (sigil io) read open-input-string)
+          (only (substratic store kv) datum->text))
+  (export legacy-save-directory legacy-save->entries entries->legacy-save
+          save-best-entry save-with-best)
+
+  (begin
+    (define (legacy-save-directory xdg home)
+      (string-append
+        (or xdg (string-append (or home ".") "/.local/share"))
+        "/phantom-burn"))
+
+    ;; The old reader accepts the first datum and ignores trailing text.
+    ;; Do not substitute strict text->datum and discard an existing save.
+    (define (legacy-save->entries text)
+      (let ((datum
+              (and (string? text)
+                   (guard (error (#t #f))
+                     (read (open-input-string text))))))
+        (if (list? datum) (filter list? datum) '())))
+
+    (define (entries->legacy-save entries)
+      (string-append
+        ";; Phantom Burn's save: each floor's best time (s) and fewest incidents, and fullscreen\n"
+        (datum->text entries)
+        "\n"))
+
+    (define (entry-tag? entry tag)
+      (and (pair? entry) (eq? (car entry) tag)))
+
+    (define (floor-entry? entry floor)
+      (and (entry-tag? entry 'best)
+           (pair? (cdr entry))
+           (equal? (cadr entry) floor)))
+
+    (define (save-best-entry entries floor)
+      (find
+        (lambda (entry)
+          (and (= (length entry) 4) (floor-entry? entry floor)))
+        entries))
+
+    ;; Time and incident minima are independent, as in Phantom 0.1.
+    (define (save-with-best entries floor seconds incidents)
+      (let* ((previous (save-best-entry entries floor))
+             (entry
+               (list 'best floor
+                     (if previous (min seconds (caddr previous)) seconds)
+                     (if previous (min incidents (cadddr previous)) incidents))))
+        (cons entry
+              (filter (lambda (other) (not (floor-entry? other floor))) entries))))))
