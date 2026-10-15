@@ -70,6 +70,7 @@ export const SITES = {
   "pa-5iTMFNFjYxMn3THin-cwJ": "crashthestack.com",
   "pa-N4Ba55rWhDJmIzpZceg0x": "harkfell.com",
   "pa-GxdOlotIbYY0LzO4WRsIV": "phantomburn.net",
+  "pa-GCzY0KZPnFuB1DEsbPead": "signaloverdrive.net",
 };
 export const PRIVACY = "Privacy-friendly analytics by Plausible: no cookies, no personal data.";
 export const EVENT_URL = "https://plausible.io/api/event";
