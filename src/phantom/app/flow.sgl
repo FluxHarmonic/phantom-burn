@@ -1,0 +1,129 @@
+;;; Application flow shared by the native window and the browser host.
+;;; The shells supply assets and draw frames; neither selects a floor or
+;;; restarts the application. Pause, capture retries and result cards remain
+;;; in (phantom play mode), whose completion/quit callbacks request the title.
+(define-library (phantom app flow)
+  (import (sigil struct))
+  (export make-app-flow app-flow? app-flow-phase app-flow-floor
+          app-flow-selection app-flow-generation app-flow-practiced?
+          APP-MENU APP-FLOORS
+          app-flow-advance! app-flow-menu! app-flow-load!
+          app-flow-current-load? app-flow-ready! app-flow-failed!
+          app-flow-error app-flow-request-title! app-flow-practice-done!)
+
+  (begin
+    (define APP-MENU '("PRACTICE" "INFILTRATE"))
+    (define APP-FLOORS '("sim" "14"))
+    (define TITLE-INPUT-DELAY 0.8)
+
+    (define-struct app-flow
+      (phase default: 'title mutable: #t)
+      (floor default: #f mutable: #t)
+      (selection default: 0 mutable: #t)
+      (generation default: 0 mutable: #t)
+      (title-time default: 0.0 mutable: #t)
+      (practiced default: #f mutable: #t)
+      (return-requested default: #f mutable: #t)
+      (error default: #f mutable: #t))
+
+    (define (make-app-flow practiced?)
+      (app-flow practiced: (and practiced? #t)
+                selection: (if practiced? 1 0)))
+
+    (define (app-flow-practiced? flow)
+      (app-flow-practiced flow))
+
+    (define (app-flow-practice-done! flow)
+      (set-app-flow-practiced! flow #t))
+
+    ;; A game callback must not replace the renderer's floor in the middle
+    ;; of game-frame!. The next shell frame consumes this request instead.
+    (define (app-flow-request-title! flow)
+      (unless (eq? (app-flow-phase flow) 'title)
+        (set-app-flow-return-requested! flow #t)))
+
+    ;; Return either #f or the action (title). A transition requires the
+    ;; shell to discard pending/held input before drawing the next scene.
+    ;; Supply zero dt while title assets are not yet ready to draw.
+    (define (app-flow-advance! flow dt)
+      (cond
+        ((app-flow-return-requested flow)
+         ;; Invalidate every outstanding transport response, including a
+         ;; response for the same floor selected again after cancellation.
+         (set-app-flow-generation! flow (+ 1 (app-flow-generation flow)))
+         (set-app-flow-return-requested! flow #f)
+         (set-app-flow-phase! flow 'title)
+         (set-app-flow-title-time! flow 0.0)
+         (set-app-flow-selection! flow (if (app-flow-practiced? flow) 1 0))
+         (set-app-flow-error! flow #f)
+         '(title))
+        ((eq? (app-flow-phase flow) 'title)
+         (set-app-flow-title-time! flow
+           (+ (app-flow-title-time flow) (max 0.0 dt)))
+         #f)
+        (else #f)))
+
+    ;; (load GENERATION FLOOR) is a request to the shell's transport, not
+    ;; navigation. Cached assets still receive a new generation and a fresh
+    ;; play state on every visit. This also serves launch-only dev shortcuts.
+    (define (app-flow-load! flow floor)
+      (unless (and (string? floor) (> (string-length floor) 0))
+        (error "app-flow-load!: a floor name is required"))
+      (set-app-flow-generation! flow (+ 1 (app-flow-generation flow)))
+      (set-app-flow-floor! flow floor)
+      (set-app-flow-phase! flow 'loading)
+      (set-app-flow-return-requested! flow #f)
+      (set-app-flow-error! flow #f)
+      (list 'load (app-flow-generation flow) floor))
+
+    ;; Shells must check this BEFORE installing any delivered floor state.
+    ;; Checking the name alone would accept an old load of the same floor.
+    (define (app-flow-current-load? flow generation floor)
+      (and (eq? (app-flow-phase flow) 'loading)
+           (= (app-flow-generation flow) generation)
+           (equal? (app-flow-floor flow) floor)
+           (not (app-flow-return-requested flow))))
+
+    ;; Call after all assets and a fresh game/play state are installed.
+    (define (app-flow-ready! flow generation floor)
+      (and (app-flow-current-load? flow generation floor)
+           (begin
+             (set-app-flow-phase! flow 'game)
+             #t)))
+
+    (define (app-flow-failed! flow generation floor message)
+      (and (app-flow-current-load? flow generation floor)
+           (begin
+             (set-app-flow-phase! flow 'failed)
+             (set-app-flow-error! flow message)
+             #t)))
+
+    (define (menu-index? index)
+      (and (integer? index) (>= index 0) (< index (length APP-MENU))))
+
+    ;; Presses arrive in chronological order on both targets. The first
+    ;; activation consumes the menu event stream; a later direction cannot
+    ;; change the floor already selected. A tap uses the drawn menu's hit.
+    (define (app-flow-menu! flow presses hit)
+      (and (eq? (app-flow-phase flow) 'title)
+           (> (app-flow-title-time flow) TITLE-INPUT-DELAY)
+           (if (menu-index? hit)
+               (begin
+                 (set-app-flow-selection! flow hit)
+                 (app-flow-load! flow (list-ref APP-FLOORS hit)))
+               (let loop ((keys presses))
+                 (and (pair? keys)
+                      (case (car keys)
+                        ((up w)
+                         (set-app-flow-selection! flow
+                           (max 0 (- (app-flow-selection flow) 1)))
+                         (loop (cdr keys)))
+                        ((down s)
+                         (set-app-flow-selection! flow
+                           (min (- (length APP-MENU) 1)
+                                (+ (app-flow-selection flow) 1)))
+                         (loop (cdr keys)))
+                        ((tap escape) (loop (cdr keys)))
+                        (else
+                         (app-flow-load! flow
+                           (list-ref APP-FLOORS (app-flow-selection flow))))))))))))

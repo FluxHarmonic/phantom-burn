@@ -30,8 +30,7 @@
 ;;; of the floor's views with that view's field of view, and steps nothing.
 
 (define-library (phantom game)
-  (import (sigil core)
-          (sigil math)
+  (import (sigil math)
           (sigil time)
           (sigil gc)
           (sigil graphics)
@@ -302,6 +301,22 @@
     (define (game-init! load-mesh* load-texture* coll info)
       (render-init!)
       (text-init!)
+      ;; A floor entry is a fresh game, unlike the editor's live reload.
+      ;; Clearing the walker also prevents restoring the previous scene's
+      ;; circuit switches while game-reload! installs the new floor.
+      (set! *walker* #f)
+      (set! *prev* #f)
+      (set! *acc* 0.0)
+      (set! *pending-yaw* 0.0)
+      (set! *pending-pitch* 0.0)
+      (set! *crouch-press* #f)
+      (set! *shot* #f)
+      (set! *play* #f)
+      (set! *stick-sel* 0)
+      (set! *ticks* 0)
+      (set! *draws* 0)
+      (set! *hud-lines* '())
+      (set! *hud-age* 1.0)
       (game-reload! load-mesh* load-texture* coll info)
       (game-set-view! 0))
 

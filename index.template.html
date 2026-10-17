@@ -171,24 +171,46 @@
       window.AudioContext = Wrapped;
       if (window.webkitAudioContext) window.webkitAudioContext = Wrapped;
     })();
-    // The flow's floor (PRACTICE, D38): the title's menu offers PRACTICE (floor
-    // sim) and INFILTRATE (floor 14). One floor loads behind the title: sim
-    // for a first-timer, 14 once practice has been finished on this browser
-    // (localStorage phantomburn.practiced); picking the other reloads with
-    // ?go=FLOOR, which goes straight to it.
+    // Launch-only developer shortcuts. Normal floor selection and progress
+    // belong to the shared Sigil app; this page only transports its assets.
     var flowQuery = params.get("play") !== "0" && !params.has("title") &&
       !["play", "title", "floor", "view", "shot", "card", "hud", "trace", "auto"].some(function (k) { return params.has(k); });
-    var practiced = (function () { try { return params.has("practiced") || localStorage.getItem("phantomburn.practiced") === "1"; } catch (e) { return params.has("practiced"); } })();
     // the loaded floor's best (Phantom 0.1): "SECS_INCIDENTS", or ""
     var bestOf = function (f) { try { return (localStorage.getItem("phantomburn.best." + f) || "").replace(/[^0-9_]/g, ""); } catch (e) { return ""; } };
     var go = (params.get("go") || "").replace(/[^A-Za-z0-9_-]/g, "");
-    var floor = (params.get("floor") || go || (params.has("title") ? "root-room" : (flowQuery && !practiced ? "sim" : "14")))
+    var floor = (params.get("floor") || go || (params.has("title") ? "root-room" : "14"))
       .replace(/[^A-Za-z0-9_-]/g, "");
     var dir = floor === "stand-in" ? "assets/stand-in/" : "assets/floors/" + floor + "/";
     var collideFile = floor === "stand-in" ? "floor14.collide.b64" : "collide.b64";
     function withApp(fn) {
       if (globalThis.SigilWebApp) { fn(globalThis.SigilWebApp); return; }
       document.addEventListener("sigil-web-app-ready", function (e) { fn(e.detail); }, { once: true });
+    }
+    var floorTexts = new Map();
+    function floorText(url) {
+      if (!floorTexts.has(url)) {
+        floorTexts.set(url, fetch(url).then(function (response) {
+          if (!response.ok) throw new Error("floor asset " + response.status);
+          return response.text();
+        }).catch(function (error) {
+          floorTexts.delete(url);
+          throw error;
+        }));
+      }
+      return floorTexts.get(url);
+    }
+    function loadFloorPacket(generation, requestedFloor) {
+      if (!Number.isSafeInteger(generation) || generation < 1 || !/^[A-Za-z0-9_-]+$/.test(requestedFloor)) return;
+      var base = "assets/floors/" + requestedFloor + "/";
+      var header = generation + "\n" + requestedFloor + "\n";
+      function deliver(kind, text) {
+        withApp(function (app) { app.dispatch("floor-packet", header + kind + "\n" + text); });
+      }
+      Promise.all(["floor.sexp", "play.sexp", "collide.b64"].map(function (name) {
+        return floorText(base + name);
+      })).then(function (texts) {
+        ["info", "play", "collision"].forEach(function (kind, index) { deliver(kind, texts[index]); });
+      }).catch(function () { deliver("failed", ""); });
     }
     if (params.has("touch")) document.body.classList.add("touch");
     // ?dev: the lab panel and the HUD (the game reads ?dev for its HUD);
@@ -249,7 +271,11 @@
       var log1 = console.log.bind(console);
       console.log = function () {
         var line = Array.prototype.join.call(arguments, " ");
-        if (line === "phantom-burn: mode title") document.body.classList.add("ontitle");
+        if (line === "phantom-burn: mode title") {
+          document.body.classList.add("ontitle");
+          document.body.classList.remove("paused");
+          if (document.pointerLockElement && document.exitPointerLock) document.exitPointerLock();
+        }
         // the pause panel: taps go to its rows while it is up
         if (line === "phantom-burn: paused") document.body.classList.add("paused");
         if (line === "phantom-burn: resumed") document.body.classList.remove("paused");
@@ -258,11 +284,9 @@
         if (line === "phantom-burn: lock") phantomLock();
         if (line === "phantom-burn: fullscreen") phantomFullscreen();
         if (line === "phantom-burn: mode game") document.body.classList.remove("ontitle");
-        // the menu picked the floor that is not loaded: reload onto it
-        if (line.indexOf("phantom-burn: go ") === 0) {
-          var q = new URLSearchParams(location.search);
-          q.set("go", line.slice("phantom-burn: go ".length).replace(/[^A-Za-z0-9_-]/g, ""));
-          location.search = q.toString();
+        if (line.indexOf("phantom-burn: load-floor ") === 0) {
+          var request = line.slice("phantom-burn: load-floor ".length).split(" ");
+          loadFloorPacket(Number(request[0]), request[1] || "");
         }
         // practice finished: INFILTRATE is the default from now on
         if (line === "phantom-burn: practice done") {
@@ -333,9 +357,9 @@
       if (app.ready && app.ready.then) app.ready.then(function () { status.textContent = ""; });
       var booted = app.ready && app.ready.then ? app.ready : Promise.resolve();
       booted.then(function () {
-        var best = bestOf(floor);
-        app.dispatch("params", location.search.replace(/^\?/, "") + (flow ? "&flow=1" : "") + (practiced ? "&practiced=1" : "") + (best && !params.has("best") ? "&best=" + best : ""));
-        app.dispatch("floor", floor);
+        var best = flow ? "" : bestOf(floor);
+        app.dispatch("params", params.toString() + (flow ? "&flow=1" : "") + (best && !params.has("best") ? "&best=" + best : ""));
+        if (!flow) app.dispatch("floor", floor);
         app.dispatch("dpr", String(window.devicePixelRatio || 1));
         window.addEventListener("resize", function () { app.dispatch("dpr", String(window.devicePixelRatio || 1)); });
         // S1's sound: its tunes (the music, the events, the camera's, robot speak), and the gestures
@@ -377,11 +401,9 @@
           return text("floor.sexp").then(function (t) { app.dispatch("floorinfo", t); },
                                          function () { app.dispatch("nofloor", ""); });
         }
-        if (flow) {   // the title's room first, beside the floor
-          fetch("assets/floors/root-room/floor.sexp").then(function (r) {
-            if (!r.ok) throw new Error(String(r.status));
-            return r.text();
-          }).then(function (t) { app.dispatch("titleinfo", t); },
+        if (flow) {
+          return floorText("assets/floors/root-room/floor.sexp")
+            .then(function (t) { app.dispatch("titleinfo", t); },
                   function () { app.dispatch("notitle", ""); });
         }
         var info = floor === "stand-in" ? Promise.resolve(null) : text("floor.sexp");

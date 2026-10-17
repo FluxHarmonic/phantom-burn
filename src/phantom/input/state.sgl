@@ -1,6 +1,7 @@
 ;;; Phantom's ordered menu/button presses and legacy payloads over shared state.
 (define-library (phantom input state)
   (import (sigil struct)
+          (sigil list)
           (phantom input web)
           (substratic input keys)
           (substratic input sticks)
@@ -8,6 +9,7 @@
   (export make-web-input web-input? web-input-dispatch!
           web-input-held? web-input-pressed web-input-stick
           web-input-clear-pressed! web-input-clear-keys! web-input-take-look!
+          web-input-scene-clear!
           web-input-pair)
 
   (begin
@@ -15,6 +17,8 @@
       (keys)
       (sticks)
       (pressed default: '() mutable: #t)
+      (blocked-keys default: '() mutable: #t)
+      (blocked-sticks default: '() mutable: #t)
       (look-x default: 0 mutable: #t)
       (look-y default: 0 mutable: #t))
 
@@ -50,6 +54,24 @@
       (web-input-take-look! input)
       #t)
 
+    ;; A scene transition is different from focus loss: physical keys may
+    ;; still be down and fingers may still be on the old scene. Require a
+    ;; key release or a neutral/new stick gesture before admitting them again.
+    (define (web-input-scene-clear! input)
+      (let ((blocked (append (web-input-blocked-keys input)
+                             (keys-held (web-input-keys input)))))
+        (web-input-dispatch! input "blur" "")
+        (set-web-input-blocked-keys! input blocked)
+        (set-web-input-blocked-sticks! input '("move" "look"))))
+
+    (define (set-input-stick! input name x y)
+      (if (member name (web-input-blocked-sticks input))
+          (when (and (= x 0) (= y 0))
+            (set-web-input-blocked-sticks! input
+              (filter (lambda (blocked) (not (string=? name blocked)))
+                      (web-input-blocked-sticks input))))
+          (sticks-set! (web-input-sticks input) name x y)))
+
     ;; The old two-field events independently map an invalid component to 0.
     (define (web-input-pair payload)
       (let find ((index 0))
@@ -66,7 +88,8 @@
         (cond
           ((string=? type "keydown")
            (let ((key (phantom-dom-key payload)))
-             (when (and key (not (keys-held? keys key)))
+             (when (and key (not (memq key (web-input-blocked-keys input)))
+                        (not (keys-held? keys key)))
                (keys-down! keys key)
                ;; Preserve ordering across physical and synthetic presses.
                (set-web-input-pressed! input (cons key (web-input-pressed input)))))
@@ -74,6 +97,9 @@
           ((string=? type "keyup")
            (let ((key (phantom-dom-key payload)))
              (when key
+               (set-web-input-blocked-keys! input
+                 (filter (lambda (blocked) (not (eq? blocked key)))
+                         (web-input-blocked-keys input)))
                (keys-up! keys key)))
            #t)
           ((string=? type "press")
@@ -88,7 +114,12 @@
           ((or (string=? type "move") (string=? type "lookstick"))
            (let ((stick (web-input-pair payload))
                  (name (if (string=? type "move") "move" "look")))
-             (sticks-set! sticks name (car stick) (cdr stick)))
+             (set-input-stick! input name (car stick) (cdr stick)))
+           #t)
+          ((string=? type "stick")
+           (let ((stick (parse-stick-payload payload)))
+             (when stick
+               (set-input-stick! input (car stick) (cadr stick) (caddr stick))))
            #t)
           ((string=? type "blur")
            (input-dispatch! keys sticks type payload)
@@ -96,5 +127,7 @@
            ;; pending presses and mouse deltas before another frame arrives.
            (web-input-clear-pressed! input)
            (web-input-take-look! input)
+           (set-web-input-blocked-keys! input '())
+           (set-web-input-blocked-sticks! input '())
            #t)
           (else (input-dispatch! keys sticks type payload)))))))

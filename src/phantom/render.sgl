@@ -479,7 +479,15 @@ void main() {
 
     ;; --- setup ---------------------------------------------------------------
 
+    ;; Title and floors share one graphics context for the app's lifetime.
+    ;; Loading a scene replaces its meshes; pipelines and targets stay alive.
+    (define *render-ready* #f)
     (define (render-init!)
+      (unless *render-ready*
+        (render-init*!)
+        (set! *render-ready* #t)))
+
+    (define (render-init*!)
       (let ((layout (world-layout))
             (vs (string-append (glsl-header) WORLD-VERTEX))
             (fs (string-append (glsl-header) WORLD-FRAGMENT)))

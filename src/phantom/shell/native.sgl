@@ -21,7 +21,8 @@
 ;;; --trace prints a stats line every 120 frames (frame, CPU, world and post
 ;;; pass CPU, draws, allocations per frame); --auto walks forward, turning.
 ;;;
-;;; --floor names the floor's directory: by default assets/floors/14,
+;;; With no development door the shared app flow starts at the title.
+;;; --floor names a development floor's directory: assets/floors/14,
 ;;; the floor compiler's floor 14 (floor.sgm, collide, floor.sexp, the
 ;;; textures, city.sgm; scripts/floor-import brings it in); assets/stand-in
 ;;; is G0's Blender export (floor14.sgm, floor14.collide). The floor reloads
@@ -62,6 +63,7 @@
           (phantom soup)
           (phantom render)
           (phantom game)
+          (phantom app flow)
           (phantom guard body)
           (phantom guard skin-draw)
           (phantom deck preview)
@@ -119,7 +121,7 @@
       (map string->symbol '("c" "p" "[" "]" "/" "b" "n" "-" "=" "h" "v" "x" "7" "8" "9"
                             "j" "k" "l" "1" "2" "3" "4" "5" "6" "0" "," "." "g" ";" "'" "f"
                             ;; the terminal's selection (P3): play takes them while it is open
-                            "w" "s" "up" "down")))
+                            "w" "s" "up" "down" "return" "space" "escape")))
 
     ;; --press KEY@SECONDS,...: presses at those times of play (shots of the
     ;; terminal and the deck), as if typed then
@@ -189,21 +191,32 @@
 
     ;; --play: P1's game ((phantom play mode)) on a compiled floor with a
     ;; play.sexp (scripts/play-import.mjs): the guard, the badge, the exit.
-    (define (start-play! args info)
-      (when (and (member "--play" args) info (file-exists? (path "play.sexp")))
+    (define (start-play! args info . application)
+      (when (and (or (pair? application) (member "--play" args))
+                 info (file-exists? (path "play.sexp")))
         (play-mode-start! (game-collision) info (read-file-string (path "play.sexp"))
                           (not (arg-value args "--view" #f)))
         (game-set-play! (vector play-hold? play-after-tick! play-frame! play-hud! play-press! play-held!))
         (play-mode-set-dev! (and (member "--dev" args) #t))
         ;; the floor's best (Phantom 0.1), kept in the save file
-        (let ((b (save-best-entry (read-save-all) (floor-name))))
-          (play-mode-set-best! (and b (cons (caddr b) (cadddr b)))))
-        (play-mode-set-on-record! (lambda (secs incidents) (record-best! (floor-name) secs incidents)))
+        (let* ((floor (floor-name))
+               (b (save-best-entry (read-save-all) floor)))
+          (play-mode-set-best! (and b (cons (caddr b) (cadddr b))))
+          (play-mode-set-on-record!
+            (lambda (secs incidents) (record-best! floor secs incidents))))
         ;; the pause panel's rows: RESUME takes the mouse again; FULLSCREEN;
-        ;; QUIT (natively, there is no title flow here: it quits)
+        ;; QUIT TO TITLE in the app; explicit development launches may quit.
         (play-mode-set-on-resume! (lambda () (set-cursor-captured! #t #f)))
         (play-mode-set-on-fullscreen! toggle-fullscreen!)
-        (play-mode-set-on-quit! request-quit "QUIT")
+        (if (pair? application)
+            (let* ((flow (car application))
+                   (back (lambda () (app-flow-request-title! flow))))
+              (play-mode-set-on-quit! back "QUIT TO TITLE")
+              (play-mode-set-on-win! back)
+              (play-mode-set-practiced! (app-flow-practiced? flow)))
+            (begin
+              (play-mode-set-on-quit! request-quit "QUIT")
+              (play-mode-set-on-win! #f)))
         ;; --place-guard X,Y,FX,FY: the unit put there, facing so (for looking
         ;; at it and its flashlight; it walks back to its route from there)
         (let ((g (arg-value args "--place-guard" #f)))
@@ -302,6 +315,180 @@
           (or *deck-held* (key-down? 't) (mouse-down? 'right))
           (key-down? k)))
 
+    ;; A menu key held across a scene change must be released before it can
+    ;; move the new runner. Native polling cannot synthesize a physical keyup.
+    (define *app-blocked* '())
+    (define *app-ignore-look* #t)
+    (define APP-HELD-KEYS
+      (append PRESS-KEYS '(a d q e shift control r t left right deck)))
+
+    (define (app-clear-input!)
+      (set! *deck-held* #f)
+      (set! *app-blocked* (filter held? APP-HELD-KEYS))
+      (set! *app-ignore-look* #t)
+      (set-cursor-captured! #f))
+
+    (define (app-held? key)
+      (and (not (memq key *app-blocked*)) (held? key)))
+
+    (define (app-say! text)
+      (display (string-append "phantom-burn: " text))
+      (newline)
+      (flush-output-port (current-output-port)))
+
+    (define (app-mouse)
+      (cons (* (mouse-x) (/ (frame-width) (max 1 (window-width))))
+            (* (mouse-y) (/ (frame-height) (max 1 (window-height))))))
+
+    ;; Preserve the existing explicit development/shot doors. Frame/time
+    ;; bounds and scheduled inputs alone still exercise the real app flow.
+    (define (development-door? args)
+      (let loop ((flags '("--floor" "--title" "--play" "--view" "--shot"
+                          "--card" "--auto" "--look" "--look-sim" "--guard"
+                          "--skin" "--skin-freeze" "--skin-look" "--deck-held"
+                          "--deck-preview" "--terminal-preview" "--end-card")))
+        (and (pair? flags)
+             (or (member (car flags) args) (loop (cdr flags))))))
+
+    ;; One native window, graphics context, tune bank and frame loop. The
+    ;; coordinator owns transitions; these closures adapt filesystem assets,
+    ;; native input, saves and fullscreen to those same actions as the web.
+    (define (app-loop args frames seconds)
+      (lambda ()
+        (gfx-setup)
+        (render-init!)
+        (skin-setup! args)
+        (let ((flow (make-app-flow
+                      (or (member "--practiced" args)
+                          (save-practiced? (read-save-all)))))
+              (title-time 0.0)
+              (said-ready #f))
+          (define (menu!)
+            (if (eq? (app-flow-phase flow) 'failed)
+                (title-set-menu! '("FLOOR COULD NOT LOAD") 0 "PRESS A KEY TO RETURN")
+                (title-set-menu! APP-MENU (app-flow-selection flow)
+                  (and (not (app-flow-practiced? flow)) "NEW HERE? START WITH PRACTICE"))))
+          (define (install-title!)
+            (sound-game-stop!)
+            (game-set-play! #f)
+            (render-set-extra-draw! #f)
+            (set! *dir* "assets/floors/root-room")
+            (guard (exception (#t (title-init!)))
+              (title-init! load-mesh* load-texture* (load-info)))
+            (apply-settings! args)
+            (set! title-time 0.0)
+            (set! said-ready #f)
+            (app-clear-input!)
+            (menu!))
+          (define (show-title!)
+            (install-title!)
+            (app-say! "mode title"))
+          (define (load-floor! action)
+            (let ((generation (cadr action)) (floor (caddr action)))
+              (when (app-flow-current-load? flow generation floor)
+                (app-clear-input!)
+                (guard (exception
+                         (#t
+                          (app-flow-failed! flow generation floor "FLOOR COULD NOT LOAD")
+                          (install-title!)
+                          (app-say! (string-append "load failed " floor))))
+                  (set! *dir* (string-append "assets/floors/" floor))
+                  (let ((info (load-info)) (collision (load-collision)))
+                    (unless (and info (file-exists? (path "play.sexp")))
+                      (error "floor has no play data"))
+                    (game-init! load-mesh* load-texture* collision info)
+                    (apply-settings! args)
+                    (start-play! args info flow)
+                    (when (app-flow-ready! flow generation floor)
+                      (set! said-ready #f)
+                      (app-say! "mode game")
+                      (unless (or frames seconds)
+                        (set-cursor-captured! #t #f))))))))
+          (show-title!)
+          (when (sound-wanted? (cons "--play" args) frames seconds)
+            (sound-game-init!
+              (make-native-tune-loader
+                (lambda (name)
+                  (let ((file (string-append "assets/tunes/" name ".cts")))
+                    (and (file-exists? file) (read-file-string file))))))
+            (sound-game-gesture!))
+          (let ((presses (arg-value args "--press" #f)))
+            (when presses (set! *presses* (presses-from presses))))
+          (when (and (fullscreen-remembered?) (not frames) (not seconds))
+            (set-fullscreen! #t))
+          (let loop ((frame 0) (elapsed 0.0))
+            ;; Loading a floor and compiling its first graphics pipelines can
+            ;; stall a frame. Keep the app's input/title clock on the same
+            ;; bounded simulation time as game-frame!, so that stall cannot
+            ;; consume an entire scripted playthrough before its first frame.
+            (let* ((dt (min 0.25 (max 0.0 (wait-frame))))
+                   (elapsed (+ elapsed dt))
+                   (alt? (or (key-down? 'alt) (key-down? 'right-alt)))
+                   (presses (filter (lambda (key) (not (and alt? (eq? key 'return))))
+                              (append (reverse (due-presses! elapsed))
+                                      (reverse (pressed-keys))))))
+              (set! *app-blocked*
+                (filter (lambda (key)
+                          (and (held? key)
+                               (or (eq? key 'deck) (not (key-released? key)))))
+                        *app-blocked*))
+              (when (or (key-pressed? 'f11) (and alt? (key-pressed? 'return)))
+                (toggle-fullscreen!))
+              (when (app-flow-advance! flow dt)
+                (show-title!)
+                (set! presses '()))
+              (case (app-flow-phase flow)
+                ((title failed)
+                 (set! title-time (+ title-time dt))
+                 (sound-game-idle!)
+                 (menu!)
+                 (title-frame! title-time (frame-width) (frame-height))
+                 (unless said-ready
+                   (set! said-ready #t)
+                   (app-say! "ready title"))
+                 (if (eq? (app-flow-phase flow) 'failed)
+                     (when (or (pair? presses) (mouse-pressed? 'left))
+                       (app-flow-request-title! flow))
+                     (let* ((mouse (app-mouse))
+                            (hit (and (mouse-pressed? 'left)
+                                      (title-menu-hit (frame-width) (frame-height)
+                                                      (car mouse) (cdr mouse))))
+                            (action (app-flow-menu! flow presses hit)))
+                       (when action (load-floor! action)))))
+                ((game)
+                 (when (mouse-pressed? 'left)
+                   (if (play-mode-paused?)
+                       (let ((mouse (app-mouse)))
+                         (play-mode-tap! (car mouse) (cdr mouse)))
+                       (unless (cursor-captured?)
+                         (set-cursor-captured! #t #f)
+                         (set! *app-ignore-look* #t))))
+                 (let ((look? (and (cursor-captured?) (not *app-ignore-look*))))
+                   (game-frame! dt (frame-width) (frame-height)
+                     (make-controls app-held? presses
+                       (if look? (mouse-dx) 0) (if look? (mouse-dy) 0)
+                       0.0 0.0 0.0 0.0)))
+                 (set! *app-ignore-look* #f)
+                 (when (play-mode-paused?) (set-cursor-captured! #f))
+                 (sound-game-frame! dt (game-walker))
+                 (when (and (play-mode-practice-done?) (not (app-flow-practiced? flow)))
+                   (app-flow-practice-done! flow)
+                   (write-save! (save-with-practiced (read-save-all)))
+                   (app-say! "practice done"))
+                 (unless said-ready
+                   (set! said-ready #t)
+                   (app-say! (string-append "ready " (app-flow-floor flow))))))
+              (cond
+                ((quit-requested?) #t)
+                ((or (and frames (>= frame frames))
+                     (and seconds (>= elapsed seconds)))
+                 (request-quit))
+                (else (loop (+ frame 1) elapsed)))))
+          (sound-game-stop!)
+          (when (game-walker)
+            (display "phantom-burn: status ") (write (game-status)) (newline)))
+        (gfx-shutdown)))
+
     (define (game-loop args frames seconds)
       (lambda ()
         (gfx-setup)
@@ -378,7 +565,7 @@
       (lambda ()
         (gfx-setup)
         (title-init! load-mesh* load-texture* (load-info))
-        ;; --menu: the flow's menu, for shots (the desktop has no flow yet)
+        ;; --menu: a fixed title/menu development shot.
         (when (member "--menu" args) (title-set-menu! (list "PRACTICE" "INFILTRATE") (if (member "--practiced" args) 1 0) (if (member "--practiced" args) #f "NEW HERE? START WITH PRACTICE")))
         (apply-settings! args)
         (let ((freeze? (member "--freeze" args))
@@ -405,7 +592,8 @@
         (let ((b (string->number (arg-value args "--skin-bench" "none"))))
           (when b (skin-bench! (exact b)) (exit 0)))
         (run-game "Phantom Burn" (car size) (cdr size)
-                  (if (member "--title" args)
-                      (title-loop args frames seconds)
-                      (game-loop args frames seconds)))
+                  (cond
+                    ((member "--title" args) (title-loop args frames seconds))
+                    ((development-door? args) (game-loop args frames seconds))
+                    (else (app-loop args frames seconds))))
         0))))

@@ -20,8 +20,7 @@
 ;;; calm, amber suspicious, orange searching, red hunting.
 
 (define-library (phantom play mode)
-  (import (sigil core)
-          (sigil math)
+  (import (sigil math)
           (sigil graphics)
           (phantom detmath)
           (phantom walker)
@@ -114,6 +113,26 @@
         (set! *phase* 'play)
         (set! *timer* 0.0)
         (set! *fade-in* FADE-IN)
+        ;; This can follow another floor in the same app. Per-attempt HUD,
+        ;; pause, sound-feed and animation state must not cross that boundary.
+        (set! *attempts* 1)
+        (set! *ticks-at-win* 0)
+        (set! *best* #f)
+        (set! *new-best* #f)
+        (set! *badge-flash* 0.0)
+        (set! *eye-flash* 0.0)
+        (set! *alarms-seen* 0)
+        (set! *use* #f)
+        (set! *message* #f)
+        (set! *message-t* 0.0)
+        (set! *ignored-said* '())
+        (set! *deck-held* #f)
+        (set! *feed-gx* #f)
+        (set! *feed-gy* #f)
+        (set! *pause-sel* 0)
+        (set! *pause-rows* '())
+        (set! *cleaner-walked*
+          (and *cleaner-bodies* (make-vector (vector-length *cleaner-bodies*) #f)))
         ;; Crash's transmission on a real floor, once a load
         (set! *tx-time* (if *practice* -1.0 0.0))
         (set! *tx-dismissed* #f) (set! *tx-said* #f)

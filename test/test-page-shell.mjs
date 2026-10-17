@@ -33,6 +33,10 @@ const beforePath = positional[0] || (beforeRev
   ? `git:${beforeRev}`
   : path.join(root, 'test/fixtures/page-before-shared.template.html'));
 const afterPath = positional[1] || path.join(root, 'index.template.html');
+// Normal boot and floor transport intentionally changed with seamless flow.
+// Their expected events are reviewable data, independent of the old HTML.
+const appContract = JSON.parse(fs.readFileSync(path.join(root,
+  'test/fixtures/page-app-events.json'), 'utf8'));
 const shared = fs.readFileSync(path.join(root, '.sigil/deps/substratic/assets/substratic/substratic.js'), 'utf8');
 const pages = new Map();
 function read(input) {
@@ -173,6 +177,10 @@ function productEvents(fixture) {
   }
   return events;
 }
+function inputEvents(fixture) {
+  return productEvents(fixture).filter(([type]) =>
+    ['tap', 'keydown', 'keyup', 'press', 'look', 'move', 'lookstick', 'blur', 'touch'].includes(type));
+}
 
 let passed = 0, focusCases = 0, tuneCases = 0, touchCases = 0;
 for (const query of ['', '?play=0', '?floor=14&play=1', '?go=14', '?touch&dev&rate=28',
@@ -181,12 +189,14 @@ for (const query of ['', '?play=0', '?floor=14&play=1', '?go=14', '?touch&dev&ra
     const stored = { 'phantomburn.practiced': practiced, 'phantomburn.best.14': '120_2', 'phantomburn.best.sim': '91_0' };
     const before = await boot(read(beforePath), query, 'webgl2', stored);
     const after = await boot(read(afterPath), query, 'webgl2', stored);
-    assert.deepEqual(productEvents(after), productEvents(before), query);
+    const expected = appContract.boot.find(item => item.query === query);
+    assert.ok(expected, 'committed boot expectation for ' + query);
+    assert.deepEqual(productEvents(after), expected.events, query);
     // Shared transfers queue their requests; floor loading keeps its ordering.
     const tunes = fixture => fixture.requests.filter(url => url.startsWith('assets/tunes/')).sort();
     const floors = fixture => fixture.requests.filter(url => !url.startsWith('assets/tunes/'));
     assert.deepEqual(tunes(after), tunes(before), query);
-    assert.deepEqual(floors(after), floors(before), query);
+    assert.deepEqual(floors(after), expected.requests, query);
     for (const fixture of [before, after]) {
       const button = fixture.document.getElementById('sub-fs');
       assert.ok(button); assert.equal(button.title, 'Fullscreen');
@@ -205,7 +215,7 @@ for (const query of ['', '?play=0', '?floor=14&play=1', '?go=14', '?touch&dev&ra
       fixture.document.getElementById('crouch').fire('touchstart');
     }
     assert.deepEqual(after.counts(), before.counts(), query);
-    assert.deepEqual(productEvents(after), productEvents(before), query);
+    assert.deepEqual(inputEvents(after), inputEvents(before), query);
     assert.equal(after.nodes.filter(node => node.id === 'sub-fs').length, 1);
     passed++;
   }
@@ -362,13 +372,53 @@ for (const mode of ['title', 'paused', 'game']) {
     assert.equal(ring(fixture, 'l').style.display, 'none');
     assert.equal(ring(fixture, 'r').style.display, 'none');
   }
-  assert.deepEqual(productEvents(after), productEvents(before), mode);
+  assert.deepEqual(inputEvents(after), inputEvents(before), mode);
   assert.equal(after.events.filter(([type]) => type === 'touch').length, 1);
   assert.equal(after.events.filter(([type]) => type === 'tap').length, mode === 'game' ? 0 : 1);
   touchFixtures.push({ mode, before: groups[0], after: groups[1] });
   passed++; touchCases++;
 }
 writeFixture('touch-page-fixtures.json', touchFixtures);
+// The host carries each generation unchanged, even when old work completes
+// after a newer request. Only the Sigil coordinator may accept a response.
+for (const floor of ['14', 'sim']) {
+  const contract = appContract.transport;
+  const responses = Object.fromEntries(contract.assets.map((asset, i) =>
+    ['assets/floors/' + floor + '/' + asset, contract.texts[i]]));
+  const fixture = await boot(read(afterPath), '?mute', 'webgl2', {}, true, true, responses);
+  const at = fixture.events.length;
+  const launchURL = fixture.context.location.search;
+  // Flow handling must never even consult location after launch.
+  Object.defineProperty(fixture.context.location, 'search', {
+    get() { throw new Error('normal game flow read location'); },
+    set() { throw new Error('normal game flow navigated'); }
+  });
+  for (const generation of [1, 2]) {
+    fixture.context.console.log('phantom-burn: load-floor ' + generation + ' ' + floor);
+    for (let i = 0; i < 32; i++) await Promise.resolve();
+  }
+  assert.equal(launchURL, '?mute');
+  assert.deepEqual(fixture.events.slice(at), [1, 2].flatMap(generation =>
+    contract.kinds.map((kind, index) => ['floor-packet', generation + '\n' + floor + '\n' + kind + '\n' + contract.texts[index]])));
+  for (const asset of contract.assets) {
+    assert.equal(fixture.requests.filter(url => url === 'assets/floors/' + floor + '/' + asset).length, 1,
+      'same floor re-entry reuses transported bytes');
+  }
+  const beforeInvalid = fixture.requests.length;
+  for (const request of ['0 14', 'NaN 14', '3 ../14']) {
+    fixture.context.console.log('phantom-burn: load-floor ' + request);
+  }
+  assert.equal(fixture.requests.length, beforeInvalid, 'invalid transport requests refused');
+  passed++;
+}
+{
+  const fixture = await boot(read(afterPath), '?mute', 'webgl2', {}, true, true,
+    { 'assets/floors/14/floor.sexp': false });
+  fixture.context.console.log('phantom-burn: load-floor 7 14');
+  for (let i = 0; i < 32; i++) await Promise.resolve();
+  assert.ok(fixture.events.some(([type, payload]) => type === 'floor-packet' && payload === '7\n14\nfailed\n'));
+  passed++;
+}
 if (requirements.has('--require-focus')) {
   assert.equal(focusCases, 2, 'the focus gate must execute both focus-loss scenarios');
 }

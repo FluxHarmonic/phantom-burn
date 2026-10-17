@@ -5,7 +5,7 @@
           (only (sigil io) read open-input-string)
           (only (substratic store kv) datum->text))
   (export legacy-save-directory legacy-save->entries entries->legacy-save
-          save-best-entry save-with-best)
+          save-best-entry save-with-best save-practiced? save-with-practiced)
 
   (begin
     (define (legacy-save-directory xdg home)
@@ -41,6 +41,16 @@
         (lambda (entry)
           (and (= (length entry) 4) (floor-entry? entry floor)))
         entries))
+
+    ;; Older native saves only recorded the sim's best after completing it.
+    ;; Recognize that completion while keeping every existing row intact.
+    (define (save-practiced? entries)
+      (or (and (member '(practiced #t) entries) #t)
+          (and (save-best-entry entries "sim") #t)))
+
+    (define (save-with-practiced entries)
+      (cons '(practiced #t)
+            (filter (lambda (entry) (not (entry-tag? entry 'practiced))) entries)))
 
     ;; Time and incident minima are independent, as in Phantom 0.1.
     (define (save-with-best entries floor seconds incidents)

@@ -40,6 +40,7 @@
           (phantom soup)
           (phantom render)
           (phantom game)
+          (phantom app flow)
           (phantom title)
           (phantom stand-in)
           (phantom walker)
@@ -62,7 +63,21 @@
     (define *info-text* #f)
     (define *params* '())        ; ((key . value) ...) from the page's query
     (define *params-seen* #f)    ; nothing is fetched before the page names the floor
+    (define *app* #f)           ; the same coordinator used by the native window
+    (define *load-generation* #f)
+    (define *sound-initialized* #f)
     (define *fetches* '())       ; (name . handle)
+    ;; Fetch handles own bridge memory for the lifetime of this app. Reuse
+    ;; each URL across floor/title visits instead of retaining another copy
+    ;; on every transition; rendered floor meshes/textures are still replaced.
+    (define *asset-cache* '())
+    (define (fetch-asset asset-url)
+      (let ((cached (assoc asset-url *asset-cache*)))
+        (if cached
+            (cdr cached)
+            (let ((handle (gles3-fetch-image asset-url)))
+              (set! *asset-cache* (cons (cons asset-url handle) *asset-cache*))
+              handle))))
     (define *collide* #f)        ; the base64 text, once the page sends it
     (define *play-text* #f)      ; the floor's play.sexp, sent before the collision
     (define *replay-text* #f)    ; a gate-5 script that came before the game started
@@ -107,9 +122,12 @@
     (define (asset-names) (cons SKIN-SGM (floor-asset-names)))
     ;; ?skin=N: the skin door's demo, N guards (absent or 0: play's one guard)
     (define (skin-n) (let ((v (and (param "skin") (string->number (param "skin"))))) (if (and v (> v 0)) (exact v) 0)))
+    (define *skin-loaded* #f)
     (define (skin-setup!)
       (when (> (skin-n) 0) (skin-door! (skin-n)))
-      (skin-load! (lambda (layout) (load-mesh* layout SKIN-SGM)))
+      (unless *skin-loaded*
+        (skin-load! (lambda (layout) (load-mesh* layout SKIN-SGM)))
+        (set! *skin-loaded* #t))
       (when (> (skin-n) 0)
         (let ((f (and (param "skinfreeze") (string->number (param "skinfreeze"))))) (when f (skin-freeze! (* 1.0 f))))
         (let ((l (param "skinlook")))
@@ -203,18 +221,22 @@
         (set! *play-text* #f)
         (game-set-play! (vector play-hold? play-after-tick! play-frame! play-hud! play-press! play-held!))
         (play-mode-set-dev! (and (param "dev") #t))
-        (when (param "flow") (play-mode-set-on-win! (lambda () (set! *want-title* #t))))
+        (play-mode-set-on-win!
+          (and *app* (lambda () (app-flow-request-title! *app*))))
         ;; the pause panel's rows (Phantom 0.1): RESUME takes the pointer again,
         ;; FULLSCREEN is the page's, and in the flow QUIT TO TITLE
         (play-mode-set-on-resume! (lambda () (display "phantom-burn: lock") (newline)))
         (play-mode-set-on-fullscreen! (lambda () (display "phantom-burn: fullscreen") (newline)))
-        (when (param "flow") (play-mode-set-on-quit! (lambda () (set! *want-title* #t))))
+        (play-mode-set-on-quit!
+          (and *app* (lambda () (app-flow-request-title! *app*))) "QUIT TO TITLE")
         ;; Crash suggests the sim to a player who has not finished PRACTICE
-        (play-mode-set-practiced! (and (param "practiced") #t))
+        (play-mode-set-practiced!
+          (if *app* (app-flow-practiced? *app*) (and (param "practiced") #t)))
         (when (param "touch") (play-mode-set-touch! #t))
         ;; the floor's best (Phantom 0.1): the page's localStorage, as &best=SECS_INCIDENTS;
         ;; a finish goes back to it as a line
-        (play-mode-set-best! (best-param (param "best")))
+        (play-mode-set-best!
+          (best-param (or (param "best") (browser-best-text *floor*))))
         (play-mode-set-on-record!
          (lambda (secs incidents)
            ;; one display: on the web each display call is its own console line,
@@ -224,6 +246,13 @@
            (newline)))
         (unless (or (param "hud") (param "dev")) (game-set-hud! 0)))
       (set! *started* #t)
+      (when *app*
+        (unless (app-flow-ready! *app* *load-generation* *floor*)
+          (error "floor load generation changed before start"))
+        (web-input-scene-clear! *input*)
+        (set! *tap* #f)
+        (set! *mode* 'game)
+        (display "phantom-burn: mode game") (newline))
       (when *replay-text* (run-replay! *replay-text*) (set! *replay-text* #f)))
 
     ;; Gate 5: step a replay script through the real walker at TICK over the
@@ -258,7 +287,7 @@
                            (floor-info-from-string text)))
             (unless *info* (set! *no-floor* #t))))
         (when (and (not *title-t*) *info* (null? *fetches*))
-          (set! *fetches* (map (lambda (n) (cons n (gles3-fetch-image (url n)))) (asset-names))))
+          (set! *fetches* (map (lambda (n) (cons n (fetch-asset (url n)))) (asset-names))))
         (unless *title-t*
           (set! *waited* (+ *waited* dt))
           (cond ((and *info* (fetched?)) (title-start! *info*))
@@ -278,6 +307,8 @@
               (end-frame)))))
 
     (define (web-tick payload)
+      (when (and *app* (app-flow-advance! *app* 0.0))
+        (flow-to-title!))
       (cond ((and *params-seen* (param "title"))
              (gles3-resize-to-display)
              (title-tick payload))
@@ -285,23 +316,12 @@
              (gles3-resize-to-display)
              (flow-title-tick payload))
             (else
-             (web-tick* payload)
-             (when *want-title*
-               (set! *want-title* #f)
-               (flow-to-title!)))))
+             (web-tick* payload))))
 
     ;; --- the flow: title, then play, then the title --------------------------
 
     (define *mode* 'title)           ; the flow's: title or game (?go= starts in game)
-    ;; The menu (PRACTICE, D38): PRACTICE is floor sim, INFILTRATE floor 14.
-    ;; The page loads one floor behind the title (sim for a first-timer, else
-    ;; 14); picking the other says "go FLOOR" and the page reloads with ?go=.
-    (define MENU-ITEMS '("PRACTICE" "INFILTRATE"))
-    (define MENU-FLOORS '("sim" "14"))
-    (define *menu-sel* 1)
     (define *tap* #f)                ; (x . y): a tap or click on the title, canvas pixels
-    (define *going* #f)              ; asked the page for the other floor
-    (define *want-title* #f)         ; a win's card is done: back to the title
     (define *said-practiced* #f)     ; "practice done" printed
     (define *t-info-text* #f)
     (define *t-info* #f)
@@ -342,60 +362,87 @@
       ;; only the console; a title after PRACTICE had the room)
       (set! *t-bare* (not (and *t-info* (t-fetched?))))
       (apply-params!)
-      (web-input-clear-pressed! *input*)
+      (web-input-scene-clear! *input*)
       (set! *tap* #f)
-      ;; PRACTICE finished (now or before): the menu points at INFILTRATE
-      (set! *menu-sel* (if (and (string=? *floor* "sim") (not (practiced?))) 0 1))
-      (title-set-menu! MENU-ITEMS *menu-sel* (menu-hint))
+      (flow-menu!)
       (set! *t-time* 0.0)
+      (set! *said-ready* #f)
       (set! *mode* 'title)
       (display "phantom-burn: mode title") (newline))
 
-    ;; practiced: on this browser before (the page's localStorage), or just now
-    (define (practiced?) (or (and (param "practiced") #t) *said-practiced* (play-mode-practice-done?)))
-    (define (menu-hint) (if (practiced?) #f "NEW HERE? START WITH PRACTICE"))
+    (define (flow-menu!)
+      (if (eq? (app-flow-phase *app*) 'failed)
+          (title-set-menu! '("FLOOR COULD NOT LOAD") 0 "PRESS A KEY TO RETURN")
+          (title-set-menu! APP-MENU (app-flow-selection *app*)
+            (and (not (app-flow-practiced? *app*)) "NEW HERE? START WITH PRACTICE"))))
 
     (define (flow-to-title!)
       (sound-game-stop!)
       (flow-title-start!))
 
-    ;; The floor's game, from the title: the first time as the game starts
-    ;; (once its files have landed: web-tick* waits for them), after that by
-    ;; reloading its floor into the renderer and a fresh attempt.
-    (define (flow-to-game!)
-      (set! *mode* 'game)
-      (web-input-clear-keys! *input*)
-      (when (eq? *started* #t)
-        (game-reload! load-mesh* load-texture* (game-collision) *info*)
-        (apply-params!)
-        (play-mode-reset!))
-      (display "phantom-burn: mode game") (newline))
+    ;; The coordinator selects floors. The host transports tagged text only;
+    ;; replacing a floor never creates another app, canvas or navigation.
+    (define (flow-load! action)
+      (set! *load-generation* (cadr action))
+      (set! *floor* (caddr action))
+      (set! *info* #f)
+      (set! *info-text* #f)
+      (set! *collide* #f)
+      (set! *play-text* #f)
+      (set! *fetches* '())
+      (set! *started* #f)
+      (set! *said-ready* #f)
+      (set! *waited* 0.0)
+      (set! *said-stuck* #f)
+      (web-input-scene-clear! *input*)
+      (set! *tap* #f)
+      (set! *mode* 'loading)
+      (display (string-append "phantom-burn: load-floor "
+                              (number->string *load-generation*) " " *floor*))
+      (newline))
 
     (define (menu-input!)
-      (let ((go? #f))
-        (for-each (lambda (p)
-                    (case p
-                      ((up w) (set! *menu-sel* (max 0 (- *menu-sel* 1))))
-                      ((down s) (set! *menu-sel* (min (- (length MENU-ITEMS) 1) (+ *menu-sel* 1))))
-                      ((tap) #f)
-                      (else (set! go? #t))))
-                  (reverse (web-input-pressed *input*)))
-        (when *tap*
-          (let ((hit (title-menu-hit (gles3-canvas-width) (gles3-canvas-height) (car *tap*) (cdr *tap*))))
-            (when hit (set! *menu-sel* hit) (set! go? #t))))
-        (title-set-menu! MENU-ITEMS *menu-sel* (menu-hint))
-        (when go?
-          (let ((want (list-ref MENU-FLOORS *menu-sel*)))
-            (cond ((string=? want *floor*) (flow-to-game!))
-                  ((not *going*)
-                   (set! *going* #t)
-                   (display (string-append "phantom-burn: go " want)) (newline)))))))
+      (if (eq? (app-flow-phase *app*) 'failed)
+          (when (or (pair? (web-input-pressed *input*)) *tap*)
+            (app-flow-request-title! *app*))
+          (let* ((hit (and *tap*
+                          (title-menu-hit (gles3-canvas-width) (gles3-canvas-height)
+                                          (car *tap*) (cdr *tap*))))
+                 (action (app-flow-menu! *app* (reverse (web-input-pressed *input*)) hit)))
+            (when action (flow-load! action))))
+      (when (eq? *mode* 'title) (flow-menu!)))
+
+    ;; Packet header: generation, floor and kind, each followed by a newline.
+    ;; Leave the remaining text untouched, including all embedded newlines.
+    (define (floor-packet! payload)
+      (let split ((start 0) (index 0) (heads '()))
+        (when (< index (string-length payload))
+          (if (char=? (string-ref payload index) #\newline)
+              (let ((heads (cons (substring payload start index) heads)))
+                (if (= (length heads) 3)
+                    (let* ((generation (string->number (caddr heads)))
+                           (floor (cadr heads))
+                           (kind (car heads))
+                           (text (substring payload (+ index 1) (string-length payload))))
+                      (when (and *app* generation
+                                 (app-flow-current-load? *app* generation floor))
+                        (cond
+                          ((string=? kind "info") (set! *info-text* text))
+                          ((string=? kind "play") (set! *play-text* text))
+                          ((string=? kind "collision") (set! *collide* text))
+                          ((string=? kind "failed")
+                           (app-flow-failed! *app* generation floor "FLOOR COULD NOT LOAD")
+                           (set! *started* 'failed)
+                           (flow-title-start!)
+                           (display (string-append "phantom-burn: load failed " floor))
+                           (newline)))))
+                    (split (+ index 1) (+ index 1) heads)))
+              (split start (+ index 1) heads)))))
 
     (define (flow-title-tick payload)
       (let ((dt (frame-dt payload)))
-        ;; the floor's files load behind the title (once the title is up, so the
-        ;; title's room lands first), and the sound's bank renders
-        (when *t-time* (prefetch-game!))
+        ;; The title loads independently. A floor transport starts only when
+        ;; the shared coordinator selects it; the sound bank can render now.
         (sound-game-idle!)
         (when (and (not *t-info*) *t-info-text*)
           (let ((text *t-info-text*))
@@ -404,7 +451,7 @@
                              (floor-info-from-string text)))
             (unless *t-info* (set! *t-none* #t))))
         (when (and *t-info* (null? *t-fetches*))
-          (set! *t-fetches* (map (lambda (n) (cons n (gles3-fetch-image (t-url n)))) (t-asset-names))))
+          (set! *t-fetches* (map (lambda (n) (cons n (fetch-asset (t-url n)))) (t-asset-names))))
         (unless *t-time*
           (set! *t-waited* (+ *t-waited* dt))
           (when (or (and *t-info* (t-fetched?)) *t-none* (> *t-waited* 10.0))
@@ -418,6 +465,8 @@
         (if *t-time*
             (begin
               (set! *t-time* (+ *t-time* dt))
+              (app-flow-advance! *app* dt)
+              (flow-menu!)
               (title-frame! *t-time* (gles3-canvas-width) (gles3-canvas-height))
               (unless *said-ready*
                 (set! *said-ready* #t)
@@ -452,7 +501,7 @@
           (set! *info* (guard (e (#t (display "phantom-burn: load failed: floor.sexp does not read") (newline) #f))
                          (floor-info-from-string text)))))
       (when (and *params-seen* (null? *fetches*) (or (stand-in?) *info*))
-        (set! *fetches* (map (lambda (n) (cons n (gles3-fetch-image (url n)))) (asset-names)))))
+        (set! *fetches* (map (lambda (n) (cons n (fetch-asset (url n)))) (asset-names)))))
 
     (define (web-tick* payload)
       ;; one attempt: a floor.sexp that does not read is said once
@@ -463,7 +512,7 @@
                (let* ((look (web-input-take-look! *input*))
                       (move (web-input-stick *input* "move"))
                       (stick (web-input-stick *input* "look"))
-                      (pressed (web-input-pressed *input*)))
+                      (pressed (reverse (web-input-pressed *input*))))
                  (web-input-clear-pressed! *input*)
                  ;; a tap in play: the pause panel's rows, or dismissing Crash's transmission
                  (when (and *tap* (eq? *mode* 'game))
@@ -481,6 +530,7 @@
                  ;; has practised (localStorage phantomburn.practiced)
                  (when (and (not *said-practiced*) (play-mode-practice-done?))
                    (set! *said-practiced* #t)
+                   (when *app* (app-flow-practice-done! *app*))
                    (display "phantom-burn: practice done") (newline))
                  ;; ready once the first frame is drawn (shots wait for this line)
                  (unless *said-ready*
@@ -497,7 +547,11 @@
                  (set! *said-stuck* #t)
                  (display (string-append "phantom-burn: load failed, still waiting for: "
                                          (apply string-append (map (lambda (n) (string-append n " ")) (missing)))))
-                 (newline))
+                 (newline)
+                 (when *app*
+                   (app-flow-failed! *app* *load-generation* *floor* "FLOOR COULD NOT LOAD")
+                   (set! *started* 'failed)
+                   (flow-title-start!)))
                (begin-frame)
                (clear-screen (/ 13 255) (/ 10 255) (/ 26 255))
                (end-frame)))))
@@ -536,16 +590,20 @@
              (browser-record-packet! payload)
              0)
             ((string=? type "params")
-             ;; The shared page sends raw params first; Phantom sends them
-             ;; again with flow/practice/best state. The second delivery wins
-             ;; and must arrive last, before any floor data is dispatched.
+             ;; Shared launch params arrive first; the host then supplies its
+             ;; launch-mode marker before any asset text. Initialize once.
              (set! *params* (legacy-query->params payload))
              (set! *params-seen* #t)
-             ;; ?go=FLOOR (the menu's other floor, after a reload): straight to it
-             (when (and (param "flow") (param "go")) (set! *mode* 'game) (display "phantom-burn: mode game") (newline))
+             (when (and (param "flow") (not *app*))
+               (set! *app* (make-app-flow (or (param "practiced") (browser-practiced?))))
+               ;; A launch-only development shortcut, never a play action.
+               (when (param "go")
+                 (flow-load! (app-flow-load! *app* (param "go")))))
              (when (param "floor") (set! *floor* (param "floor")))
              (unless (param "mute")
-               (sound-game-init! tune-loader)
+               (unless *sound-initialized*
+                 (set! *sound-initialized* #t)
+                 (sound-game-init! tune-loader))
                ;; ?rate=24|28|32: the music's render rate in kHz (David's A/B; 28 by default, his pick)
                (let ((r (and (param "rate") (string->number (param "rate")))))
                  (when (and r (>= r 8) (<= r 48)) (sound-game-set-music-rate! (exact (round (* 1000 r)))))))
@@ -567,7 +625,10 @@
              0)
             ((string=? type "floor")
              ;; the page's own (sanitised) floor name, which it fetches by
-             (set! *floor* payload)
+             (unless *app* (set! *floor* payload))
+             0)
+            ((string=? type "floor-packet")
+             (floor-packet! payload)
              0)
             ((string=? type "floorinfo")
              (set! *info-text* payload)

@@ -29,8 +29,7 @@
 ;;; beam focuses at 1.55 s for 0.4 s, crosses in 0.35 s, fades in 0.5 s.
 
 (define-library (phantom title)
-  (import (sigil core)
-          (sigil math)
+  (import (sigil math)
           (sigil graphics)
           (sigil geometry)
           (phantom text)
@@ -320,8 +319,9 @@ void main() {
     (define *cursor-n* 0)
     (define *ident* (make-mat4))
 
-    (define (title-init! . floor)
-      (render-init!)
+    ;; The title alphabet and static meshes belong to the app, not a visit.
+    (define *title-assets-ready* #f)
+    (define (title-assets-init!)
       (let* ((a (atlas-pixels)))
         (set! *atlas* (make-texture-from-pixels (car a) GH (cdr a) 'nearest)))
       (let ((pl (make-vertex-layout '((position float2))))
@@ -335,22 +335,31 @@ void main() {
                                       (string-append (glsl-header) SPRITE-FRAGMENT)
                                       '(depth-test #f depth-write #f cull none blend normal))))
       (set! *letters* (layout))
-      (mat4-identity! *ident*)
+      (mat4-identity! *ident*))
+
+    (define (title-init! . floor)
+      (render-init!)
+      (unless *title-assets-ready*
+        (title-assets-init!)
+        (set! *title-assets-ready* #t))
       (if (and (= (length floor) 3) (caddr floor))
           (let ((info (caddr floor)))
             (set! *compiled* #t)
             (render-load-compiled! (car floor) (cadr floor) info)
             (set! *path* (view-path info))
-            (build-cursor!)
-            (set! *cursor* (render-make-world-mesh (pack-vertices)))
-            (set! *cursor-n* *nverts*)
-            (set! *verts* '()))
-          (let ((counts (build-room!)))
+            (unless *cursor*
+              (build-cursor!)
+              (set! *cursor* (render-make-world-mesh (pack-vertices)))
+              (set! *cursor-n* *nverts*)
+              (set! *verts* '())))
+          (begin
             (set! *compiled* #f)
-            (set! *room-count* (car counts))
-            (set! *cursor-count* (cdr counts))
-            (set! *room* (render-make-world-mesh (pack-vertices)))
-            (set! *verts* '())
+            (unless *room*
+              (let ((counts (build-room!)))
+                (set! *room-count* (car counts))
+                (set! *cursor-count* (cdr counts))
+                (set! *room* (render-make-world-mesh (pack-vertices)))
+                (set! *verts* '())))
             (render-title-scene! ROOM-LIGHTS))))
 
     ;; The room's views title and title-end: both eyes, the shared target,

@@ -1,0 +1,185 @@
+{
+  "boot": [
+    {
+      "query": "",
+      "events": [
+        [
+          "params",
+          "&flow=1"
+        ],
+        [
+          "dpr",
+          "1"
+        ]
+      ],
+      "requests": [
+        "assets/floors/root-room/floor.sexp"
+      ]
+    },
+    {
+      "query": "?play=0",
+      "events": [
+        [
+          "params",
+          "play=0&best=120_2"
+        ],
+        [
+          "floor",
+          "14"
+        ],
+        [
+          "dpr",
+          "1"
+        ]
+      ],
+      "requests": [
+        "assets/floors/14/floor.sexp"
+      ]
+    },
+    {
+      "query": "?floor=14&play=1",
+      "events": [
+        [
+          "params",
+          "floor=14&play=1&best=120_2"
+        ],
+        [
+          "floor",
+          "14"
+        ],
+        [
+          "dpr",
+          "1"
+        ]
+      ],
+      "requests": [
+        "assets/floors/14/floor.sexp"
+      ]
+    },
+    {
+      "query": "?go=14",
+      "events": [
+        [
+          "params",
+          "go=14&flow=1"
+        ],
+        [
+          "dpr",
+          "1"
+        ]
+      ],
+      "requests": [
+        "assets/floors/root-room/floor.sexp"
+      ]
+    },
+    {
+      "query": "?touch&dev&rate=28",
+      "events": [
+        [
+          "params",
+          "touch=&dev=&rate=28&flow=1"
+        ],
+        [
+          "dpr",
+          "1"
+        ]
+      ],
+      "requests": [
+        "assets/floors/root-room/floor.sexp"
+      ]
+    },
+    {
+      "query": "?title=1",
+      "events": [
+        [
+          "params",
+          "title=1"
+        ],
+        [
+          "floor",
+          "root-room"
+        ],
+        [
+          "dpr",
+          "1"
+        ]
+      ],
+      "requests": [
+        "assets/floors/root-room/floor.sexp"
+      ]
+    },
+    {
+      "query": "?floor=sim&best=999_7",
+      "events": [
+        [
+          "params",
+          "floor=sim&best=999_7"
+        ],
+        [
+          "floor",
+          "sim"
+        ],
+        [
+          "dpr",
+          "1"
+        ]
+      ],
+      "requests": [
+        "assets/floors/sim/floor.sexp"
+      ]
+    },
+    {
+      "query": "?mute",
+      "events": [
+        [
+          "params",
+          "mute=&flow=1"
+        ],
+        [
+          "dpr",
+          "1"
+        ]
+      ],
+      "requests": [
+        "assets/floors/root-room/floor.sexp"
+      ]
+    },
+    {
+      "query": "?floor=%CE%B1%2Fb&rate=24",
+      "events": [
+        [
+          "params",
+          "floor=%CE%B1%2Fb&rate=24"
+        ],
+        [
+          "floor",
+          "b"
+        ],
+        [
+          "dpr",
+          "1"
+        ]
+      ],
+      "requests": [
+        "assets/floors/b/floor.sexp"
+      ]
+    }
+  ],
+  "transport": {
+    "assets": [
+      "floor.sexp",
+      "play.sexp",
+      "collide.b64"
+    ],
+    "kinds": [
+      "info",
+      "play",
+      "collision"
+    ],
+    "texts": [
+      "(floor)\n(room π)",
+      "(play)\n(stage)",
+      "AQID\nBA=="
+    ]
+  }
+}

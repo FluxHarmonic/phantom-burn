@@ -45,6 +45,14 @@
     (assert-false (save-best-entry EXISTING-SAVE "unknown"))
     (assert-equal '((best "14" 100 0) (fullscreen #f))
                   (save-with-best '((best "14") (best "14" 120 2) (fullscreen #f))
-                                  "14" 100 0))))
+                                  "14" 100 0)))
+  (test "practice completion recognizes old sim scores and the new explicit row"
+    (assert-true (save-practiced? EXISTING-SAVE))
+    (assert-true (save-practiced? '((practiced #t))))
+    (assert-false (save-practiced? '((best "14" 100 0) (practiced #f)))))
+  (test "remembering practice preserves scores, fullscreen and unknown rows"
+    (assert-equal (cons '(practiced #t) EXISTING-SAVE)
+                  (save-with-practiced
+                    (cons '(practiced #f) EXISTING-SAVE)))))
 
 (run-tests)
