@@ -93,7 +93,7 @@
       fullscreen: true, webglCheck: true, focus: true, gamepad: false,
       playtest: false, versionUrl: null,
       tunes: new URLSearchParams(location.search).has("mute") ? null : {
-        cache: "default", retries: 0,
+        cache: "default", retries: 0, timeout: 60000,
         urlFor: (function () {
           var params = new URLSearchParams(location.search);
           return function (name) {

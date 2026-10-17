@@ -47,7 +47,7 @@ function writeFixture(name, data) {
 }
 
 async function boot(page, query, level, stored, fullscreen = true, ready = true, responses = {}) {
-  const events = [], requests = [], observers = [], nodes = [];
+  const events = [], requests = [], observers = [], nodes = [], timeoutDelays = [];
   let fullscreenRequests = 0, pointerRequests = 0, landscapeRequests = 0;
   class Target {
     constructor() { this.listeners = new Map(); }
@@ -120,7 +120,8 @@ async function boot(page, query, level, stored, fullscreen = true, ready = true,
       }
       return new Promise(() => {});
     },
-    setTimeout() { return 1; }, clearTimeout() {}, requestAnimationFrame() {},
+    setTimeout(callback, delay) { timeoutDelays.push(delay); return timeoutDelays.length; },
+    clearTimeout() {}, requestAnimationFrame() {},
     queueMicrotask, AbortController, btoa, atob
   }));
   for (const match of page.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)) {
@@ -140,7 +141,7 @@ async function boot(page, query, level, stored, fullscreen = true, ready = true,
   context.SigilWebApp = app;
   if (ready && level === 'webgl2') document.fire('sigil-web-app-ready', { detail: app });
   for (let i = 0; i < 32; i++) await Promise.resolve();
-  return { context, document, events, requests, observers, nodes,
+  return { context, document, events, requests, observers, nodes, timeoutDelays,
     counts: () => [fullscreenRequests, pointerRequests, landscapeRequests] };
 }
 
@@ -271,6 +272,11 @@ if (read(afterPath).includes('webglCheck: true, focus: true')) {
   }
 }
 if (read(afterPath).includes('window.SubstraticPage.fetchTune(name)')) {
+  const pending = await boot(read(afterPath), '?play=0', 'webgl2', {});
+  assert.equal(pending.context.SUBSTRATIC.tunes.timeout, 60000,
+    'slow phone tune transfers have an explicit 60-second budget');
+  assert.ok(pending.timeoutDelays.includes(60000),
+    'the released shared loader must actually arm the 60-second timeout');
   const fixtures = [];
   for (const query of ['?play=0', '?play=0&blip=a&bed=b', '?play=0&blip=b&bed=a',
                        '?play=0&blip=invalid&bed=invalid']) {
