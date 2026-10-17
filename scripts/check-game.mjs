@@ -36,7 +36,7 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { pageLegs } from "./check-site-pages.mjs";
 
 const [BASE0, DIR0] = process.argv.slice(2);
@@ -55,6 +55,16 @@ const { createHandler } = await import(path.join(CHECKS, "serve-site.mjs"));
 let fail = 0;
 const ok = (leg, what) => console.log(`  ok   ${leg}: ${what}`);
 const bad = (leg, what) => { fail++; console.log(`  FAIL ${leg}: ${what}`); };
+
+// Exercise the complete page scripts and the installed shared page on every
+// site gate. This contract needs no browser, server, or generated fixtures.
+{
+  const r = spawnSync(process.execPath, [path.join(REPO, "test/test-page-shell.mjs"),
+    "--require-focus", "--require-tunes", "--require-touch"], { cwd: REPO, encoding: "utf8" });
+  const output = ((r.stdout || "") + (r.stderr || "")).trim();
+  r.status === 0 ? ok("page-contract", output)
+    : bad("page-contract", `rc ${r.status}: ${r.error || output}`);
+}
 
 // root
 {

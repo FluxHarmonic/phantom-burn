@@ -1,11 +1,50 @@
 import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 
-const beforePath = process.argv[2] || 'build/adoption-prep/page-before.template.html';
-const afterPath = process.argv[3] || 'index.template.html';
-const shared = fs.readFileSync('.sigil/deps/substratic/assets/substratic/substratic.js', 'utf8');
-const read = path => fs.readFileSync(path, 'utf8');
+// Compare the last committed page before the shared-page swap by default.
+// File inputs also work for exported/shallow checkouts. Fixture writes are opt-in:
+// node test/test-page-shell.mjs [BEFORE AFTER] [--before-rev REV]
+//   [--write-fixtures DIR] [--require-focus] [--require-tunes] [--require-touch]
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const args = process.argv.slice(2), positional = [];
+const requirements = new Set();
+let beforeRev = 'ffc85cc', fixtureDir = null;
+for (let i = 0; i < args.length; i++) {
+  const arg = args[i];
+  if (arg === '--before-rev' || arg === '--write-fixtures') {
+    const value = args[++i];
+    assert.ok(value && !value.startsWith('--'), `${arg} requires a value`);
+    if (arg === '--before-rev') beforeRev = value;
+    else fixtureDir = path.resolve(value);
+  } else if (['--require-focus', '--require-tunes', '--require-touch'].includes(arg)) {
+    requirements.add(arg);
+  } else {
+    assert.ok(!arg.startsWith('--'), `unknown option: ${arg}`);
+    positional.push(path.resolve(arg));
+  }
+}
+assert.ok(positional.length === 0 || positional.length === 2, 'supply both BEFORE and AFTER, or neither');
+const beforePath = positional[0] || `git:${beforeRev}`;
+const afterPath = positional[1] || path.join(root, 'index.template.html');
+const shared = fs.readFileSync(path.join(root, '.sigil/deps/substratic/assets/substratic/substratic.js'), 'utf8');
+const pages = new Map();
+function read(input) {
+  if (!pages.has(input)) {
+    pages.set(input, input.startsWith('git:')
+      ? execFileSync('git', ['-C', root, 'show', `${input.slice(4)}:index.template.html`], { encoding: 'utf8' })
+      : fs.readFileSync(input, 'utf8'));
+  }
+  return pages.get(input);
+}
+function writeFixture(name, data) {
+  if (!fixtureDir) return;
+  fs.mkdirSync(fixtureDir, { recursive: true });
+  fs.writeFileSync(path.join(fixtureDir, name), JSON.stringify(data) + '\n');
+}
 
 async function boot(page, query, level, stored, fullscreen = true, ready = true, responses = {}) {
   const events = [], requests = [], observers = [], nodes = [];
@@ -285,8 +324,7 @@ if (read(afterPath).includes('window.SubstraticPage.fetchTune(name)')) {
   assert.equal(failed.events.filter(([type, payload]) => type === 'tune-failed' && payload.startsWith('music-false-identity\t')).length, 1);
   assert.equal(failed.events.filter(([type, payload]) => type === 'tune-done' && payload === 'music-false-identity').length, 0);
   passed++; tuneCases++;
-  fs.mkdirSync('build/adoption-prep', { recursive: true });
-  fs.writeFileSync('build/adoption-prep/tune-page-fixtures.json', JSON.stringify(fixtures) + '\n');
+  writeFixture('tune-page-fixtures.json', fixtures);
 }
 const touchFixtures = [];
 for (const mode of ['title', 'paused', 'game']) {
@@ -321,14 +359,14 @@ for (const mode of ['title', 'paused', 'game']) {
   touchFixtures.push({ mode, before: groups[0], after: groups[1] });
   passed++; touchCases++;
 }
-fs.writeFileSync('build/adoption-prep/touch-page-fixtures.json', JSON.stringify(touchFixtures) + '\n');
-if (process.argv.includes('--require-focus')) {
+writeFixture('touch-page-fixtures.json', touchFixtures);
+if (requirements.has('--require-focus')) {
   assert.equal(focusCases, 2, 'the focus gate must execute both focus-loss scenarios');
 }
-if (process.argv.includes('--require-tunes')) {
+if (requirements.has('--require-tunes')) {
   assert.equal(tuneCases, 5, 'the tune gate must execute alias, UTF-8 and failure scenarios');
 }
-if (process.argv.includes('--require-touch')) {
+if (requirements.has('--require-touch')) {
   assert.equal(touchCases, 3);
   assert.ok(read(afterPath).includes('name: "move", zone: "left"'));
   assert.ok(read(afterPath).includes('name: "look", zone: "right"'));
