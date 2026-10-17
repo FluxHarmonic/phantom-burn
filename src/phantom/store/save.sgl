@@ -18,7 +18,7 @@
     (define (legacy-save->entries text)
       (let ((datum
               (and (string? text)
-                   (guard (error (#t #f))
+                   (guard (exception (#t #f))
                      (read (open-input-string text))))))
         (if (list? datum) (filter list? datum) '())))
 

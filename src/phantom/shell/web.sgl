@@ -536,6 +536,9 @@
              (browser-record-packet! payload)
              0)
             ((string=? type "params")
+             ;; The shared page sends raw params first; Phantom sends them
+             ;; again with flow/practice/best state. The second delivery wins
+             ;; and must arrive last, before any floor data is dispatched.
              (set! *params* (legacy-query->params payload))
              (set! *params-seen* #t)
              ;; ?go=FLOOR (the menu's other floor, after a reload): straight to it
