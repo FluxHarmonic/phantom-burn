@@ -5,14 +5,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 
-// Compare the last committed page before the shared-page swap by default.
-// File inputs also work for exported/shallow checkouts. Fixture writes are opt-in:
+// The committed pre-shared page keeps the default independent of Git history,
+// including exported trees and shallow or squash-merged checkouts.
+// Historical revision overrides and fixture writes are opt-in:
 // node test/test-page-shell.mjs [BEFORE AFTER] [--before-rev REV]
 //   [--write-fixtures DIR] [--require-focus] [--require-tunes] [--require-touch]
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2), positional = [];
 const requirements = new Set();
-let beforeRev = 'ffc85cc', fixtureDir = null;
+let beforeRev = null, fixtureDir = null;
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
   if (arg === '--before-rev' || arg === '--write-fixtures') {
@@ -28,7 +29,9 @@ for (let i = 0; i < args.length; i++) {
   }
 }
 assert.ok(positional.length === 0 || positional.length === 2, 'supply both BEFORE and AFTER, or neither');
-const beforePath = positional[0] || `git:${beforeRev}`;
+const beforePath = positional[0] || (beforeRev
+  ? `git:${beforeRev}`
+  : path.join(root, 'test/fixtures/page-before-shared.template.html'));
 const afterPath = positional[1] || path.join(root, 'index.template.html');
 const shared = fs.readFileSync(path.join(root, '.sigil/deps/substratic/assets/substratic/substratic.js'), 'utf8');
 const pages = new Map();

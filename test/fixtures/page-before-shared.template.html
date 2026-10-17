@@ -1,0 +1,691 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#000000">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Phantom Burn</title>
+  <link rel="icon" href="data:,">
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+                 overscroll-behavior: none; -webkit-text-size-adjust: 100%; }
+    #stage { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh;
+             display: block; touch-action: none; user-select: none;
+             -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
+    #status { position: fixed; left: 8px; bottom: 8px; color: #aab; font: 13px ui-monospace, monospace; }
+    #status:empty, #status [data-sigil-booting] { display: none; }
+    /* The phone's controls: a stick under each thumb where it lands (left
+       half moves, right half looks), and a crouch button. Shown on the
+       first touch, or with ?touch. */
+    .ring, .knob, #crouch { position: fixed; border-radius: 50%; pointer-events: none; box-sizing: border-box;
+                            display: none; z-index: 2; }
+    .ring { width: 120px; height: 120px; margin: -60px 0 0 -60px;
+            border: 2px solid rgba(204, 230, 255, 0.35); background: rgba(204, 230, 255, 0.05); }
+    .knob { width: 48px; height: 48px; margin: -24px 0 0 -24px; background: rgba(204, 230, 255, 0.4); }
+    #crouch { right: 24px; top: 24px; width: 64px; height: 64px; pointer-events: auto; touch-action: none;
+              border: 2px solid rgba(204, 230, 255, 0.35); background: rgba(204, 230, 255, 0.06);
+              color: rgba(204, 230, 255, 0.7); font: bold 22px ui-monospace, monospace;
+              text-align: center; line-height: 60px; }
+    #crouch.down { background: rgba(204, 230, 255, 0.3); }
+    /* The style lab on a phone (David, 2026-09-25): a LAB button top left
+       (out of both thumb zones; the crouch button is top right) opens a
+       grid of the keyboard's lab keys. Each button sends the key it stands
+       for, so the game reads it exactly as a key press. */
+    #lab { display: none; }
+    body.dev #lab { display: block; }
+    #lab { position: fixed; left: 8px; top: 8px; z-index: 3; font: bold 12px ui-monospace, monospace;
+           -webkit-user-select: none; user-select: none; touch-action: none; }
+    #labbtn, #labgrid button { color: #CCE6FF; background: rgba(13, 10, 26, 0.72); border: 1px solid rgba(204, 230, 255, 0.4);
+                               border-radius: 6px; font: inherit; padding: 0; }
+    #labbtn { width: 48px; height: 32px; }
+    #labgrid { display: none; margin-top: 6px; grid-template-columns: repeat(4, 64px); gap: 5px; }
+    #lab.open #labgrid { display: grid; }
+    #labgrid button { height: 34px; }
+    #labgrid button.down { background: rgba(204, 230, 255, 0.35); }
+    #labgrid .sep { grid-column: 1 / -1; height: 1px; background: rgba(204, 230, 255, 0.2); }
+    body.touch #crouch { display: block; }
+    /* USE on a phone (P2; no ?dev needed): left of the crouch button, out of
+       both sticks' way; it sends ("press", "use"), the keyboard's F. The light
+       panels in the building switch the lights now. */
+    #lights { position: fixed; right: 100px; top: 30px; z-index: 3; display: none; gap: 6px;
+              font: bold 11px ui-monospace, monospace; -webkit-user-select: none; user-select: none; touch-action: none; }
+    body.touch.playing:not(.ontitle) #lights { display: flex; }
+    #lights button { color: #CCE6FF; background: rgba(13, 10, 26, 0.72); border: 1px solid rgba(204, 230, 255, 0.4);
+                     border-radius: 6px; font: inherit; padding: 0 8px; height: 40px; }
+    #lights button.down { background: rgba(204, 230, 255, 0.35); }
+    /* Substratic's fullscreen button (substratic.js, 8630cc5; the same as
+       Harkfell's), top left here: the phone's crouch button is top right */
+    #sub-fs{position:fixed;left:10px;top:10px;z-index:3;width:36px;height:36px;border-radius:6px;border:1px solid rgba(220,235,255,.35);
+            background:rgba(10,12,20,.45);color:rgba(220,235,255,.8);padding:0;display:flex;align-items:center;justify-content:center;opacity:.6}
+    body.dev #sub-fs{left:64px}
+  </style>
+  <!-- Privacy-friendly analytics by Plausible -->
+  <script async src="https://plausible.io/js/pa-GxdOlotIbYY0LzO4WRsIV.js"></script>
+  <script>
+    window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};
+    plausible.init()
+  </script>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+  <div class="ring" id="lring"></div><div class="knob" id="lknob"></div>
+  <div class="ring" id="rring"></div><div class="knob" id="rknob"></div>
+  <div id="crouch">C</div>
+  <div id="lights"><button data-k="deck" data-hold="1">DECK</button><button data-k="use">USE</button><button data-k="pause">PAUSE</button></div>
+  <div id="lab">
+    <button id="labbtn">LAB</button>
+    <div id="labgrid">
+      <button data-k="1">C1</button><button data-k="2">C2</button><button data-k="3">C3</button><button data-k="0">ALL</button>
+      <button data-k="4">EXIT</button><button data-k="5">SCRN</button><button data-k="6">CITY</button><button data-k="g">LIFT</button>
+      <div class="sep"></div>
+      <button data-k="7">LIT</button><button data-k="j">LOBBY</button><button data-k="k">OFFICE</button><button data-k="l">CORR</button>
+      <div class="sep"></div>
+      <button data-k="n">PAL</button><button data-k="p">DITH</button><button data-k="b">BAYER</button><button data-k="h">HUD</button>
+      <button data-k="[">SPR-</button><button data-k="]">SPR+</button><button data-k="/">AUTO</button><button data-k=";">POOL-</button>
+      <button data-k=",">NITE-</button><button data-k=".">NITE+</button><button data-k="'">POOL+</button><button data-k="8">OVERLK</button>
+    </div>
+  </div>
+  <div id="status"></div>
+  <script>
+  // The WebGL 2 check, before anything boots (a visitor on phantomburn.net
+  // hit the raw "Failed to start: sigil_wasm_start failed (rc -1)",
+  // 2026-09-29). Substratic's, from substratic.js's "webgl" section,
+  // copied as is (Phantom doesn't load substratic.js; the fullscreen section
+  // below came the same way). It must come before the loader's tag
+  // (the build's app marker), which it switches off without WebGL 2.
+  (function () {
+    "use strict";
+  // ---- webgl -------------------------------------------------------------------
+  // (substratic.js's WebGL check; copied as is into pages that don't load it)
+  //
+  // Every Substratic game draws with WebGL 2. Without it (graphics
+  // acceleration off, a blocklisted GPU, a browser started without GPU
+  // access) the wasm starts, fails to get a context, and the loader shows
+  // "Failed to start: sigil_wasm_start failed (rc -1)", which tells a player
+  // nothing. So, before the wasm boots:
+  //   - a throwaway canvas is asked for "webgl2" (with the attributes the
+  //     gles3 bridge asks for), then "webgl", so the message can say whether
+  //     WebGL is off entirely or only WebGL 2 is missing;
+  //   - with no WebGL 2, the loader's script tag (the build's app marker,
+  //     which must come after this script) is switched to text/plain as the
+  //     parser inserts it, before it runs, so the wasm is never fetched
+  //     (a MutationObserver: the parser delivers mutation records before it
+  //     runs a script; "beforescriptexecute" for Firefox before 109);
+  //   - a message in the page says what to do (#sub-webgl, data-webgl "none"
+  //     or "webgl1"; body.sub-nowebgl).
+  // And late: a start that fails for want of a WebGL 2 context (the game's
+  // "no WebGL2 context" line) shows the message (data-webgl "late") in
+  // place of the loader's "Failed to start: ...". If the loader ran anyway
+  // without WebGL 2, its "Failed to start" is cleared the same way.
+  //
+  // cfg.webglCheck (default true) turns it on; cfg.webglText overrides any
+  // of the strings below (title, none, webgl1, late, advice, test). The
+  // panel's style goes first in <head>, so a page's own CSS for #sub-webgl
+  // wins. Returns "webgl2", "webgl1", "none", or "off" (the check turned off).
+  function webglGuard(cfg) {
+    if (cfg.webglCheck === false) return "off";
+    var LOADER = /(^|\/)sigil-web-app\.js(\?|#|$)/;
+    var text = Object.assign({
+      title: "This game needs WebGL 2, and your browser isn't providing it.",
+      none: "WebGL is turned off in this browser, or it can't reach your graphics card. Usually that means graphics acceleration is off.",
+      webgl1: "Your browser has WebGL, but not WebGL 2. Usually that means graphics acceleration is off, or the browser is too old for it " +
+              "(on an iPhone, iPad or Mac, updating the system updates Safari; in Firefox, check that webgl.enable-webgl2 is true in about:config).",
+      late: "Your browser has WebGL 2, but it couldn't give the game a WebGL 2 context. Closing other tabs that use graphics, or restarting the browser, usually fixes it.",
+      advice: "Turn on \"Use graphics acceleration when available\" (Chrome, Edge) or check that WebGL is enabled (Firefox: about:config, webgl.disabled set to false), then restart the browser. " +
+              "If you launched the browser in a special way (a remote desktop, a sandbox, a VM), try opening it normally. Or try another browser.",
+      test: "Check what your browser supports at get.webgl.org/webgl2."
+    }, cfg.webglText || {});
+    var TEST_URL = "https://get.webgl.org/webgl2/";
+
+    function probe(kind) {
+      try {
+        var gl = document.createElement("canvas").getContext(kind, { alpha: false, antialias: false, depth: false, stencil: false });
+        if (!gl) return false;
+        var lose = gl.getExtension("WEBGL_lose_context");   // give the context back now
+        if (lose) lose.loseContext();
+        return true;
+      } catch (err) { return false; }
+    }
+    function loaderMount() {                                // the loader shows its errors here
+      var all = document.querySelectorAll("script[src]"), s = null;
+      for (var i = 0; i < all.length; i++) if (LOADER.test(all[i].getAttribute("src"))) s = all[i];
+      return document.getElementById((s && s.getAttribute("data-mount")) || "app");
+    }
+    function clearFailed() {
+      var m = loaderMount();
+      if (m && /^Failed to start/.test(m.textContent)) m.textContent = "";
+    }
+    function show(level) {
+      if (level === "late") clearFailed();
+      if (document.getElementById("sub-webgl")) return;
+      if (!document.body) { document.addEventListener("DOMContentLoaded", function () { show(level); }); return; }
+      var css = document.createElement("style");
+      css.textContent =
+        "#sub-webgl{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);-webkit-transform:translate(-50%,-50%);z-index:20;" +
+        "box-sizing:border-box;width:92%;max-width:40em;max-height:92%;overflow:auto;padding:20px 22px;background:#000;" +
+        "border:1px solid rgba(170,170,187,.4);border-radius:6px;color:#aab;font:14px/1.5 ui-monospace,monospace;text-align:left}" +
+        "#sub-webgl h1{margin:0 0 12px;font:bold 16px/1.4 ui-monospace,monospace;color:#dde}" +
+        "#sub-webgl p{margin:0 0 10px}" +
+        "#sub-webgl a{color:#9cf}";
+      document.head.insertBefore(css, document.head.firstChild);
+      var box = document.createElement("div");
+      box.id = "sub-webgl";
+      box.setAttribute("role", "alert");
+      box.setAttribute("data-webgl", level);
+      var h = document.createElement("h1"); h.textContent = text.title; box.appendChild(h);
+      [text[level] || text.none, text.advice].forEach(function (t) {
+        var p = document.createElement("p"); p.textContent = t; box.appendChild(p);
+      });
+      var p = document.createElement("p"), host = "get.webgl.org/webgl2", at = text.test.indexOf(host);
+      var a = document.createElement("a"); a.href = TEST_URL; a.target = "_blank"; a.rel = "noopener";
+      if (at >= 0) {                                         // the link on the address, where the text names it
+        p.appendChild(document.createTextNode(text.test.slice(0, at)));
+        a.textContent = host; p.appendChild(a);
+        p.appendChild(document.createTextNode(text.test.slice(at + host.length)));
+      } else { p.appendChild(document.createTextNode(text.test + " ")); a.textContent = TEST_URL; p.appendChild(a); }
+      box.appendChild(p);
+      document.body.className += " sub-nowebgl";
+      document.body.appendChild(box);
+      console.log("substratic: webgl " + level + ": the message is up");
+    }
+
+    var level = probe("webgl2") ? "webgl2" : probe("webgl") ? "webgl1" : "none";
+    // both paths: a boot error after a "no WebGL2 context" line (or with no
+    // WebGL 2 at all) is the message's, not the loader's
+    var seen = false, watching = true;
+    ["log", "warn", "error"].forEach(function (k) {
+      var was = console[k];
+      console[k] = function () {
+        if (watching && !seen) {
+          try {
+            var line = "";
+            for (var i = 0; i < arguments.length; i++) line += " " + String(arguments[i]);
+            if (/no WebGL2 context/.test(line)) { seen = true; Promise.resolve().then(function () { show(level === "webgl2" ? "late" : level); }); }
+          } catch (err) { /* an argument with no string form */ }
+        }
+        return was.apply(console, arguments);
+      };
+    });
+    document.addEventListener("sigil-web-app-ready", function () { watching = false; });
+    document.addEventListener("sigil-web-app-error", function () {
+      // (still watching: a line flushed after the error still clears it)
+      if (seen || level !== "webgl2") { clearFailed(); show(level === "webgl2" ? "late" : level); }
+    });
+    if (level === "webgl2") return level;
+
+    // no WebGL 2: the loader must not run
+    var off = function (node) {
+      if (node.nodeName === "SCRIPT" && LOADER.test(node.getAttribute("src") || "")) {
+        node.type = "text/plain";
+        node.setAttribute("data-substratic-off", "no-webgl2");
+        return true;
+      }
+      return false;
+    };
+    var mo = new MutationObserver(function (records) {
+      records.forEach(function (r) { Array.prototype.forEach.call(r.addedNodes, off); });
+    });
+    mo.observe(document.documentElement, { childList: true, subtree: true });
+    document.addEventListener("beforescriptexecute", function (e) { if (off(e.target)) e.preventDefault(); });
+    document.addEventListener("DOMContentLoaded", function () { mo.disconnect(); });
+    console.log("substratic: webgl " + level + ": " + (window.SigilWebApp
+      ? "the loader already ran (this script must come before it)" : "the game is not started"));
+    show(level);
+    return level;
+  }
+    window.PhantomWebGL = webglGuard({ webglCheck: true });
+  })();
+  </script>
+  <script>
+  // Phantom Burn's page. The generic loader (sigil-web-app.js) boots the
+  // wasm, forwards keydown/keyup and runs the frame loop. This page adds:
+  //   the query, sent to the game as ("params", QUERY) before anything loads:
+  //     ?floor=NAME   a compiled floor under assets/floors/NAME/ (default 14),
+  //                   or stand-in (G0's Blender export, assets/stand-in/)
+  //     ?view=K       start at the floor's view K (0 arrival, 1 overlook, 2 office;
+  //                   the dark rooms: 3 lobby-dark, 4 office-night, 5 corridor-dark)
+  //     ?night=N      the dark rooms' ambient floor (1 default; , . on the keyboard)
+  //     ?lift=0       no black-level lift (G on the keyboard)
+  //     ?on=all|none|c1,c3   the switchable circuits after the view's own
+  //     ?pools=G      the always-lit circuits' gain (2 default; ; ' on the keyboard)
+  //     ?shot=K       hold the camera at view K (floor shots)
+  //     ?dev          the developer's view: the HUD (stats, the style lab's
+  //                   state) and the LAB panel; without it, neither (keys stay live)
+  //     ?hud=0|1|2    the readout: off, stats, stats and keys (overrides ?dev)
+  //     ?dither=off   ?spread=S  ?bayer=4|8  ?palette=embers|ramped  ?fog=M
+  //     ?snap=1 ?affine=1   PS1-style vertex snapping and affine textures (off by default)
+  //     ?trace        a console stats line every 120 frames, each also sent to the
+  //                   host (report?LINE, the host's log), so the phone's numbers
+  //                   need no transcribing; ?auto walks by itself
+  //     ?title=1      the title screen, in the root-console room (floor
+  //                   root-room unless ?floor= names another; its floor.sexp
+  //                   only, no collision; ("nofloor", "") when it fails)
+  //     ?play=0       no game, only the walk (P1's game is the default: the guard,
+  //                   the badge and the exit; the floor's
+  //                   play.sexp, sent as ("playinfo", TEXT) before the collision)
+  //     ?card         the test card (a sweep of the colour cube) through the post pass
+  //     ?touch        show the phone controls without a touch screen
+  //   the collision (assets/NAME/floor14.collide.b64) as ("collide", BASE64);
+  //   the mouse: a click locks the pointer, movement is ("look", "dx,dy");
+  //   touch: a thumb landing on the left half is a move stick, on the right
+  //     half a look stick, each ("move"|"lookstick", "x,y") in -1..1; the C
+  //     button is ("press", "c"); the LAB button (top left) opens the style
+  //     lab's keys as buttons, each ("press", KEY), for the phone.
+  //   S1's sound: the tunes it renders (assets/tunes/NAME.cts, the game's
+  //     SOUND-TUNES) as ("tune", "NAME\nTEXT"); every user gesture as
+  //     ("gesture", TYPE), since a browser starts audio only inside one; the
+  //     AudioContext at 44100 Hz (the game renders its one-shots at that rate;
+  //     the music renders at 28 kHz, ?rate=24|28|32, and the sink upsamples it). ?mute=1: no sound.
+  //   window.phantomDispatch("replay", SCRIPT): gate 5's driver hands the game
+  //     a replay script ((phantom floor replay)'s text form); the game prints
+  //     "phantom-burn: replay LINE" per tick, then "phantom-burn: replay-done N".
+  (function () {
+    "use strict";
+    var params = new URLSearchParams(location.search);
+    // S1's sound renders at 44100 Hz: the bridge opens `new AudioContext()`
+    // with no options, so the page supplies the rate (the browser resamples
+    // to the device)
+    var SOUND_RATE = 44100;
+    (function () {
+      var Base = window.AudioContext || window.webkitAudioContext;
+      if (!Base || params.has("mute")) return;
+      var Wrapped = function (opts) { return new Base(Object.assign({ sampleRate: SOUND_RATE }, opts || {})); };
+      Wrapped.prototype = Base.prototype;
+      window.AudioContext = Wrapped;
+      if (window.webkitAudioContext) window.webkitAudioContext = Wrapped;
+    })();
+    // The flow's floor (PRACTICE, D38): the title's menu offers PRACTICE (floor
+    // sim) and INFILTRATE (floor 14). One floor loads behind the title: sim
+    // for a first-timer, 14 once practice has been finished on this browser
+    // (localStorage phantomburn.practiced); picking the other reloads with
+    // ?go=FLOOR, which goes straight to it.
+    var flowQuery = params.get("play") !== "0" && !params.has("title") &&
+      !["play", "title", "floor", "view", "shot", "card", "hud", "trace", "auto"].some(function (k) { return params.has(k); });
+    var practiced = (function () { try { return params.has("practiced") || localStorage.getItem("phantomburn.practiced") === "1"; } catch (e) { return params.has("practiced"); } })();
+    // the loaded floor's best (Phantom 0.1): "SECS_INCIDENTS", or ""
+    var bestOf = function (f) { try { return (localStorage.getItem("phantomburn.best." + f) || "").replace(/[^0-9_]/g, ""); } catch (e) { return ""; } };
+    var go = (params.get("go") || "").replace(/[^A-Za-z0-9_-]/g, "");
+    var floor = (params.get("floor") || go || (params.has("title") ? "root-room" : (flowQuery && !practiced ? "sim" : "14")))
+      .replace(/[^A-Za-z0-9_-]/g, "");
+    var dir = floor === "stand-in" ? "assets/stand-in/" : "assets/floors/" + floor + "/";
+    var collideFile = floor === "stand-in" ? "floor14.collide.b64" : "collide.b64";
+    function withApp(fn) {
+      if (globalThis.SigilWebApp) { fn(globalThis.SigilWebApp); return; }
+      document.addEventListener("sigil-web-app-ready", function (e) { fn(e.detail); }, { once: true });
+    }
+    if (params.has("touch")) document.body.classList.add("touch");
+    // ?dev: the lab panel and the HUD (the game reads ?dev for its HUD);
+    // without it, a player's view: sticks and crouch only
+    if (params.has("dev")) document.body.classList.add("dev");
+    // the game says so when a load fails (a fetch never lands): show it
+    (function () {
+      var log0 = console.log.bind(console);
+      console.log = function () {
+        var line = Array.prototype.join.call(arguments, " ");
+        if (line.indexOf("phantom-burn: load failed") === 0) {
+          var st = document.getElementById("status");
+          if (st) st.textContent = line.replace("phantom-burn: ", "");
+        }
+        log0.apply(null, arguments);
+      };
+    })();
+    // P1's game (the guard, the badge, the exit) is the default (?play=0 for
+    // the walk alone; never on the title screen).
+    var playing = params.get("play") !== "0" && !params.has("title");
+    if (playing) document.body.classList.add("playing");
+    // The flow (the site's front door): the title in the root-console room,
+    // any key, click or tap to play, the title again after a win. Only for
+    // a query with none of the developer's doors, so ?play=1 skips the
+    // title and the gates' own queries (floor=, hud=, title=1, ...) load
+    // exactly what they did.
+    var flow = playing && flowQuery;
+    if (flow) document.body.classList.add("flow");
+    // (Phantom 0.1, David: no HTML instructions over the game. PRACTICE
+    // teaches the controls, Crash's transmission gives floor 14's aim, and
+    // the pause panel in the canvas lists the controls.)
+
+    // Fullscreen: Substratic's button (substratic.js 8630cc5, its fullscreen
+    // section as is; Harkfell has the same one), and the pause panel's
+    // FULLSCREEN row through phantomFullscreen(). Entering it in play takes
+    // the pointer again (browsers drop it on the change) and, on a phone,
+    // asks for landscape where the browser allows it.
+    var FS_ENTER = "M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5";
+    var FS_EXIT = "M9 4v5H4M20 9h-5V4M15 20v-5h5M4 15h5v5";
+    function fsIcon(d) {
+      var ns = "http://www.w3.org/2000/svg";
+      var svg = document.createElementNS(ns, "svg");
+      svg.setAttribute("viewBox", "0 0 24 24"); svg.setAttribute("width", "20"); svg.setAttribute("height", "20");
+      svg.setAttribute("aria-hidden", "true");
+      var p = document.createElementNS(ns, "path");
+      p.setAttribute("d", d); p.setAttribute("fill", "none"); p.setAttribute("stroke", "currentColor");
+      p.setAttribute("stroke-width", "2"); p.setAttribute("stroke-linecap", "square");
+      svg.appendChild(p);
+      return svg;
+    }
+    function inPlay() { return document.body.classList.contains("playing") && !document.body.classList.contains("ontitle"); }
+    function phantomLock() {
+      var c = document.getElementById("stage");
+      if (inPlay() && c && c.requestPointerLock && document.pointerLockElement !== c && !document.body.classList.contains("touch")) {
+        try { var r = c.requestPointerLock(); if (r && r.catch) r.catch(function () {}); } catch (err) { /* no gesture: the next click locks */ }
+      }
+    }
+    function phantomFullscreen() {
+      if (!document.documentElement.requestFullscreen) return;
+      if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen().catch(function () {});
+    }
+    if (document.documentElement.requestFullscreen) {
+      var fs = document.createElement("button");
+      fs.id = "sub-fs";
+      var fsShow = function () {
+        var on = !!document.fullscreenElement;
+        fs.replaceChildren(fsIcon(on ? FS_EXIT : FS_ENTER));
+        fs.title = on ? "Leave fullscreen" : "Fullscreen";
+        fs.setAttribute("aria-label", fs.title);
+      };
+      fsShow();
+      document.addEventListener("fullscreenchange", fsShow);
+      fs.addEventListener("click", phantomFullscreen);
+      document.body.appendChild(fs);
+      document.addEventListener("fullscreenchange", function () {
+        if (!document.fullscreenElement) return;
+        phantomLock();
+        if (screen.orientation && screen.orientation.lock && document.body.classList.contains("touch")) screen.orientation.lock("landscape").catch(function () {});
+      });
+    }
+
+    // the game says which part of the flow it is in
+    (function () {
+      var log1 = console.log.bind(console);
+      console.log = function () {
+        var line = Array.prototype.join.call(arguments, " ");
+        if (line === "phantom-burn: mode title") document.body.classList.add("ontitle");
+        // the pause panel: taps go to its rows while it is up
+        if (line === "phantom-burn: paused") document.body.classList.add("paused");
+        if (line === "phantom-burn: resumed") document.body.classList.remove("paused");
+        // the game's RESUME takes the pointer again (a desktop in play), and
+        // its FULLSCREEN row toggles fullscreen, in the input's own task
+        if (line === "phantom-burn: lock") phantomLock();
+        if (line === "phantom-burn: fullscreen") phantomFullscreen();
+        if (line === "phantom-burn: mode game") document.body.classList.remove("ontitle");
+        // the menu picked the floor that is not loaded: reload onto it
+        if (line.indexOf("phantom-burn: go ") === 0) {
+          var q = new URLSearchParams(location.search);
+          q.set("go", line.slice("phantom-burn: go ".length).replace(/[^A-Za-z0-9_-]/g, ""));
+          location.search = q.toString();
+        }
+        // practice finished: INFILTRATE is the default from now on
+        if (line === "phantom-burn: practice done") {
+          queueMicrotask(function () {
+            withApp(function (app) { app.dispatch("save-practice", ""); });
+          });
+        }
+        // a floor finished (Phantom 0.1): remember it, the best time and the
+        // fewest incidents (localStorage phantomburn.best.FLOOR = "SECS_INCIDENTS")
+        if (line.indexOf("phantom-burn: floor-done ") === 0) {
+          var fd = line.slice("phantom-burn: floor-done ".length).split(" ");
+          var savedFloor = (fd[0] || "").replace(/[^A-Za-z0-9_-]/g, "");
+          var savedSeconds = parseInt(fd[1], 10), savedIncidents = parseInt(fd[2], 10);
+          if (!isNaN(savedSeconds) && !isNaN(savedIncidents)) {
+            // Dispatch after the current WASM callback returns. Read inside
+            // the queued task so successive records see preceding writes.
+            queueMicrotask(function () {
+              try {
+                var previous = localStorage.getItem("phantomburn.best." + savedFloor);
+                var packet = JSON.stringify([savedFloor, savedSeconds, savedIncidents, previous]);
+                withApp(function (app) { app.dispatch("save-best", packet); });
+              } catch (e) { /* unavailable read: do not overwrite an existing score */ }
+            });
+          }
+        }
+        log1.apply(null, arguments);
+      };
+    })();
+    if (params.has("trace")) {
+      // on screen too (a phone has no console; David, 2026-09-26): a small
+      // overlay, top left, with the music's section and cost, the sound's
+      // readiness and the frame time, from the same lines the host gets
+      var overlay = document.createElement("pre");
+      overlay.id = "trace";
+      overlay.style.cssText = "position:fixed;left:6px;top:6px;z-index:50;margin:0;padding:6px 8px;" +
+        "font:11px/1.35 ui-monospace,monospace;color:#cfe;background:rgba(0,0,0,0.6);" +
+        "pointer-events:none;white-space:pre;border-radius:4px";
+      overlay.textContent = "trace: waiting for the game";
+      document.body.appendChild(overlay);
+      var shown = { music: "", ready: "", frame: "" };
+      function field(line, key) { var m = line.match(new RegExp(" " + key + " (\\S+)")); return m ? m[1] : null; }
+      function redraw() { overlay.textContent = [shown.music, shown.ready, shown.frame].filter(Boolean).join("\n"); }
+      var log = console.log.bind(console);
+      console.log = function () {
+        var line = Array.prototype.join.call(arguments, " ");
+        if (/^phantom-burn: (stats|pixel|ready|sound)/.test(line)) {
+          fetch("report?" + encodeURIComponent(line + " | " + navigator.userAgent)).catch(function () {});
+          if (/^phantom-burn: sound bank-ready (yes|no) /.test(line)) {
+            // "music MS ... frames N": MS of synthesis over N frames of audio at 44100
+            var ms = Number(field(line, "music")), n = Number(field(line, "frames"));
+            var perS = n > 0 ? ms / (n / 44100) : 0;
+            shown.music = "music " + (params.get("rate") || "28") + "k " + (field(line, "section") || "?") +
+              " x" + (field(line, "lift") || "1") + " · " + perS.toFixed(0) + " ms/s = " +
+              (perS / 60).toFixed(2) + " ms a frame · music " + ms + " frames " + n;
+          } else if (/^phantom-burn: sound (robot-ready|events-ready|bank-ready) [0-9.]+$/.test(line)) {
+            shown.ready = (shown.ready ? shown.ready + " · " : "") + line.replace("phantom-burn: sound ", "") + " s";
+          } else if (/^phantom-burn: stats /.test(line)) {
+            shown.frame = "frame " + field(line, "frame-ms") + " ms · cpu " + field(line, "cpu-ms") + " ms";
+          }
+          redraw();
+        }
+        log.apply(null, arguments);
+      };
+    }
+    withApp(function (app) {
+      var canvas = document.getElementById("stage");
+      var status = document.getElementById("status");
+      if (app.ready && app.ready.then) app.ready.then(function () { status.textContent = ""; });
+      var booted = app.ready && app.ready.then ? app.ready : Promise.resolve();
+      booted.then(function () {
+        var best = bestOf(floor);
+        app.dispatch("params", location.search.replace(/^\?/, "") + (flow ? "&flow=1" : "") + (practiced ? "&practiced=1" : "") + (best && !params.has("best") ? "&best=" + best : ""));
+        app.dispatch("floor", floor);
+        app.dispatch("dpr", String(window.devicePixelRatio || 1));
+        window.addEventListener("resize", function () { app.dispatch("dpr", String(window.devicePixelRatio || 1)); });
+        // S1's sound: its tunes (the music, the events, the camera's, robot speak), and the gestures
+        if (!params.has("mute")) {
+          // the music: INFILTRATE's False Identity, PRACTICE's Heat Trace (Codex's scores)
+          ["music-false-identity", "music-heat-trace"].concat(
+          ["door-open", "door-close", "panel-on", "panel-off", "reader-ok", "reader-deny", "badge", "caught", "note",
+           "camera-pip", "camera-alert",
+           // P3's devices, and PRACTICE's Crash-line blip (Phantom 0.1)
+           "deck-hold", "deck-confirm", "deck-deny", "print-done", "blinds-open", "blinds-close",
+           "terminal-open", "terminal-close", "crash",
+           // the devices' loops: one 3 s cycle each, replayed while a device sounds
+           "device-phone-ring", "device-printer", "device-vent",
+           // Phantom 0.1: the drawer, a terminal login, the service lift, the fridge's hum
+           "drawer-open", "login", "lift-call", "device-fridge", "device-vacuum"]
+            // robot speak (EDGE): three variants of each mood
+            .concat(["bored", "suspicious", "searching", "there", "lost", "settle"].reduce(function (acc, m) {
+              return acc.concat(["speak-" + m + "-1", "speak-" + m + "-2", "speak-" + m + "-3"]);
+            }, []))
+            .map(function (k) { return "event-" + k; }))
+            // PRACTICE's bed, the sim's air in place of the building's hum
+            .concat(["bed-sim"])
+            .forEach(function (name) {
+              // David swaps the blip and the sim's bed by ear: ?blip=a|b|c, ?bed=a|b (defaults C and A, his picks)
+              // (David, 2026-09-28: blip C, the trill; bed A, the soft tone with a fan)
+              var blip = ({a: 1, b: 1, c: 1})[params.get("blip")] ? params.get("blip") : "c";   // David's pick: C, the trill
+              var bed = ({a: 1, b: 1})[params.get("bed")] ? params.get("bed") : "a";
+              var file = name === "event-crash" ? "crash-blip-" + blip : name === "bed-sim" ? "bed-sim-" + bed : name;
+              fetch("assets/tunes/" + file + ".cts").then(function (r) {
+                if (!r.ok) throw new Error(String(r.status));
+                return r.text();
+              }).then(function (t) { app.dispatch("tune", name + "\n" + t); },
+                      function (e) { console.log("phantom-burn: sound: no " + name + " (" + e.message + ")"); });
+            });
+          ["pointerup", "touchend", "click", "keydown"].forEach(function (n) {
+            document.addEventListener(n, function () { app.dispatch("gesture", n); }, true);
+          });
+        }
+        function text(f) {
+          return fetch(dir + f).then(function (r) {
+            if (!r.ok) throw new Error("no floor " + floor + " (" + f + ": " + r.status + ")");
+            return r.text();
+          });
+        }
+        if (params.has("title")) {   // the title's room: its floor.sexp, no collision
+          return text("floor.sexp").then(function (t) { app.dispatch("floorinfo", t); },
+                                         function () { app.dispatch("nofloor", ""); });
+        }
+        if (flow) {   // the title's room first, beside the floor
+          fetch("assets/floors/root-room/floor.sexp").then(function (r) {
+            if (!r.ok) throw new Error(String(r.status));
+            return r.text();
+          }).then(function (t) { app.dispatch("titleinfo", t); },
+                  function () { app.dispatch("notitle", ""); });
+        }
+        var info = floor === "stand-in" ? Promise.resolve(null) : text("floor.sexp");
+        return info.then(function (t) {
+          if (t !== null) app.dispatch("floorinfo", t);
+          // optional: a floor without play data still loads, as the walk
+          return playing && floor !== "stand-in"
+            ? text("play.sexp").catch(function (e) { console.log("phantom-burn: no play data: " + e.message); return null; })
+            : null;
+        }).then(function (t) {
+          if (t !== null) app.dispatch("playinfo", t);
+          return text(collideFile);
+        }).then(function (t) { app.dispatch("collide", t); });
+      }).catch(function (e) { status.textContent = String(e.message || e); });
+
+      // a click or a tap on the title starts (a key does too, in the game)
+      // on the title: where the tap or click landed, in canvas pixels (the
+      // menu's items are targets); in the game it is the pointer lock's click
+      canvas.addEventListener("pointerdown", function (e) {
+        if (!flow || !(document.body.classList.contains("ontitle") || document.body.classList.contains("paused"))) return;
+        var r = canvas.getBoundingClientRect();
+        app.dispatch("tap", Math.round((e.clientX - r.left) * canvas.width / r.width) + "," + Math.round((e.clientY - r.top) * canvas.height / r.height));
+      });
+      canvas.addEventListener("click", function () {
+        // (paused, a click is for the panel's rows: RESUME takes the pointer)
+        if (document.body.classList.contains("paused")) return;
+        if (document.pointerLockElement !== canvas && canvas.requestPointerLock) canvas.requestPointerLock();
+      });
+      // the pointer let go in play (Escape, or leaving fullscreen with
+      // Escape: one change, so one pause): the pause panel. The game ignores
+      // a pause while paused.
+      var hadLock = false;
+      document.addEventListener("pointerlockchange", function () {
+        var locked = document.pointerLockElement === canvas;
+        if (hadLock && !locked && inPlay()) app.dispatch("pause", "lock");
+        hadLock = locked;
+      });
+      document.addEventListener("mousemove", function (e) {
+        if (document.pointerLockElement === canvas && (e.movementX || e.movementY)) {
+          app.dispatch("look", e.movementX + "," + e.movementY);
+        }
+      });
+
+      var R = 60;
+      function stickEl(side) {
+        return { ring: document.getElementById(side + "ring"), knob: document.getElementById(side + "knob") };
+      }
+      var sticks = { l: null, r: null }, els = { l: stickEl("l"), r: stickEl("r") };
+      var events = { l: "move", r: "lookstick" };
+      function show(side, s) {
+        var e = els[side];
+        e.ring.style.display = e.knob.style.display = s ? "block" : "none";
+        if (!s) return;
+        e.ring.style.left = s.x + "px"; e.ring.style.top = s.y + "px";
+        e.knob.style.left = (s.x + s.dx * R) + "px"; e.knob.style.top = (s.y + s.dy * R) + "px";
+      }
+      function send(side) {
+        var s = sticks[side];
+        app.dispatch(events[side], s ? s.dx.toFixed(3) + "," + s.dy.toFixed(3) : "0,0");
+      }
+      canvas.addEventListener("touchstart", function (e) {
+        if (!document.body.classList.contains("touch")) app.dispatch("touch", "1");   // the pause panel's controls
+        document.body.classList.add("touch");
+        for (var i = 0; i < e.changedTouches.length; i++) {
+          var t = e.changedTouches[i];
+          var side = t.clientX < window.innerWidth / 2 ? "l" : "r";
+          if (!sticks[side]) { sticks[side] = { id: t.identifier, x: t.clientX, y: t.clientY, dx: 0, dy: 0 }; show(side, sticks[side]); }
+        }
+        e.preventDefault();
+      }, { passive: false });
+      canvas.addEventListener("touchmove", function (e) {
+        for (var i = 0; i < e.changedTouches.length; i++) {
+          var t = e.changedTouches[i];
+          ["l", "r"].forEach(function (side) {
+            var s = sticks[side];
+            if (!s || s.id !== t.identifier) return;
+            var dx = (t.clientX - s.x) / R, dy = (t.clientY - s.y) / R, m = Math.hypot(dx, dy);
+            if (m > 1) { dx /= m; dy /= m; }
+            s.dx = dx; s.dy = dy; show(side, s); send(side);
+          });
+        }
+        e.preventDefault();
+      }, { passive: false });
+      function end(e) {
+        for (var i = 0; i < e.changedTouches.length; i++) {
+          var t = e.changedTouches[i];
+          ["l", "r"].forEach(function (side) {
+            if (sticks[side] && sticks[side].id === t.identifier) { sticks[side] = null; show(side, null); send(side); }
+          });
+        }
+      }
+      canvas.addEventListener("touchend", end);
+      canvas.addEventListener("touchcancel", end);
+      // the lab panel: every button sends its key; the HUD shows the state
+      var lab = document.getElementById("lab");
+      function labTap(e) {
+        var b = e.target.closest ? e.target.closest("button") : null;
+        if (!b) return;
+        e.preventDefault();
+        if (b.id === "labbtn") { lab.classList.toggle("open"); return; }
+        var k = b.getAttribute("data-k");
+        if (k) { app.dispatch("press", k); b.classList.add("down"); setTimeout(function () { b.classList.remove("down"); }, 120); }
+      }
+      var lastTouch = 0;
+      lab.addEventListener("touchstart", function (e) { lastTouch = Date.now(); labTap(e); }, { passive: false });
+      lab.addEventListener("click", function (e) { if (Date.now() - lastTouch > 800) labTap(e); });
+      // gate 5 (determinism): a driver hands the game a replay script. An
+      // explicit allowlist: only these event types can be sent this way.
+      var DRIVER_EVENTS = ["replay"];
+      window.phantomDispatch = function (type, payload) {
+        if (DRIVER_EVENTS.indexOf(type) < 0) throw new Error("phantomDispatch: " + type + " is not a driver event");
+        app.dispatch(type, String(payload));
+      };
+      var crouch = document.getElementById("crouch");
+      crouch.addEventListener("touchstart", function (e) {
+        crouch.classList.add("down"); app.dispatch("press", "c"); e.preventDefault();
+      }, { passive: false });
+      crouch.addEventListener("touchend", function () { crouch.classList.remove("down"); });
+      // the light switches: each sends its key, as the lab's buttons do
+      var lights = document.getElementById("lights");
+      lights.addEventListener("touchstart", function (e) {
+        var b = e.target.closest ? e.target.closest("button") : null;
+        e.preventDefault();
+        if (!b) return;
+        // DECK (P3) is held: down while the thumb is on it
+        if (b.getAttribute("data-hold")) { app.dispatch("keydown", b.getAttribute("data-k")); b.classList.add("down"); return; }
+        app.dispatch("press", b.getAttribute("data-k"));
+        b.classList.add("down"); setTimeout(function () { b.classList.remove("down"); }, 150);
+      }, { passive: false });
+      ["touchend", "touchcancel"].forEach(function (n) {
+        lights.addEventListener(n, function (e) {
+          var b = e.target.closest ? e.target.closest("button") : null;
+          if (b && b.getAttribute("data-hold")) { app.dispatch("keyup", b.getAttribute("data-k")); b.classList.remove("down"); }
+        });
+      });
+      // the deck (P3) on a desktop: hold the right mouse button (no context
+      // menu over the game); T holds it too, from the keyboard
+      canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+      document.addEventListener("mousedown", function (e) {
+        if (e.button === 2 && (e.target === canvas || document.pointerLockElement === canvas)) app.dispatch("keydown", "deck");
+      });
+      document.addEventListener("mouseup", function (e) { if (e.button === 2) app.dispatch("keyup", "deck"); });
+    });
+  })();
+  </script>
+  <!--sigil:app-->
+</body>
+</html>
