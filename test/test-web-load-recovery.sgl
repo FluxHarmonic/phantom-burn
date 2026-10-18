@@ -1,0 +1,95 @@
+;;; Execute the real shell's load paths with fault-injected bridge/game I/O.
+;;; No graphics context is needed: the failures happen before drawing a floor.
+(import (sigil test) (sigil list) (sigil io) (sigil fs))
+
+(load "src/phantom/app/flow.sgl")
+(import (phantom app flow))
+
+(define (web-load-definitions)
+  (let* ((port (open-input-string (read-file-string "src/phantom/shell/web.sgl")))
+         (library (read port))
+         (body (cdr (find (lambda (form) (eq? (car form) 'begin)) (cddr library))))
+         (required '(*app* *floor* *load-generation* *asset-cache* *started*
+                     *params-seen* *waited* *said-stuck* *mode* *collide* *info*
+                     fetch-asset start! web-tick*))
+         (names (append required '(discard-unready-assets! fail-load!)))
+         (definitions
+           (filter
+             (lambda (form)
+               (and (pair? form) (eq? (car form) 'define)
+                    (memq (if (pair? (cadr form)) (caadr form) (cadr form)) names)))
+             body)))
+    (assert-equal '(phantom shell web) (cadr library))
+    (for-each
+      (lambda (name)
+        (assert-true
+          (and (memq name
+                 (map (lambda (form)
+                        (if (pair? (cadr form)) (caadr form) (cadr form)))
+                      definitions))
+               #t)))
+      required)
+    definitions))
+
+(define (make-load-fixture)
+  (let ((callbacks
+          '((define fixture-fetches 0)
+            (define fixture-ready '())
+            (define fixture-titles 0)
+            (define (gles3-fetch-image url)
+              (set! fixture-fetches (+ fixture-fetches 1))
+              fixture-fetches)
+            (define (gles3-image-ready? handle) (and (memv handle fixture-ready) #t))
+            (define (load-mesh* . arguments) #f)
+            (define (load-texture* . arguments) #f)
+            (define (base64->bytevector value) value)
+            (define (pbc1->collision value) value)
+            (define (game-init! . arguments) (error "injected floor initialization failure"))
+            (define (flow-title-start!)
+              (set! fixture-titles (+ fixture-titles 1))
+              (set! *mode* 'title))
+            (define (prefetch-game!) #f)
+            (define (gles3-resize-to-display) #f)
+            (define (frame-dt payload) 21.0)
+            (define (all-ready?) #f)
+            (define (sound-game-idle!) #f)
+            (define (missing) '("dropped texture"))
+            (define (begin-frame) #f)
+            (define (clear-screen . arguments) #f)
+            (define (end-frame) #f)))
+        (exports
+          '((set! *app* (make-app-flow #f))
+            (set! *load-generation* (cadr (app-flow-load! *app* *floor*)))
+            (set! *mode* 'loading)
+            (set! *params-seen* #t)
+            (vector start! fetch-asset web-tick*
+              (lambda (handle) (set! fixture-ready (cons handle fixture-ready)))
+              (lambda () (list (app-flow-phase *app*) *mode* fixture-titles))
+              (lambda () fixture-fetches)))))
+    (eval (list 'let '()
+            (cons 'begin (append callbacks (web-load-definitions) exports))))))
+
+(test-group "Actual web shell load recovery"
+  (test "a floor initialization exception returns to a usable failed title"
+    (let* ((fixture (make-load-fixture))
+           (escaped
+             (guard (exception (#t (error-object-message exception)))
+               ((vector-ref fixture 0))
+               #f)))
+      (assert-equal #f escaped)
+      (assert-equal '(failed title 1) ((vector-ref fixture 4)))))
+  (test "a timed-out handle is retried while completed assets stay cached"
+    (let* ((fixture (make-load-fixture))
+           (fetch (vector-ref fixture 1))
+           (dropped (fetch "assets/floors/14/tex-wall.png"))
+           (complete (fetch "assets/guard/skin.sgm")))
+      ((vector-ref fixture 3) complete)
+      ;; The actual loading frame crosses its timeout with one failed bridge
+      ;; handle. Retrying the URL must create another request, without reload.
+      ((vector-ref fixture 2) "21000")
+      (assert-equal '(failed title 1) ((vector-ref fixture 4)))
+      (assert-false (= dropped (fetch "assets/floors/14/tex-wall.png")))
+      (assert-equal complete (fetch "assets/guard/skin.sgm"))
+      (assert-equal 3 ((vector-ref fixture 5))))))
+
+(run-tests)

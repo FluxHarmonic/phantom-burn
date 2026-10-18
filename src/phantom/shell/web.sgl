@@ -78,6 +78,11 @@
             (let ((handle (gles3-fetch-image asset-url)))
               (set! *asset-cache* (cons (cons asset-url handle) *asset-cache*))
               handle))))
+    (define (discard-unready-assets!)
+      ;; A failed bridge request never becomes ready. Keep completed assets,
+      ;; but let the next floor load make fresh requests for missing ones.
+      (set! *asset-cache*
+        (filter (lambda (entry) (gles3-image-ready? (cdr entry))) *asset-cache*)))
     (define *collide* #f)        ; the base64 text, once the page sends it
     (define *play-text* #f)      ; the floor's play.sexp, sent before the collision
     (define *replay-text* #f)    ; a gate-5 script that came before the game started
@@ -210,50 +215,55 @@
         (when (param "on") (game-set-on! (param "on")))))
 
     (define (start!)
-      ;; one attempt: a failure is reported once, not retried per frame
-      (set! *started* 'failed)
-      (game-init! load-mesh* load-texture* (pbc1->collision (base64->bytevector *collide*)) *info*)
-      (skin-setup!)
-      (set! *collide* #f)
-      (apply-params!)
-      (when (and *play-text* *info*)
-        (play-mode-start! (game-collision) *info* *play-text* (not (param "view")))
-        (set! *play-text* #f)
-        (game-set-play! (vector play-hold? play-after-tick! play-frame! play-hud! play-press! play-held!))
-        (play-mode-set-dev! (and (param "dev") #t))
-        (play-mode-set-on-win!
-          (and *app* (lambda () (app-flow-request-title! *app*))))
-        ;; the pause panel's rows (Phantom 0.1): RESUME takes the pointer again,
-        ;; FULLSCREEN is the page's, and in the flow QUIT TO TITLE
-        (play-mode-set-on-resume! (lambda () (display "phantom-burn: lock") (newline)))
-        (play-mode-set-on-fullscreen! (lambda () (display "phantom-burn: fullscreen") (newline)))
-        (play-mode-set-on-quit!
-          (and *app* (lambda () (app-flow-request-title! *app*))) "QUIT TO TITLE")
-        ;; Crash suggests the sim to a player who has not finished PRACTICE
-        (play-mode-set-practiced!
-          (if *app* (app-flow-practiced? *app*) (and (param "practiced") #t)))
-        (when (param "touch") (play-mode-set-touch! #t))
-        ;; the floor's best (Phantom 0.1): the page's localStorage, as &best=SECS_INCIDENTS;
-        ;; a finish goes back to it as a line
-        (play-mode-set-best!
-          (best-param (or (param "best") (browser-best-text *floor*))))
-        (play-mode-set-on-record!
-         (lambda (secs incidents)
-           ;; one display: on the web each display call is its own console line,
-           ;; and the page reads the protocol a line at a time
-           (display (string-append "phantom-burn: floor-done " *floor* " "
-                                   (number->string secs) " " (number->string incidents)))
-           (newline)))
-        (unless (or (param "hud") (param "dev")) (game-set-hud! 0)))
-      (set! *started* #t)
-      (when *app*
-        (unless (app-flow-ready! *app* *load-generation* *floor*)
-          (error "floor load generation changed before start"))
-        (web-input-scene-clear! *input*)
-        (set! *tap* #f)
-        (set! *mode* 'game)
-        (display "phantom-burn: mode game") (newline))
-      (when *replay-text* (run-replay! *replay-text*) (set! *replay-text* #f)))
+      (guard (exception
+               (#t
+                (if *app*
+                    (fail-load! "FLOOR COULD NOT LOAD")
+                    (raise exception))))
+        ;; one attempt: a failure is reported once, not retried per frame
+        (set! *started* 'failed)
+        (game-init! load-mesh* load-texture* (pbc1->collision (base64->bytevector *collide*)) *info*)
+        (skin-setup!)
+        (set! *collide* #f)
+        (apply-params!)
+        (when (and *play-text* *info*)
+          (play-mode-start! (game-collision) *info* *play-text* (not (param "view")))
+          (set! *play-text* #f)
+          (game-set-play! (vector play-hold? play-after-tick! play-frame! play-hud! play-press! play-held!))
+          (play-mode-set-dev! (and (param "dev") #t))
+          (play-mode-set-on-win!
+            (and *app* (lambda () (app-flow-request-title! *app*))))
+          ;; the pause panel's rows (Phantom 0.1): RESUME takes the pointer again,
+          ;; FULLSCREEN is the page's, and in the flow QUIT TO TITLE
+          (play-mode-set-on-resume! (lambda () (display "phantom-burn: lock") (newline)))
+          (play-mode-set-on-fullscreen! (lambda () (display "phantom-burn: fullscreen") (newline)))
+          (play-mode-set-on-quit!
+            (and *app* (lambda () (app-flow-request-title! *app*))) "QUIT TO TITLE")
+          ;; Crash suggests the sim to a player who has not finished PRACTICE
+          (play-mode-set-practiced!
+            (if *app* (app-flow-practiced? *app*) (and (param "practiced") #t)))
+          (when (param "touch") (play-mode-set-touch! #t))
+          ;; the floor's best (Phantom 0.1): the page's localStorage, as &best=SECS_INCIDENTS;
+          ;; a finish goes back to it as a line
+          (play-mode-set-best!
+            (best-param (or (param "best") (browser-best-text *floor*))))
+          (play-mode-set-on-record!
+           (lambda (secs incidents)
+             ;; one display: on the web each display call is its own console line,
+             ;; and the page reads the protocol a line at a time
+             (display (string-append "phantom-burn: floor-done " *floor* " "
+                                     (number->string secs) " " (number->string incidents)))
+             (newline)))
+          (unless (or (param "hud") (param "dev")) (game-set-hud! 0)))
+        (set! *started* #t)
+        (when *app*
+          (unless (app-flow-ready! *app* *load-generation* *floor*)
+            (error "floor load generation changed before start"))
+          (web-input-scene-clear! *input*)
+          (set! *tap* #f)
+          (set! *mode* 'game)
+          (display "phantom-burn: mode game") (newline))
+        (when *replay-text* (run-replay! *replay-text*) (set! *replay-text* #f))))
 
     ;; Gate 5: step a replay script through the real walker at TICK over the
     ;; loaded floor's collision, one line per tick (the native tool prints the
@@ -380,6 +390,12 @@
       (sound-game-stop!)
       (flow-title-start!))
 
+    (define (fail-load! message)
+      (discard-unready-assets!)
+      (app-flow-failed! *app* *load-generation* *floor* message)
+      (set! *started* 'failed)
+      (flow-title-start!))
+
     ;; The coordinator selects floors. The host transports tagged text only;
     ;; replacing a floor never creates another app, canvas or navigation.
     (define (flow-load! action)
@@ -431,9 +447,7 @@
                           ((string=? kind "play") (set! *play-text* text))
                           ((string=? kind "collision") (set! *collide* text))
                           ((string=? kind "failed")
-                           (app-flow-failed! *app* generation floor "FLOOR COULD NOT LOAD")
-                           (set! *started* 'failed)
-                           (flow-title-start!)
+                           (fail-load! "FLOOR COULD NOT LOAD")
                            (display (string-append "phantom-burn: load failed " floor))
                            (newline)))))
                     (split (+ index 1) (+ index 1) heads)))
@@ -549,9 +563,7 @@
                                          (apply string-append (map (lambda (n) (string-append n " ")) (missing)))))
                  (newline)
                  (when *app*
-                   (app-flow-failed! *app* *load-generation* *floor* "FLOOR COULD NOT LOAD")
-                   (set! *started* 'failed)
-                   (flow-title-start!)))
+                   (fail-load! "FLOOR COULD NOT LOAD")))
                (begin-frame)
                (clear-screen (/ 13 255) (/ 10 255) (/ 26 255))
                (end-frame)))))
