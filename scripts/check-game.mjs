@@ -38,6 +38,7 @@ import path from "node:path";
 import zlib from "node:zlib";
 import { spawn, spawnSync } from "node:child_process";
 import { pageLegs } from "./check-site-pages.mjs";
+import { checkSeamlessFlow } from "./check-seamless-flow.mjs";
 
 const [BASE0, DIR0] = process.argv.slice(2);
 if (!BASE0 || !DIR0) { console.log("SETUP-FAILED: usage: check-game.mjs BASE DIR"); process.exit(2); }
@@ -95,6 +96,11 @@ const bad = (leg, what) => { fail++; console.log(`  FAIL ${leg}: ${what}`); };
 }
 
 // boots
+{
+  const result = await checkSeamlessFlow({url: `${BASE}/${SLUG}/`, directory: DIR, repo: REPO});
+  result.ok ? ok("seamless-flow", result.detail) : bad("seamless-flow", result.detail);
+}
+
 for (const [q, want] of [["hud=0", "game"], ["title=1", "title"]]) {
   // asynchronously: this process is also the server the browser talks to
   const r = await new Promise((resolve) => {
